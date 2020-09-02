@@ -4,7 +4,8 @@
     "description": "Discuss code easily. Streamline Code Reviews. Improve code quality. Works w/ Slack, Teams, GitHub, GitLab, Bitbucket, Jira, Trello and more.",
     "version": "8.3.6",
     "author": "CodeStream",
-    "publisher": "CodeStream",
+	"publisher": "CodeStream",
+	"enableProposedApi": true,
     "license": "UNLICENSED",
     "homepage": "https://codestream.com",
     "bugs": {
@@ -15,7 +16,7 @@
         "url": "https://github.com/TeamCodeStream/CodeStream"
     },
     "engines": {
-        "vscode": "^1.38.0"
+        "vscode": "^1.47.0"
     },
     "main": "./dist/extension",
     "icon": "assets/images/codestream.png",
@@ -36,6 +37,14 @@
     ],
     "contributes": {
         "views": {
+            "explorer": [
+                {
+                    "type": "webview",
+                    "id": "calicoColors.colorsView",
+                    "name": "CodeStream",
+                    "icon": "assets/images/codestream.png"
+                }
+            ],
             "scm": [
                 {
                     "id": "scmTreeDataProvider",
@@ -535,7 +544,7 @@
         "@types/node": "10.11.7",
         "@types/node-fetch": "2.5.0",
         "@types/uuid": "3.4.5",
-        "@types/vscode": "1.38.0",
+        "@types/vscode": "1.47.0",
         "@typescript-eslint/eslint-plugin": "2.18.0",
         "@typescript-eslint/eslint-plugin-tslint": "2.18.0",
         "@typescript-eslint/parser": "2.18.0",

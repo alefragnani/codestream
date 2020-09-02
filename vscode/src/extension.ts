@@ -1,4 +1,5 @@
 "use strict";
+import * as fs from "fs";
 import { ProtocolHandler } from "protocolHandler";
 import {
 	env,
@@ -8,7 +9,11 @@ import {
 	Uri,
 	version as vscodeVersion,
 	window,
-	workspace
+	workspace,
+	WebviewView,
+	WebviewViewProvider,
+	WebviewViewResolveContext,
+	CancellationToken
 } from "vscode";
 import { ScmTreeDataProvider } from "views/scmTreeDataProvider";
 import { GitExtension } from "./@types/git";
@@ -26,6 +31,80 @@ export const extensionVersion = extension.packageJSON.version;
 interface BuildInfoMetadata {
 	buildNumber: string;
 	assetEnvironment: string;
+}
+
+export interface WebviewLike {
+	notify(): Function;
+	dispose(): Function;
+	show(): Function;
+}
+
+class ColorsViewProvider implements WebviewViewProvider {
+	public static readonly viewType = "calicoColors.colorsView";
+
+	private _view?: WebviewView;
+
+	constructor(private readonly _extensionUri: Uri) {}
+
+	public async resolveWebviewView(
+		webviewView: WebviewView,
+		context: WebviewViewResolveContext,
+		_token: CancellationToken
+	) {
+		this._view = webviewView;
+		console.log(context);
+		webviewView.webview.options = {
+			// Allow scripts in the webview
+			enableScripts: true,
+
+			localResourceRoots: [this._extensionUri]
+		};
+
+		webviewView.webview.html = await this.getHtml();
+
+		webviewView.webview.onDidReceiveMessage(data => {
+			switch (data.type) {
+				case "colorSelected": {
+					// window.activeTextEditor?.insertSnippet(new SnippetString(`#${data.value}`));
+					break;
+				}
+			}
+		});
+	}
+	private _html: string | undefined;
+	private async getHtml(): Promise<string> {
+		// NOTE: if you use workspace.openTextDocument, it will put the webview.html into
+		// the lsp document cache, use fs.readFile instead
+
+		if (!Logger.isDebugging && this._html) {
+			return this._html;
+		}
+		this._html = await new Promise<string>((resolve, reject) => {
+			fs.readFile(Container.context.asAbsolutePath("webview.html"), "utf8", (err, data) => {
+				if (err) {
+					reject(err);
+				} else {
+					resolve(data);
+				}
+			});
+		});
+
+		return this._html;
+	}
+
+	public addColor() {
+		// TODO: add call to reveal
+
+		if (this._view) {
+			this._view.webview.postMessage({ type: "addColor" });
+		}
+	}
+
+	public clearColors() {
+		if (this._view) {
+			this._view.webview.postMessage({ type: "clearColors" });
+		}
+	}
 }
 
 export async function activate(context: ExtensionContext) {
@@ -92,6 +171,10 @@ export async function activate(context: ExtensionContext) {
 
 	context.subscriptions.push(Container.session.onDidChangeSessionStatus(onSessionStatusChanged));
 	context.subscriptions.push(new ProtocolHandler());
+	const provider = new ColorsViewProvider(context.extensionUri);
+	context.subscriptions.push(
+		window.registerWebviewViewProvider(ColorsViewProvider.viewType, provider)
+	);
 
 	const previousVersion = context.globalState.get<string>(GlobalState.Version);
 	showStartupUpgradeMessage(context, extensionVersion, previousVersion);
