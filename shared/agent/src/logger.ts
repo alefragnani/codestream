@@ -206,7 +206,9 @@ export class Logger {
 	}
 
 	static sanitize(key: string, value: any) {
-		return /(apikey|password|secret|token)/i.test(key) ? `<${key}>` : value;
+		// hide "private" members from logging (aka keys that start with underscore)
+		if (key.indexOf("_") === 0) return undefined;
+		return /(apikey|password|secret|token|privatekey)/i.test(key) ? `<${key}>` : value;
 	}
 
 	static toLoggable(p: any, sanitize: (key: string, value: any) => any = this.sanitize) {

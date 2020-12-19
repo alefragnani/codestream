@@ -39,7 +39,8 @@ import {
 	CSReview,
 	CSReviewStatus,
 	CodemarkType,
-	CodemarkStatus
+	CodemarkStatus,
+	CSPost
 } from "@codestream/protocols/api";
 import { CodeStreamState } from "@codestream/webview/store";
 import { useSelector, useDispatch, shallowEqual } from "react-redux";
@@ -96,6 +97,8 @@ import { HeadshotName } from "@codestream/webview/src/components/HeadshotName";
 import { LocateRepoButton } from "../LocateRepoButton";
 import { PROVIDER_MAPPINGS } from "../CrossPostIssueControls/types";
 import { isFeatureEnabled } from "@codestream/webview/store/apiVersioning/reducer";
+import { getPost } from "../../store/posts/reducer";
+import { AddReactionIcon, Reactions } from "../Reactions";
 
 interface RepoMetadata {
 	repoName: string;
@@ -115,6 +118,7 @@ interface SimpleError {
 
 export interface BaseReviewProps extends CardProps {
 	review: CSReview;
+	post?: CSPost;
 	repoInfo: RepoMetadata[];
 	repoInfoById: Map<string, RepoMetadata>;
 	headerError?: SimpleError;
@@ -139,6 +143,7 @@ export interface BaseReviewProps extends CardProps {
 
 export interface BaseReviewHeaderProps {
 	review: CSReview;
+	post?: CSPost;
 	collapsed?: boolean;
 	isFollowing?: boolean;
 	reviewers?: CSUser[];
@@ -259,6 +264,7 @@ export const BaseReviewHeader = (props: PropsWithChildren<BaseReviewHeaderProps>
 			<Icon name="review" className="type" />
 			<BigTitle>
 				<HeaderActions>
+					{props.post && <AddReactionIcon post={props.post} className="in-review" />}
 					{props.children || (
 						<BaseReviewMenu
 							review={review}
@@ -413,12 +419,12 @@ export const BaseReviewMenu = (props: BaseReviewMenuProps) => {
 					action: () => {
 						confirmPopup({
 							title: "Are you sure?",
-							message: "Deleting a review cannot be undone.",
+							message: "Deleting a feedback request cannot be undone.",
 							centered: true,
 							buttons: [
 								{ label: "Go Back", className: "control-button" },
 								{
-									label: "Delete Review",
+									label: "Delete Feedback Request",
 									className: "delete",
 									wait: true,
 									action: () => {
@@ -512,6 +518,7 @@ export const BaseReviewMenu = (props: BaseReviewMenuProps) => {
 	return (
 		<>
 			<KebabIcon
+				className="kebab"
 				onClickCapture={e => {
 					e.preventDefault();
 					e.stopPropagation();
@@ -663,11 +670,15 @@ const BaseReview = (props: BaseReviewProps) => {
 										e.preventDefault();
 										e.stopPropagation();
 
-										if (review.pullRequestProviderId === "github*com") {
+										// FIXME github*com
+										if (
+											review.pullRequestProviderId === "github*com" ||
+											review.pullRequestProviderId === "github/enterprise"
+										) {
 											HostApi.instance
 												.send(ExecuteThirdPartyRequestUntypedType, {
 													method: "getPullRequestIdFromUrl",
-													providerId: "github*com",
+													providerId: review.pullRequestProviderId,
 													params: {
 														url: review.pullRequestUrl
 													}
@@ -675,7 +686,7 @@ const BaseReview = (props: BaseReviewProps) => {
 												.then((id: any) => {
 													if (id) {
 														dispatch(setCurrentReview(""));
-														dispatch(setCurrentPullRequest(id));
+														dispatch(setCurrentPullRequest(review.pullRequestProviderId!, id));
 													} else {
 														HostApi.instance.send(OpenUrlRequestType, {
 															url: review.pullRequestUrl!
@@ -708,6 +719,7 @@ const BaseReview = (props: BaseReviewProps) => {
 				{props.collapsed && (
 					<BaseReviewHeader
 						review={review}
+						post={props.post}
 						collapsed={props.collapsed}
 						setIsEditing={props.setIsEditing}
 						setIsAmending={props.setIsAmending}
@@ -724,25 +736,35 @@ const BaseReview = (props: BaseReviewProps) => {
 				{props.headerError && props.headerError.message && (
 					<div
 						className="color-warning"
-						style={{ display: "flex", padding: "10px 0", whiteSpace: "normal" }}
+						style={{
+							display: "flex",
+							padding: "10px 0",
+							whiteSpace: "normal",
+							alignItems: "flex-start"
+						}}
 					>
 						<Icon name="alert" />
-						<div style={{ paddingLeft: "10px" }}>{props.headerError.message}</div>
-						{canLocateRepo && singleRepo && (
-							<LocateRepoButton
-								repoId={singleRepo.id}
-								repoName={singleRepo.repoName}
-								callback={success => {
-									if (
-										success &&
-										props.onRequiresCheckPreconditions &&
-										typeof props.onRequiresCheckPreconditions === "function"
-									) {
-										props.onRequiresCheckPreconditions(success);
-									}
-								}}
-							></LocateRepoButton>
-						)}
+						<div style={{ paddingLeft: "10px" }}>
+							{props.headerError.message}
+							{canLocateRepo && singleRepo && (
+								<>
+									<br />
+									<LocateRepoButton
+										repoId={singleRepo.id}
+										repoName={singleRepo.repoName}
+										callback={success => {
+											if (
+												success &&
+												props.onRequiresCheckPreconditions &&
+												typeof props.onRequiresCheckPreconditions === "function"
+											) {
+												props.onRequiresCheckPreconditions(success);
+											}
+										}}
+									/>
+								</>
+							)}
+						</div>
 					</div>
 				)}
 
@@ -753,6 +775,11 @@ const BaseReview = (props: BaseReviewProps) => {
 							<MetaLabel>Description</MetaLabel>
 							<MarkdownText text={props.review.text} />
 						</Meta>
+					)}
+					{props.post && (
+						<div style={{ marginBottom: "10px" }}>
+							<Reactions className="reactions no-pad-left" post={props.post} />
+						</div>
 					)}
 					{!props.collapsed && (hasTags || hasReviewers) && (
 						<MetaRow>
@@ -773,7 +800,12 @@ const BaseReview = (props: BaseReviewProps) => {
 										{props.reviewers!.map(reviewer => {
 											const addThumbsUp = approvedBy[reviewer.id] ? true : false;
 											return (
-												<HeadshotName person={reviewer} highlightMe addThumbsUp={addThumbsUp} />
+												<HeadshotName
+													key={reviewer.id}
+													person={reviewer}
+													highlightMe
+													addThumbsUp={addThumbsUp}
+												/>
 											);
 										})}
 									</MetaDescriptionForTags>
@@ -1042,7 +1074,7 @@ const ReplyInput = (props: { reviewId: string; parentPostId: string; streamId: s
 				onChange={setText}
 				onSubmit={submit}
 			/>
-			<div style={{ display: "flex" }}>
+			<div style={{ display: "flex", flexWrap: "wrap" }}>
 				<div style={{ opacity: 0.7, paddingTop: "10px" }}>
 					<Checkbox name="change-request" checked={isChangeRequest} onChange={setIsChangeRequest}>
 						Change Request (require for approval)
@@ -1054,7 +1086,7 @@ const ReplyInput = (props: { reviewId: string; parentPostId: string; streamId: s
 							<span>
 								Submit Comment
 								<span className="keybinding extra-pad">
-									{navigator.appVersion.includes("Macintosh") ? "⌘" : "Alt"} ENTER
+									{navigator.appVersion.includes("Macintosh") ? "⌘" : "Ctrl"} ENTER
 								</span>
 							</span>
 						}
@@ -1114,7 +1146,11 @@ const ReviewForReview = (props: PropsWithReview) => {
 	let disposableDidChangeDataNotification: { dispose(): void };
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
+		const post =
+			review && review.postId ? getPost(state.posts, review!.streamId, review.postId) : undefined;
+
 		return {
+			post,
 			currentTeamId: state.context.currentTeamId,
 			currentUser: state.users[state.session.userId!],
 			author: state.users[props.review.creatorId],
@@ -1224,7 +1260,7 @@ const ReviewForReview = (props: PropsWithReview) => {
 			if (props.collapsed) return null;
 
 			return (
-				<Footer style={{ borderTop: "none", marginTop: 0 }}>
+				<Footer className="replies-to-review" style={{ borderTop: "none", marginTop: 0 }}>
 					{derivedState.replies.length > 0 && <MetaLabel>Activity</MetaLabel>}
 					<RepliesToPost streamId={props.review.streamId} parentPostId={props.review.postId} />
 					{InputContainer && !props.isAmending && (
@@ -1268,6 +1304,7 @@ const ReviewForReview = (props: PropsWithReview) => {
 			<BaseReview
 				{...baseProps}
 				review={props.review}
+				post={derivedState.post}
 				repoInfo={repoInfo}
 				repoInfoById={repoInfoById}
 				tags={tags}

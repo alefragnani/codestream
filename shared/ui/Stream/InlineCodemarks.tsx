@@ -26,7 +26,9 @@ import {
 	EditorScrollToNotificationType,
 	EditorScrollMode,
 	NewCodemarkNotificationType,
-	WebviewPanels
+	WebviewPanels,
+	ReviewCloseDiffRequestType,
+	LocalFilesCloseDiffRequestType
 } from "../ipc/webview.protocol";
 import {
 	DocumentMarker,
@@ -50,9 +52,10 @@ import {
 	setCodemarksFileViewStyle,
 	setCodemarksShowArchived,
 	setCurrentCodemark,
-	setSpatialViewPRCommentsToggle,
 	repositionCodemark,
-	setComposeCodemarkActive
+	setComposeCodemarkActive,
+	closePanel,
+	closeAllModals
 } from "../store/context/actions";
 import { sortBy as _sortBy } from "lodash-es";
 import { setEditorContext, changeSelection } from "../store/editorContext/actions";
@@ -84,6 +87,7 @@ import { supportsIntegrations } from "../store/configs/reducer";
 import { Keybindings } from "./Keybindings";
 import { setNewPostEntry } from "../store/context/actions";
 import { PullRequest } from "./PullRequest";
+import { Modal } from "./Modal";
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //
@@ -145,14 +149,16 @@ interface Props {
 	repositionCodemark: (
 		...args: Parameters<typeof repositionCodemark>
 	) => ReturnType<typeof repositionCodemark>;
+	closePanel: Function;
+	closeAllModals: Function;
 
 	createPostAndCodemark: (...args: Parameters<typeof createPostAndCodemark>) => any;
 	addDocumentMarker: Function;
 	changeSelection: Function;
-	setSpatialViewPRCommentsToggle: Function;
 	composeCodemarkActive: CodemarkType | undefined;
 	newPostEntryPoint?: string;
 	setNewPostEntry: Function;
+	setUserPreference: any;
 }
 
 interface State {
@@ -168,6 +174,7 @@ interface State {
 	// newCodemarkAttributes: { type: CodemarkType; viewingInline: boolean } | undefined;
 	multiLocationCodemarkForm: boolean;
 	codemarkFormError?: string;
+	showPRCommentsField: boolean | undefined;
 }
 
 const NEW_CODEMARK_ATTRIBUTES_TO_RESTORE = "spatial-view:restore-codemark-form";
@@ -197,7 +204,8 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 			numBelow: 0,
 			numLinesVisible: props.numLinesVisible,
 			problem: props.scmInfo && getFileScmError(props.scmInfo),
-			multiLocationCodemarkForm: false
+			multiLocationCodemarkForm: false,
+			showPRCommentsField: props.showPRComments
 		};
 
 		this.docMarkersByStartLine = {};
@@ -206,7 +214,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 	componentDidMount() {
 		this._mounted = true;
 		if (this.props.webviewFocused)
-			HostApi.instance.track("Page Viewed", { "Page Name": "CurrentFile Tab" });
+			HostApi.instance.track("Page Viewed", { "Page Name": "Spatial View" });
 		const mutationObserver = new MutationObserver(() => this.repositionCodemarks());
 		mutationObserver.observe(document.getElementById("stream-root")!, {
 			childList: true,
@@ -279,7 +287,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 			!prevProps.hasPRProvider &&
 			this._waitingForPRProviderConnection
 		) {
-			this.props.setSpatialViewPRCommentsToggle(true);
+			this.props.setUserPreference(["codemarksShowPRComments"], true);
 		}
 
 		this.repositionCodemarks();
@@ -423,9 +431,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 			if (isInitialRender) {
 				this.setState({ isLoading: false });
 			}
-			if (renderErrorCallback !== undefined) {
-				renderErrorCallback("InvalidUri");
-			}
+			// used to log InvalidUri here, but it's not terribly useful and mostly noise
 			return;
 		}
 
@@ -469,6 +475,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 		const { documentMarkers, showHidden } = this.props;
 
 		this.hiddenCodemarks = {};
+		const seenCodemarks = {};
 		return (
 			<div style={{ height: "100%", paddingTop: "55px" }}>
 				<ScrollBox>
@@ -488,6 +495,10 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 							.map(docMarker => {
 								const { codemark } = docMarker;
 
+								if (codemark) {
+									if (seenCodemarks[codemark.id]) return null;
+									seenCodemarks[codemark.id] = true;
+								}
 								// const hidden =
 								// 	!showHidden &&
 								// 	((codemark && (!codemark.pinned || codemark.status === "closed")) ||
@@ -510,7 +521,6 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 											hidden={hidden}
 											highlightCodeInTextEditor
 											query={this.state.query}
-											viewHeadshots={this.props.viewHeadshots}
 											postAction={this.props.postAction}
 										/>
 									</div>
@@ -539,7 +549,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 						<h3>No file open.</h3>
 						<p>
 							Open a source file to to start discussing code with your teammates!{" "}
-							<a href="https://docs.codestream.com/userguide/workflow/discuss-code/">View guide.</a>
+							<a href="https://docs.codestream.com/userguide/workflow/discuss-code/">Learn more.</a>
 						</p>
 					</div>
 				</div>
@@ -569,7 +579,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 								CodeStream requires files to be tracked by Git so that codemarks can be linked to
 								the code.
 							</p>
-							<p>{uriToFilePath(textEditorUri)}</p>
+							<p>{textEditorUri ? uriToFilePath(textEditorUri) : undefined}</p>
 						</div>
 					</div>
 				);
@@ -611,13 +621,15 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 			);
 
 			return (
-				<Keybindings>
-					Discuss code by selecting a range and clicking an icon, or use a shortcut below (
-					<a href="https://docs.codestream.com/userguide/workflow/discuss-code/">show me how</a>
-					).
-					<br />
-					<br />
-				</Keybindings>
+				<div key="no-codemarks" className="no-codemarks-container">
+					<div className="no-codemarks">
+						<h3>No codemarks in this file.</h3>
+						<p>
+							Discuss code by selecting a range and clicking an icon{" "}
+							<a href="https://docs.codestream.com/userguide/workflow/discuss-code/">show me how</a>
+						</p>
+					</div>
+				</div>
 			);
 		}
 	};
@@ -721,6 +733,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 		// console.log("HEIGHT IS: ", height);
 		const numVisibleRanges = textEditorVisibleRanges.length;
 		let numAbove = 0,
+			numVisible = 0,
 			numBelow = 0;
 		// create a map from start-lines to the codemarks that start on that line
 		// and while we're at it, count the number of non-filtered-out codemarks
@@ -741,7 +754,9 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 				this.hiddenCodemarks[docMarker.id] = true;
 			} else {
 				if (startLine < firstVisibleLine) numAbove++;
-				if (startLine > lastVisibleLine) numBelow++;
+				else if (startLine > lastVisibleLine) numBelow++;
+				// this is an approximation
+				else if (startLine > firstVisibleLine - 10) numVisible++;
 			}
 		});
 
@@ -759,12 +774,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 				data-scrollable="true"
 				className={cx("scrollbox", { "off-top": firstVisibleLine > 0 })}
 			>
-				<div
-					style={{
-						padding: `${this.props.metrics.lineHeight!}px 0`,
-						margin: `-${this.props.metrics.lineHeight!}px 0`
-					}}
-				>
+				<div>
 					<div
 						style={{
 							top: paddingTop,
@@ -777,6 +787,33 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 						id="inline-codemarks-field"
 					>
 						<div className="inline-codemarks vscroll-x">
+							{numAbove > 0 && (
+								<ViewSelectorButton className="above" onClick={this.showAbove}>
+									<span className="nospace">
+										{numAbove} comment{numAbove > 1 ? "s" : ""}
+									</span>
+									<Icon name="arrow-up" />
+								</ViewSelectorButton>
+							)}
+							{numBelow > 0 && (
+								<ViewSelectorButton className="below" onClick={this.showBelow}>
+									<span className="nospace">
+										{numBelow} comment{numBelow > 1 ? "s" : ""}
+									</span>
+									<Icon name="arrow-down" />
+								</ViewSelectorButton>
+							)}
+							{numVisible === 0 && (
+								<div key="no-codemarks-visible" className="no-codemarks-container">
+									<div className="no-codemarks" style={{ opacity: 0.5 }}>
+										<h3>No comments visible.</h3>
+										<p>
+											This view shows codemarks side-by-side with your code, similar to Google Docs.
+											Click the X above to return to the home screen.
+										</p>
+									</div>
+								</div>
+							)}
 							{textEditorVisibleRanges.map((lineRange, rangeIndex) => {
 								const realFirstLine = lineRange.start.line;
 								const realLastLine = lineRange.end.line;
@@ -813,7 +850,8 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 				lineNumber={lineNum}
 				className={cx({
 					"cs-hidden": hidden,
-					"cs-off-plane": hidden
+					"cs-off-plane": hidden,
+					"no-padding": true
 				})}
 			>
 				<div className="codemark-container">
@@ -1087,19 +1125,19 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 
 		return (
 			<ViewSelectors>
-				{viewInline && numAbove > 0 && (
+				{false && viewInline && numAbove > 0 && (
 					<ViewSelectorControl onClick={this.showAbove}>
 						<span className="nospace">{numAbove}</span>
 						<Icon name="arrow-up" />
 					</ViewSelectorControl>
 				)}
-				{viewInline && numBelow > 0 && (
+				{false && viewInline && numBelow > 0 && (
 					<ViewSelectorControl onClick={this.showBelow}>
 						<span className="nospace">{numBelow}</span>
 						<Icon name="arrow-down" />
 					</ViewSelectorControl>
 				)}
-				{this.props.supportsIntegrations && (
+				{/*  {false && this.props.supportsIntegrations && (
 					<Tooltip title="Show/hide pull request comments" placement="top" delay={1}>
 						<ViewSelectorControl onClick={this.togglePRComments} id="pr-toggle">
 							<span>PRs</span>{" "}
@@ -1111,6 +1149,7 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 						</ViewSelectorControl>
 					</Tooltip>
 				)}
+				*/}
 				{numHidden > 0 && (
 					<Tooltip title="Show/hide archived codemarks" placement="top" delay={1}>
 						<ViewSelectorControl onClick={this.toggleShowHidden}>
@@ -1138,27 +1177,42 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 		);
 	}
 
+	close() {
+		const { currentReviewId, currentPullRequestId } = this.props;
+		if (currentReviewId) {
+			HostApi.instance.send(ReviewCloseDiffRequestType, {});
+			this.props.closeAllModals();
+		} else if (currentPullRequestId) {
+			HostApi.instance.send(LocalFilesCloseDiffRequestType, {});
+			this.props.closeAllModals();
+		} else {
+			this.props.closePanel();
+		}
+	}
+
 	render() {
 		const { currentReviewId, currentPullRequestId, composeCodemarkActive } = this.props;
 
 		const composeOpen = composeCodemarkActive ? true : false;
 		return (
-			<div ref={this.root} className={cx("panel inline-panel full-height")}>
-				{currentReviewId ? (
-					<ReviewNav reviewId={currentReviewId} composeOpen={composeOpen} />
-				) : currentPullRequestId ? (
-					<PullRequest />
-				) : (
-					this.renderHeader()
-				)}
-				{!currentPullRequestId && <CreateCodemarkIcons />}
-				{this.renderCodemarkForm()}
-				{this.state.showPRInfoModal && (
-					<PRInfoModal onClose={() => this.setState({ showPRInfoModal: false })} />
-				)}
-				{this.state.isLoading ? null : this.renderCodemarks()}
-				{!currentReviewId && !currentPullRequestId && this.renderViewSelectors()}
-			</div>
+			<Modal noScroll noPadding onClose={() => this.close()}>
+				<div style={{ overflow: "hidden" }}>
+					{currentReviewId ? (
+						<ReviewNav reviewId={currentReviewId} composeOpen={composeOpen} />
+					) : currentPullRequestId ? (
+						<PullRequest />
+					) : (
+						this.renderHeader()
+					)}
+					{!currentPullRequestId && <CreateCodemarkIcons />}
+					{this.renderCodemarkForm()}
+					{this.state.showPRInfoModal && (
+						<PRInfoModal onClose={() => this.setState({ showPRInfoModal: false })} />
+					)}
+					{this.state.isLoading ? null : this.renderCodemarks()}
+					{!currentReviewId && !currentPullRequestId && this.renderViewSelectors()}
+				</div>
+			</Modal>
 		);
 	}
 
@@ -1217,18 +1271,19 @@ export class SimpleInlineCodemarks extends Component<Props, State> {
 		this.enableAnimations(() => this.props.setCodemarksShowArchived(!this.props.showHidden));
 	};
 
-	togglePRComments = () => {
-		const newShowPRComments = !this.props.showPRComments;
-		if (this.props.hasPRProvider)
-			this.enableAnimations(() => {
-				this.props.setSpatialViewPRCommentsToggle(newShowPRComments);
-				this.props.fetchDocumentMarkers(this.props.textEditorUri!, !newShowPRComments);
-			});
-		else {
-			this._waitingForPRProviderConnection = true;
-			this.setState({ showPRInfoModal: true });
-		}
-	};
+	// togglePRComments = () => {
+	// 	const { showPRCommentsField } = this.state;
+	// 	const newShowPRComments = !this.props.showPRComments;
+	// 	if (this.props.hasPRProvider)
+	// 		this.enableAnimations(() => {
+	// 			this.props.setUserPreference(["codemarksShowPRComments"], !!showPRCommentsField);
+	// 			this.props.fetchDocumentMarkers(this.props.textEditorUri!, !newShowPRComments);
+	// 		});
+	// 	else {
+	// 		this._waitingForPRProviderConnection = true;
+	// 		this.setState({ showPRInfoModal: true });
+	// 	}
+	// };
 
 	showAbove = () => {
 		const { firstVisibleLine } = this.props;
@@ -1301,7 +1356,7 @@ const EMPTY_ARRAY = [];
 const EMPTY_OBJECT = {};
 
 const mapStateToProps = (state: CodeStreamState) => {
-	const { context, editorContext, teams, configs, documentMarkers, ide } = state;
+	const { context, editorContext, preferences, teams, configs, documentMarkers, ide } = state;
 
 	const docMarkers = documentMarkers[editorContext.textEditorUri || ""] || EMPTY_ARRAY;
 	const numHidden = docMarkers.filter(
@@ -1328,13 +1383,13 @@ const mapStateToProps = (state: CodeStreamState) => {
 		hasPRProvider,
 		currentStreamId: context.currentStreamId,
 		currentReviewId: context.currentReviewId,
-		currentPullRequestId: context.currentPullRequestId,
+		currentPullRequestId: context.currentPullRequest ? context.currentPullRequest.id : undefined,
 		team: teams[context.currentTeamId],
 		viewInline: context.codemarksFileViewStyle === "inline",
 		viewHeadshots: configs.showHeadshots,
 		showLabelText: false, //configs.showLabelText,
 		showHidden: context.codemarksShowArchived || false,
-		showPRComments: hasPRProvider && context.spatialViewShowPRComments,
+		showPRComments: hasPRProvider && preferences.codemarksShowPRComments,
 		fileNameToFilterFor: editorContext.activeFile,
 		scmInfo: editorContext.scmInfo,
 		textEditorUri: editorContext.textEditorUri,
@@ -1367,14 +1422,43 @@ export default connect(mapStateToProps, {
 	createPostAndCodemark,
 	addDocumentMarker,
 	changeSelection,
-	setSpatialViewPRCommentsToggle,
-	setNewPostEntry
+	setNewPostEntry,
+	closeAllModals,
+	closePanel
 })(SimpleInlineCodemarks);
+
+const ViewSelectorButton = styled.div`
+	position: fixed;
+	border: none;
+	padding: 2px 8px 2px 10px;
+	left: 50%;
+	transform: translateX(-50%);
+	background: var(--button-background-color);
+	color: var(--buton-foreground-color);
+	&:hover {
+		background: var(--button-background-color-hover);
+	}
+	&.above {
+		border-radius: 0 0 5px 5px;
+		top: 0;
+	}
+	&.below {
+		border-radius: 5px 5px 0 0;
+		bottom: 0;
+	}
+	.icon {
+		display: inline-block;
+		transform: scale(0.7);
+	}
+	opacity: 1;
+	cursor: pointer;
+	z-index: 3;
+`;
 
 const ViewSelectorControl = styled.span`
 	cursor: pointer;
 	opacity: 0.75;
-	padding: 5px 2%;
+	padding: 5px 5px;
 	white-space: nowrap;
 	:hover {
 		opacity: 1;
@@ -1402,18 +1486,16 @@ const ViewSelectorControl = styled.span`
 `;
 
 const ViewSelectors = styled.div`
-	width: 100%;
 	height: 30px;
 	position: fixed;
 	bottom: 0px;
 	right: 0;
 	display: flex;
 	justify-content: flex-end;
-	z-index: 45;
-	background: var(--app-background-color);
+	// background: var(--app-background-color);
 	padding-top: 3px;
 	padding-bottom: 5px;
-	border-top: 1px solid var(--base-border-color);
+	padding-right: 5px;
+	// border-top: 1px solid var(--base-border-color);
 	text-align: right;
-	padding-right: 60px;
 `;

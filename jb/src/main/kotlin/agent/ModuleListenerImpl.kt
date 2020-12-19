@@ -3,6 +3,7 @@ package com.codestream.agent
 import com.codestream.agentService
 import com.codestream.extensions.uri
 import com.codestream.extensions.workspaceFolders
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.impl.scopes.ModuleWithDependenciesScope
 import com.intellij.openapi.project.ModuleListener
@@ -13,10 +14,16 @@ import org.eclipse.lsp4j.WorkspaceFoldersChangeEvent
 
 class ModuleListenerImpl(project: Project) : ModuleListener {
 
+    private val logger = Logger.getInstance(ModuleListenerImpl::class.java)
+
     override fun moduleAdded(project: Project, module: Module) {
+        if (module.isDisposed || project.isDisposed) return
         val existingFolders = project.workspaceFolders
         val roots = (module.moduleContentScope as? ModuleWithDependenciesScope)?.roots ?: return
         val folders = roots.map { WorkspaceFolder(it.uri) }.filter { !existingFolders.contains(it)  }
+        if (folders.isEmpty()) return
+
+        logger.info("Workspace folders added: ${folders.joinToString()}")
         project.agentService?.let {
             it.onDidStart {
                 it.agent.workspaceService.didChangeWorkspaceFolders(
@@ -33,8 +40,11 @@ class ModuleListenerImpl(project: Project) : ModuleListener {
     }
 
     override fun moduleRemoved(project: Project, module: Module) {
+        if (module.isDisposed || project.isDisposed) return
         val roots = (module.moduleContentScope as? ModuleWithDependenciesScope)?.roots ?: return
         val folders = roots.map { WorkspaceFolder(it.uri) }
+
+        logger.info("Workspace folders removed: ${folders.joinToString()}")
         project.agentService?.let {
             it.onDidStart {
                 it.agent.workspaceService.didChangeWorkspaceFolders(

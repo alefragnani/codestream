@@ -10,6 +10,9 @@ import { URI } from "vscode-uri";
 import { MessageType } from "../api/apiProvider";
 import { Marker, MarkerLocation } from "../api/extensions";
 import { Container, SessionContainer } from "../container";
+import { EMPTY_TREE_SHA } from "../git/gitService";
+import { GitCommit } from "../git/models/commit";
+import * as gitUtils from "../git/utils";
 import { Logger } from "../logger";
 import {
 	CodeDelimiterStyles,
@@ -901,171 +904,99 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 			csUri.Uris.isCodeStreamDiffUri(request.textDocuments[0].uri)
 		) {
 			const { providerRegistry, git, repos } = SessionContainer.instance();
-			const parsedUri = csUri.Uris.fromCodeStreamDiffUri<CodeStreamDiffUriData>(
-				request.textDocuments[0].uri
-			);
+			const uri = request.textDocuments[0].uri;
+			const parsedUri = csUri.Uris.fromCodeStreamDiffUri<CodeStreamDiffUriData>(uri);
 			if (!parsedUri) throw new Error(`Could not parse uri ${request.textDocuments[0].uri}`);
+			let providerId;
 			if (parsedUri.context && parsedUri.context.pullRequest) {
-				if (parsedUri.context.pullRequest.providerId !== "github*com") {
-					throw new Error(`UnsupportedProvider ${parsedUri.context.pullRequest.providerId}`);
+				providerId = parsedUri.context.pullRequest.providerId;
+				if (!providerRegistry.providerSupportsPullRequests(providerId)) {
+					throw new Error(`UnsupportedProvider ${providerId}`);
 				}
 			} else {
-				throw new Error("missingContext");
+				throw new Error(`missing context for uri ${uri}`);
 			}
 
-			if (parsedUri.context.pullRequest.providerId === "github*com") {
-				// get the git repo, so we can use the repo root
-				const gitRepo = await git.getRepositoryById(parsedUri.repoId);
-				// lines are 1-based on GH
-				const startLine = request.attributes.codeBlocks[0].range.start.line + 1;
-				const endLine = request.attributes.codeBlocks[0].range.end.line + 1;
-				const repoPath = path.join(gitRepo ? gitRepo.path : "", parsedUri.path);
-				// get the diff hunk between the two shas
-				const diff = await git.getDiffBetweenCommits(
-					parsedUri.leftSha,
-					parsedUri.rightSha,
-					repoPath,
-					true
+			// get the git repo, so we can use the repo root
+			const gitRepo = await git.getRepositoryById(parsedUri.repoId);
+			// lines are 1-based on GH, and come in as 0based
+			const range = request.attributes.codeBlocks[0].range;
+			const startLine = range.start.line + 1;
+			const end = range.end;
+			let endLine = end.line + 1;
+			if (endLine === startLine + 1 && end.character === 0) {
+				// treat triple-clicked "single line" PR comments where the cursor
+				// moves to the next line as truly single line comments
+				endLine = startLine;
+			}
+			const repoPath = path.join(gitRepo ? gitRepo.path : "", parsedUri.path);
+			// get the diff hunk between the two shas
+			const diff = await git.getDiffBetweenCommits(
+				parsedUri.leftSha,
+				parsedUri.rightSha,
+				repoPath,
+				true
+			);
+			if (!diff) {
+				const errorMessage = `Could not find diff for leftSha=${parsedUri.leftSha} rightSha=${parsedUri.rightSha} repoPath=${repoPath}`;
+				Logger.warn(errorMessage);
+				throw new Error(errorMessage);
+			}
+			const startHunk = diff.hunks.find(
+				_ => startLine >= _.newStart && startLine <= _.newStart + _.newLines
+			);
+			const endHunk = diff.hunks.find(
+				_ => endLine >= _.newStart && endLine <= _.newStart + _.newLines
+			);
+
+			// only fall in here if we don't have a start OR we dont have both
+			if (!startHunk || (!startHunk && !endHunk)) {
+				// if we couldn't find a hunk, we're going to go down the path of using
+				// a "code fence" aka ``` for showing the code comment
+				Logger.warn(
+					`Could not find hunk for startLine=${startLine} or endLine=${endLine} for ${JSON.stringify(
+						parsedUri.context
+					)}`
 				);
-				if (!diff) {
-					const errorMessage = `Could not find diff for leftSha=${parsedUri.leftSha} rightSha=${parsedUri.rightSha} repoPath=${repoPath}`;
-					Logger.warn(errorMessage);
-					throw new Error(errorMessage);
+				const codeBlock = request.attributes.codeBlocks[0];
+				const repo = await repos.getById(parsedUri.repoId);
+				let remoteList: string[] | undefined;
+				if (repo && repo.remotes && repo.remotes.length) {
+					// if we have a list of remotes from the marker / repo (a.k.a. server)... use that
+					remoteList = repo.remotes.map(_ => _.normalizedUrl);
 				}
-				const startingHunk = diff.hunks.find(
-					_ => startLine >= _.newStart && startLine <= _.newStart + _.newLines
-				);
-				const endingHunk = diff.hunks.find(_ => endLine <= _.newStart + _.newLines);
-				if (!startingHunk || !endingHunk) {
-					// if we couldn't find a hunk, we're going to go down the path of using
-					// a "code fence" aka ``` for showing the code comment
-					Logger.warn(
-						`Could not find hunk for startLine=${startLine} or endLine=${endLine} for ${JSON.stringify(
-							parsedUri.context
-						)}`
-					);
-					const codeBlock = request.attributes.codeBlocks[0];
-					const repo = await repos.getById(parsedUri.repoId);
-					let remoteList: string[] | undefined;
-					if (repo && repo.remotes && repo.remotes.length) {
-						// if we have a list of remotes from the marker / repo (a.k.a. server)... use that
-						remoteList = repo.remotes.map(_ => _.normalizedUrl);
-					}
-					let remoteUrl;
-					if (remoteList) {
-						for (const remote of remoteList) {
-							remoteUrl = Marker.getRemoteCodeUrl(
-								remote,
-								parsedUri.rightSha,
-								codeBlock.scm?.file!,
-								startLine,
-								endLine
-							);
+				let remoteUrl;
+				if (remoteList) {
+					for (const remote of remoteList) {
+						remoteUrl = Marker.getRemoteCodeUrl(
+							remote,
+							parsedUri.rightSha,
+							codeBlock.scm?.file!,
+							startLine,
+							endLine
+						);
 
-							if (remoteUrl !== undefined) {
-								break;
-							}
+						if (remoteUrl !== undefined) {
+							break;
 						}
 					}
-					let fileWithUrl;
-					if (remoteUrl) {
-						fileWithUrl = `[${codeBlock.scm?.file}](${remoteUrl.url})`;
-					} else {
-						fileWithUrl = codeBlock.scm?.file;
-					}
-
-					const result = await providerRegistry.executeMethod({
-						method: "addComment",
-						providerId: parsedUri.context.pullRequest.providerId,
-						params: {
-							subjectId: parsedUri.context.pullRequest.id,
-							text: `${request.attributes.text || ""}\n\n\`\`\`\n${codeBlock.contents}\n\`\`\`
-								\n${fileWithUrl} (Line${startLine === endLine ? ` ${startLine}` : `s ${startLine}-${endLine}`})`
-						}
-					});
-					return {
-						isPassThrough: true,
-						pullRequest: parsedUri.context.pullRequest,
-						success: result != null
-					};
 				}
-
-				let result;
-				if (request.isProviderReview) {
-					// https://stackoverflow.com/questions/41662127/how-to-comment-on-a-specific-line-number-on-a-pr-on-github
-					// according to github:
-					/**
-					 * The position value equals the number of lines down from the first "@@" hunk header in the file you want to add a comment.
-					 * The line just below the "@@" line is position 1, the next line is position 2, and so on.
-					 * The position in the diff continues to increase through lines of whitespace and additional hunks until the beginning of a new file.
-					 *
-					 * see: https://docs.github.com/en/rest/reference/pulls#create-a-review-for-a-pull-request
-					 */
-
-					let i = 0;
-					let relativeLine = 0;
-					for (const h of diff.hunks) {
-						// can't increment for the first hunk
-						if (i !== 0) relativeLine++;
-						const linesWithMetadata = [];
-						let j = 0;
-						for (const line of h.lines) {
-							relativeLine++;
-							linesWithMetadata.push({ line: line, relativeLine: relativeLine, index: j });
-							j++;
-						}
-						(h as any).linesWithMetadata = linesWithMetadata;
-						i++;
-					}
-					// the line the user is asking for minus the start of this hunk
-					// that will give us the index of where it is in the hunk
-					// from there, we fetch the relativeLine which is what github needs
-					let offset: number;
-					let lineWithMetadata;
-					if (startLine === endLine) {
-						// is a single line if startLine === endLine
-						offset = startLine - startingHunk.newStart;
-						lineWithMetadata = (startingHunk as any).linesWithMetadata.find(
-							(b: any) => b.index === offset
-						);
-					} else {
-						// it is a range
-						offset = endLine - endingHunk.newStart;
-						lineWithMetadata = (endingHunk as any).linesWithMetadata.find(
-							(b: any) => b.index === offset
-						);
-					}
-					if (lineWithMetadata) {
-						result = await providerRegistry.executeMethod({
-							method: "createPullRequestReviewComment",
-							providerId: parsedUri.context.pullRequest.providerId,
-							params: {
-								pullRequestId: parsedUri.context.pullRequest.id,
-								// pullRequestReviewId will be looked up
-								text: request.attributes.text || "",
-								filePath: parsedUri.path,
-								position: lineWithMetadata.relativeLine
-							}
-						});
-					} else {
-						throw new Error("Failed to create review comment");
-					}
+				let fileWithUrl;
+				if (remoteUrl) {
+					fileWithUrl = `[${codeBlock.scm?.file}](${remoteUrl.url})`;
 				} else {
-					// is a single comment against a commit
-					result = await providerRegistry.executeMethod({
-						method: "createCommitComment",
-						providerId: parsedUri.context.pullRequest.providerId,
-						params: {
-							pullRequestId: parsedUri.context.pullRequest.id,
-							sha: parsedUri.rightSha,
-							text: request.attributes.text || "",
-							path: parsedUri.path,
-							startLine: startLine,
-							endLine: endingHunk ? endLine : undefined
-						}
-					});
+					fileWithUrl = codeBlock.scm?.file;
 				}
 
+				const result = await providerRegistry.executeMethod({
+					method: "addComment",
+					providerId: parsedUri.context.pullRequest.providerId,
+					params: {
+						subjectId: parsedUri.context.pullRequest.id,
+						text: `${request.attributes.text || ""}\n\n\`\`\`\n${codeBlock.contents}\n\`\`\`
+								\n${fileWithUrl} (Line${startLine === endLine ? ` ${startLine}` : `s ${startLine}-${endLine}`})`
+					}
+				});
 				return {
 					isPassThrough: true,
 					pullRequest: parsedUri.context.pullRequest,
@@ -1073,7 +1004,64 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 				};
 			}
 
-			return undefined;
+			const { lineWithMetadata } = gitUtils.translateLineToPosition(
+				{
+					startLine,
+					startHunk
+				},
+				{
+					endLine,
+					endHunk
+				},
+				diff
+			);
+			let result;
+			if (request.isProviderReview) {
+				if (lineWithMetadata) {
+					result = await providerRegistry.executeMethod({
+						method: "createPullRequestReviewComment",
+						providerId: parsedUri.context.pullRequest.providerId,
+						params: {
+							pullRequestId: parsedUri.context.pullRequest.id,
+							// pullRequestReviewId will be looked up
+							text: request.attributes.text || "",
+							filePath: parsedUri.path,
+							position: lineWithMetadata.position
+						}
+					});
+				} else {
+					throw new Error("Failed to create review comment");
+				}
+			} else {
+				let calculatedEndLine;
+				const startingHunkEnd = startHunk.newStart + startHunk.newLines;
+				if (endLine >= startingHunkEnd) {
+					calculatedEndLine = startingHunkEnd - 1;
+				} else {
+					calculatedEndLine = endHunk ? endLine : undefined;
+				}
+				// is a single comment against a commit
+				result = await providerRegistry.executeMethod({
+					method: "createCommitComment",
+					providerId: parsedUri.context.pullRequest.providerId,
+					params: {
+						pullRequestId: parsedUri.context.pullRequest.id,
+						sha: parsedUri.rightSha,
+						text: request.attributes.text || "",
+						path: parsedUri.path,
+						startLine: startLine,
+						endLine: calculatedEndLine,
+						// legacy servers will need this
+						position: lineWithMetadata?.position
+					}
+				});
+			}
+
+			return {
+				isPassThrough: true,
+				pullRequest: parsedUri.context.pullRequest,
+				success: result != null
+			};
 		}
 
 		let codemark: CodemarkPlus | undefined;
@@ -1401,21 +1389,6 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 		if (latestCommitSha == null) {
 			throw new Error("Could not determine HEAD of current branch for review creation");
 		}
-		// if we have a pushed commit on this branch, use the most recent.
-		// otherwise, use the start commit if specified by the user.
-		// otherwise, use the parent of the first commit of this branch (the fork point)
-		// if that doesn't exist, use HEAD
-		const baseSha =
-			pushedCommit && !amendingReviewId
-				? pushedCommit.sha
-				: scm.commits && scm.commits.length > 0
-				? (await git.getParentCommitShas(scm.repoPath, scm.commits[scm.commits.length - 1].sha))[0]
-				: latestCommitSha;
-
-		if (!baseSha) {
-			throw new Error("Could not determine newest pushed commit for review creation");
-		}
-		Logger.log("baseSha is: " + baseSha);
 
 		const newestCommitInReview = commits[0];
 		const oldestCommitInReview = commits[commits.length - 1];
@@ -1424,6 +1397,16 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 		let leftDiffs: ParsedDiff[];
 
 		const newestCommitNotInReview = scm.commits[commits.length];
+		const userEmail = await git.getConfig(scm.repoPath, "user.email");
+		const ancestorSearchStartingSha =
+			oldestCommitInReview != null ? oldestCommitInReview.sha : "HEAD";
+		const ancestorFromAnotherAuthor = await git.findAncestor(
+			scm.repoPath,
+			ancestorSearchStartingSha,
+			100,
+			c => c.email !== userEmail
+		);
+
 		if (leftBaseShaForFirstChangesetInThisRepo != null) {
 			// It means we're amending. There are 2 optimizations that need to be done:
 			// 1 - if there's a newer pushed commit, then we could find a newer leftBaseSha
@@ -1431,6 +1414,13 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 			leftBaseSha = leftBaseShaForFirstChangesetInThisRepo;
 			leftBaseAuthor = (await git.getCommit(scm.repoPath, leftBaseShaForFirstChangesetInThisRepo))!
 				.author;
+
+			const baseSha =
+				scm.commits && scm.commits.length > 0
+					? (
+							await git.getParentCommitShas(scm.repoPath, scm.commits[scm.commits.length - 1].sha)
+					  )[0]
+					: latestCommitSha;
 			leftDiffs = (
 				await git.getDiffs(
 					scm.repoPath,
@@ -1439,35 +1429,61 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					baseSha // this will be the parent of the first commit in this checkpoint
 				)
 			).filter(removeExcluded);
-		} else if (newestCommitNotInReview == null) {
-			if (oldestCommitInReview != null) {
-				const parent = await git.getCommit(scm.repoPath, oldestCommitInReview.sha + "^");
-				if (!parent) {
-					throw new Error(`Cannot determine the parent of sha ${oldestCommitInReview.sha}`);
+		} else {
+			if (ancestorFromAnotherAuthor) {
+				leftBaseSha = ancestorFromAnotherAuthor.ref;
+				leftBaseAuthor = ancestorFromAnotherAuthor.author;
+			} else if (newestCommitNotInReview) {
+				leftBaseSha = newestCommitNotInReview.sha;
+				leftBaseAuthor = (newestCommitNotInReview.info as GitCommit)!.author;
+			} else if (oldestCommitInReview) {
+				const firstAncestor = await git.findAncestor(
+					scm.repoPath,
+					oldestCommitInReview.sha,
+					1,
+					() => true
+				);
+				if (firstAncestor) {
+					leftBaseSha = firstAncestor.ref;
+					leftBaseAuthor = firstAncestor.author;
+				} else {
+					// User might be including the entire commits history. This is a common scenario when somebody
+					// is kicking the tires in a brand new repo with just a initial commit.
+					leftBaseSha = EMPTY_TREE_SHA;
+					leftBaseAuthor = "Empty Tree";
 				}
-				leftBaseSha = parent!.ref;
-				leftBaseAuthor = parent!.author;
-				leftDiffs = [];
 			} else {
 				leftBaseSha = latestCommitSha;
 				leftBaseAuthor = (await git.getCommit(scm.repoPath, latestCommitSha))!.author;
-				leftDiffs = [];
 			}
-		} else if (newestCommitNotInReview.localOnly) {
-			leftBaseSha = baseSha;
-			leftBaseAuthor = (await git.getCommit(scm.repoPath, baseSha))!.author;
+
+			let leftContentSha;
+			if (newestCommitNotInReview) {
+				leftContentSha = newestCommitNotInReview.sha;
+			} else if (oldestCommitInReview) {
+				const firstAncestor = await git.findAncestor(
+					scm.repoPath,
+					oldestCommitInReview.sha,
+					1,
+					() => true
+				);
+				if (firstAncestor) {
+					leftContentSha = firstAncestor.ref;
+				} else {
+					leftContentSha = EMPTY_TREE_SHA;
+				}
+			} else {
+				leftContentSha = latestCommitSha;
+			}
+
 			leftDiffs = (
 				await git.getDiffs(
 					scm.repoPath,
 					{ includeSaved: false, includeStaged: false },
-					baseSha,
-					newestCommitNotInReview.sha
+					leftBaseSha,
+					leftContentSha
 				)
 			).filter(removeExcluded);
-		} else {
-			leftBaseSha = newestCommitNotInReview.sha;
-			leftBaseAuthor = (await git.getCommit(scm.repoPath, newestCommitNotInReview.sha))!.author;
-			leftDiffs = [];
 		}
 
 		const newFileDiffs: ParsedDiff[] = [];
@@ -1498,47 +1514,18 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 			// It means we're amending. There is 1 optimization that need to be done:
 			// 1 - if there's a newer pushed commit, then we could find a newer rightBaseSha
 			rightBaseSha = rightBaseShaForFirstChangesetInThisRepo;
-			rightBaseAuthor = (await git.getCommit(
-				scm.repoPath,
-				rightBaseShaForFirstChangesetInThisRepo
-			))!.author;
-			rightDiffs = (
-				await git.getDiffs(
-					scm.repoPath,
-					{ includeSaved, includeStaged },
-					rightBaseShaForFirstChangesetInThisRepo
-				)
-			).filter(removeExcluded);
-			rightReverseDiffs = (
-				await git.getDiffs(
-					scm.repoPath,
-					{ includeSaved, includeStaged, reverse: true },
-					rightBaseShaForFirstChangesetInThisRepo
-				)
-			).filter(removeExcluded);
-		} else if (!newestCommitInReview || newestCommitInReview.localOnly) {
-			rightBaseSha = baseSha;
-			rightBaseAuthor = (await git.getCommit(scm.repoPath, baseSha))!.author;
-			rightDiffs = (
-				await git.getDiffs(scm.repoPath, { includeSaved, includeStaged }, baseSha)
-			).filter(removeExcluded);
-			rightReverseDiffs = (
-				await git.getDiffs(scm.repoPath, { includeSaved, includeStaged, reverse: true }, baseSha)
-			).filter(removeExcluded);
+			rightBaseAuthor = (await git.getCommit(scm.repoPath, rightBaseSha))!.author;
 		} else {
-			rightBaseSha = newestCommitInReview.sha;
-			rightBaseAuthor = (await git.getCommit(scm.repoPath, newestCommitInReview.sha))!.author;
-			rightDiffs = (
-				await git.getDiffs(scm.repoPath, { includeSaved, includeStaged }, newestCommitInReview.sha)
-			).filter(removeExcluded);
-			rightReverseDiffs = (
-				await git.getDiffs(
-					scm.repoPath,
-					{ includeSaved, includeStaged, reverse: true },
-					newestCommitInReview.sha
-				)
-			).filter(removeExcluded);
+			rightBaseSha = leftBaseSha;
+			rightBaseAuthor = leftBaseAuthor;
 		}
+
+		rightDiffs = (
+			await git.getDiffs(scm.repoPath, { includeSaved, includeStaged }, rightBaseSha)
+		).filter(removeExcluded);
+		rightReverseDiffs = (
+			await git.getDiffs(scm.repoPath, { includeSaved, includeStaged, reverse: true }, rightBaseSha)
+		).filter(removeExcluded);
 		rightDiffs.push(...newFileDiffs);
 		rightReverseDiffs.push(...newFileReverseDiffs);
 
@@ -2098,6 +2085,18 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					break;
 				}
 
+				case "clubhouse": {
+					response = await providerRegistry.createCard({
+						providerId: attributes.issueProvider.id,
+						data: {
+							description,
+							name: providerCardRequest.codemark.title,
+							projectId: attributes.projectId,
+							assignees: attributes.assignees
+						}
+					});
+					break;
+				}
 				default:
 					return undefined;
 			}

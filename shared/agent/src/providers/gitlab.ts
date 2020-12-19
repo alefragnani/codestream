@@ -5,11 +5,9 @@ import * as paths from "path";
 import * as qs from "querystring";
 import { URI } from "vscode-uri";
 import { SessionContainer } from "../container";
-import { GitRemote } from "../git/models/remote";
+import { GitRemoteLike } from "../git/models/remote";
 import { GitRepository } from "../git/models/repository";
 import { Logger } from "../logger";
-import { Markerish, MarkerLocationManager } from "../managers/markerLocationManager";
-import { MAX_RANGE_VALUE } from "../markerLocation/calculator";
 import {
 	CreateThirdPartyCardRequest,
 	DocumentMarker,
@@ -64,14 +62,31 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 		return "gitlab";
 	}
 
-	get headers() {
+	get headers(): any {
 		return {
 			Authorization: `Bearer ${this.accessToken}`
 		};
 	}
 
-	protected isPRApiCompatible(): Promise<boolean> {
-		return Promise.resolve(true);
+	protected getPRExternalContent(comment: PullRequestComment) {
+		return {
+			provider: {
+				name: this.displayName,
+				icon: "gitlab",
+				id: this.providerConfig.id
+			},
+			subhead: `#${comment.pullRequest.id}`,
+			actions: [
+				{
+					label: "Open Note",
+					uri: comment.url
+				},
+				{
+					label: `Open Merge Request #${comment.pullRequest.id}`,
+					uri: comment.pullRequest.url
+				}
+			]
+		};
 	}
 
 	async onConnected() {
@@ -250,123 +265,7 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 		repoId: string | undefined;
 		streamId: string;
 	}): Promise<DocumentMarker[]> {
-		void (await this.ensureConnected());
-
-		const documentMarkers: DocumentMarker[] = [];
-
-		if (!(await this.isPRApiCompatible())) return documentMarkers;
-
-		const { git, session } = SessionContainer.instance();
-
-		const repo = await git.getRepositoryByFilePath(uri.fsPath);
-		if (repo === undefined) return documentMarkers;
-
-		const comments = await this._getCommentsForPath(uri.fsPath, repo);
-		if (comments === undefined) return documentMarkers;
-
-		const commentsById: { [id: string]: PullRequestComment } = Object.create(null);
-		const markersByCommit = new Map<string, Markerish[]>();
-		const trackingBranch = await git.getTrackingBranch(uri);
-
-		let line;
-		let rev;
-		for (const c of comments) {
-			if (
-				c.pullRequest.isOpen &&
-				c.pullRequest.targetBranch !== trackingBranch?.shortName &&
-				c.pullRequest.sourceBranch !== trackingBranch?.shortName
-			) {
-				continue;
-			}
-
-			const outdated = !(await git.isValidReference(repo.path, c.commit));
-
-			rev = outdated ? c.originalCommit! : c.commit;
-
-			let markers = markersByCommit.get(rev);
-			if (markers === undefined) {
-				markers = [];
-				markersByCommit.set(rev, markers);
-			}
-
-			line = outdated ? c.originalLine! : c.line;
-			commentsById[c.id] = c;
-			const referenceLocations: CSReferenceLocation[] = [];
-			if (line >= 0) {
-				referenceLocations.push({
-					commitHash: rev,
-					location: [line, 1, line, MAX_RANGE_VALUE, undefined] as CSLocationArray,
-					flags: {
-						canonical: true
-					}
-				});
-			}
-			markers.push({
-				id: c.id,
-				referenceLocations
-			});
-		}
-
-		const locations = await MarkerLocationManager.computeCurrentLocations(uri, markersByCommit);
-
-		const teamId = session.teamId;
-
-		for (const [id, location] of Object.entries(locations.locations)) {
-			const comment = commentsById[id];
-
-			documentMarkers.push({
-				id: id,
-				codemarkId: undefined,
-				fileUri: uri.toString(),
-				fileStreamId: streamId,
-				// postId: undefined!,
-				// postStreamId: undefined!,
-				repoId: repoId!,
-				teamId: teamId,
-				file: uri.fsPath,
-				// commitHashWhenCreated: revision!,
-				// locationWhenCreated: MarkerLocation.toArray(location),
-				modifiedAt: new Date(comment.createdAt).getTime(),
-				code: "",
-
-				createdAt: new Date(comment.createdAt).getTime(),
-				creatorId: comment.author.id,
-				creatorName: comment.author.nickname,
-				externalContent: {
-					provider: {
-						name: this.displayName,
-						icon: "gitlab"
-					},
-					subhead: `#${comment.pullRequest.id}`,
-					actions: [
-						{
-							label: "Open Note",
-							uri: comment.url
-						},
-						{
-							label: `Open Merge Request #${comment.pullRequest.id}`,
-							uri: comment.pullRequest.url
-						}
-					]
-				},
-				range: {
-					start: {
-						line: location.lineStart - 1,
-						character: location.colStart - 1
-					},
-					end: {
-						line: location.lineEnd - 1,
-						character: location.colEnd - 1
-					}
-				},
-				location: location,
-				summary: comment.text,
-				summaryMarkdown: `\n\n${Strings.escapeMarkdown(comment.text)}`,
-				type: CodemarkType.Comment
-			});
-		}
-
-		return documentMarkers;
+		return super.getPullRequestDocumentMarkersCore({ uri, repoId, streamId });
 	}
 
 	private _commentsByRepoAndPath = new Map<
@@ -374,12 +273,13 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 		{ expiresAt: number; comments: Promise<PullRequestComment[]> }
 	>();
 
-	private _isMatchingRemotePredicate = (r: GitRemote) => r.domain === "gitlab.com";
+	private _isMatchingRemotePredicate = (r: GitRemoteLike) => r.domain === "gitlab.com";
 	getIsMatchingRemotePredicate() {
 		return this._isMatchingRemotePredicate;
 	}
 
 	async getRemotePaths(repo: any, _projectsByRemotePath: any) {
+		// TODO don't need this ensureConnected -- doesn't hit api
 		await this.ensureConnected();
 		const remotePaths = await getRemotePaths(
 			repo,
@@ -439,8 +339,8 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 				`/projects/${encodeURIComponent(`${owner}/${name}`)}/merge_requests`,
 				{
 					title: request.title,
-					source_branch: request.baseRefName,
-					target_branch: request.headRefName,
+					source_branch: request.headRefName,
+					target_branch: request.baseRefName,
 					description: this.createDescription(request)
 				},
 				{
@@ -471,16 +371,47 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 	}
 
 	async getRepoInfo(request: { remote: string }): Promise<ProviderGetRepoInfoResponse> {
+		let owner;
+		let name;
 		try {
-			const { owner, name } = this.getOwnerFromRemote(request.remote);
+			({ owner, name } = this.getOwnerFromRemote(request.remote));
 
-			const projectResponse = await this.get<GitLabProjectInfoResponse>(
-				`/projects/${encodeURIComponent(`${owner}/${name}`)}`
-			);
-
-			const mergeRequestsResponse = await this.get<GitLabMergeRequestInfoResponse[]>(
-				`/projects/${encodeURIComponent(`${owner}/${name}`)}/merge_requests?state=opened`
-			);
+			let projectResponse;
+			try {
+				projectResponse = await this.get<GitLabProjectInfoResponse>(
+					`/projects/${encodeURIComponent(`${owner}/${name}`)}`
+				);
+			} catch (ex) {
+				Logger.error(ex, `${this.displayName}: failed to get projects`, {
+					owner: owner,
+					name: name,
+					hasProviderInfo: this._providerInfo != null
+				});
+				return {
+					error: {
+						type: "PROVIDER",
+						message: ex.message
+					}
+				};
+			}
+			let mergeRequestsResponse;
+			try {
+				mergeRequestsResponse = await this.get<GitLabMergeRequestInfoResponse[]>(
+					`/projects/${encodeURIComponent(`${owner}/${name}`)}/merge_requests?state=opened`
+				);
+			} catch (ex) {
+				Logger.error(ex, `${this.displayName}: failed to get merge_requests`, {
+					owner: owner,
+					name: name,
+					hasProviderInfo: this._providerInfo != null
+				});
+				return {
+					error: {
+						type: "PROVIDER",
+						message: ex.message
+					}
+				};
+			}
 
 			return {
 				id: (projectResponse.body.iid || projectResponse.body.id)!.toString(),
@@ -489,14 +420,16 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 					return {
 						id: _.iid.toString(),
 						url: _.web_url,
-						baseRefName: _.source_branch,
-						headRefName: _.target_branch
+						baseRefName: _.target_branch,
+						headRefName: _.source_branch
 					};
 				})
 			};
 		} catch (ex) {
-			Logger.error(ex, `${this.displayName}: getRepoInfo`, {
-				remote: request.remote
+			Logger.error(ex, `${this.displayName}: getRepoInfo failed`, {
+				owner: owner,
+				name: name,
+				hasProviderInfo: this._providerInfo != null
 			});
 
 			return {
@@ -509,7 +442,7 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 	}
 
 	@log()
-	private async _getCommentsForPath(
+	protected async getCommentsForPath(
 		filePath: string,
 		repo: GitRepository
 	): Promise<PullRequestComment[] | undefined> {

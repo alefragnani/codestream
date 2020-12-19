@@ -50,6 +50,12 @@ export const PROVIDER_MAPPINGS: { [provider: string]: ProviderDisplay } = {
 		helpUrl:
 			"https://confluence.atlassian.com/bitbucketserver/personal-access-tokens-939515499.html"
 	},
+	clubhouse: {
+		displayName: "Clubhouse",
+		icon: "clubhouse",
+		helpUrl: "https://help.clubhouse.io/hc/en-us/articles/205701199-Clubhouse-API-Tokens",
+		supportsStartWork: true
+	},
 	codestream: {
 		displayName: "CodeStream",
 		icon: "codestream"
@@ -149,7 +155,8 @@ export const PROVIDER_MAPPINGS: { [provider: string]: ProviderDisplay } = {
 		getUrl: "https://azure.microsoft.com/en-us/services/devops",
 		boardLabel: "project",
 		listLabel: "list",
-		cardLabel: "work item"
+		cardLabel: "work item",
+		supportsStartWork: true
 	},
 	slack: { displayName: "Slack", icon: "slack", groupName: "Workspace" },
 	msteams: { displayName: "Microsoft Teams", icon: "msteams", groupName: "Organization" }

@@ -259,6 +259,7 @@ export interface ThirdPartyProviderUser {
 	id?: string;
 	displayName: string;
 	email?: string;
+	avatarUrl?: string;
 }
 
 export interface FetchAssignableUsersRequest {
@@ -328,8 +329,11 @@ export interface RemoveEnterpriseProviderHostRequest {
 
 export interface EnterpriseConfigurationData {
 	host?: string;
-	baseUrl: string;
+	baseUrl?: string;
 	token: string;
+	data?: {
+		[key: string]: any;
+	};
 }
 
 export interface FetchThirdPartyPullRequestRequest {
@@ -345,6 +349,10 @@ export interface FetchThirdPartyPullRequestRequest {
 	 * in the GitHub world, this is `codestream` in https://github.com/TeamCodeStream/codestream
 	 */
 	repo?: string;
+	/**
+	 * if true, clear this PR from the cache and re-fetch from the provider
+	 */
+	force?: boolean;
 }
 
 export interface FetchThirdPartyPullRequestFilesResponse {
@@ -372,6 +380,7 @@ export interface FetchThirdPartyPullRequestPullRequest {
 	bodyHTML: string;
 	baseRefName: string;
 	baseRefOid: string;
+	forkPointSha?: string;
 	author: {
 		login: string;
 		avatarUrl: string;
@@ -408,7 +417,7 @@ export interface FetchThirdPartyPullRequestPullRequest {
 	};
 	number: number;
 	state: string;
-	isDraft: boolean;
+	isDraft?: boolean;
 	reviewRequests: {
 		nodes: {
 			requestedReviewer: {
@@ -488,6 +497,8 @@ export interface FetchThirdPartyPullRequestPullRequest {
 	mergeable: string;
 	merged: boolean;
 	mergedAt: string;
+	canBeRebased: string;
+	mergeStateStatus: string;
 	title: string;
 	url: string;
 	repoUrl: string;
@@ -508,6 +519,19 @@ export interface FetchThirdPartyPullRequestPullRequest {
 	};
 }
 
+interface BranchProtectionRule {
+	requiredApprovingReviewCount: number;
+	matchingRefs: {
+		nodes: {
+			name: string;
+		}[];
+	};
+}
+
+export interface BranchProtectionRules {
+	nodes: BranchProtectionRule[];
+}
+
 export interface FetchThirdPartyPullRequestRepository {
 	id: string;
 	url: string;
@@ -519,6 +543,8 @@ export interface FetchThirdPartyPullRequestRepository {
 	repoName: string;
 	pullRequest: FetchThirdPartyPullRequestPullRequest;
 	providerId: string;
+	viewerPermission: "ADMIN" | "MAINTAIN" | "READ" | "TRIAGE" | "WRITE";
+	branchProtectionRules: BranchProtectionRules;
 }
 
 interface RateLimit {
@@ -603,25 +629,44 @@ export class ExecuteThirdPartyTypedType<Req, Res> extends RequestType<
 	}
 }
 
+export interface QueryThirdPartyRequest {
+	url: string;
+}
+
+export interface QueryThirdPartyResponse {
+	providerId?: string;
+}
+
+export const QueryThirdPartyRequestType = new RequestType<
+	QueryThirdPartyRequest,
+	QueryThirdPartyResponse,
+	void,
+	void
+>("codestream/provider/query");
+
 export interface GetMyPullRequestsRequest {
 	owner?: string;
-	name?: string;
-	/** if true, only return PRs that are open */
-	isOpen?: boolean;
+	repo?: string;
+	queries: string[];
 	/**
 	 * forces a re-fetch from the provider
 	 */
 	force?: boolean;
+	/**
+	 * is this repo open in the IDE?
+	 */
+	isOpen?: boolean;
 }
 
 export interface GetMyPullRequestsResponse {
 	id: string;
+	providerId: string;
 	url: string;
 	title: string;
 	createdAt: number;
 	baseRefName: string;
 	headRefName: string;
-	headRepository: {
+	headRepository?: {
 		name: string;
 		nameWithOwner: string;
 	};
@@ -629,12 +674,14 @@ export interface GetMyPullRequestsResponse {
 		login: string;
 		avatarUrl: string;
 	};
+	body: string;
 	bodyText: string;
 	number: number;
 	state: string;
-	isDraft: boolean;
+	isDraft?: boolean;
 	updatedAt: string;
 	lastEditedAt: string;
+	labels: { nodes: { color: string; description: string; name: string; id: string }[] };
 }
 
 export type MergeMethod = "MERGE" | "SQUASH" | "REBASE";
@@ -659,3 +706,23 @@ export interface ExecuteThirdPartyTypedRequest<T> {
 	providerId: string;
 	params?: T;
 }
+
+export interface ProviderTokenRequest {
+	provider: string;
+	token: string;
+	inviteCode?: string;
+	repoInfo?: {
+		teamId: string;
+		repoId: string;
+		commitHash: string;
+	}
+	noSignup?: boolean;
+	signupToken?: string;
+	data?: {
+		[key: string]: any;
+	};
+}
+
+export const ProviderTokenRequestType = new RequestType<ProviderTokenRequest, void, void, void>(
+	"codestream/provider/token"
+);

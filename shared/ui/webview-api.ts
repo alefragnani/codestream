@@ -14,13 +14,18 @@ import {
 	HostDidChangeEditorSelectionNotification,
 	HostDidChangeEditorVisibleRangesNotification,
 	NewCodemarkNotification,
-	NewPullRequestNotificationType,
-	NewPullRequestNotification,
 	NewReviewNotificationType,
 	NewReviewNotification
 } from "./ipc/webview.protocol";
 import { shortUuid, AnyObject } from "./utils";
-import { TelemetryRequestType } from "@codestream/protocols/agent";
+import {
+	CodeStreamApiDeleteRequestType,
+	CodeStreamApiGetRequestType,
+	CodeStreamApiPostRequestType,
+	CodeStreamApiPutRequestType,
+	TelemetryRequestType
+} from "@codestream/protocols/agent";
+import * as qs from "querystring";
 
 type NotificationParamsOf<NT> = NT extends NotificationType<infer N, any> ? N : never;
 type RequestParamsOf<RT> = RT extends RequestType<infer R, any, any, any> ? R : never;
@@ -191,10 +196,12 @@ export class HostApi extends EventEmitter {
 
 	send<RT extends RequestType<any, any, any, any>>(
 		type: RT,
-		params: RequestParamsOf<RT>
+		params: RequestParamsOf<RT>,
+		options?: { alternateReject?: (error) => {} }
 	): Promise<RequestResponseOf<RT>> {
 		const id = this.nextId();
 		return new Promise((resolve, reject) => {
+			reject = (options && options.alternateReject) || reject;
 			this._pendingRequests.set(id, { resolve, reject, method: type.method });
 
 			const payload = {
@@ -222,5 +229,34 @@ export class HostApi extends EventEmitter {
 		}
 
 		return `wv:${sequence}:${shortUuid()}`;
+	}
+}
+
+export class Server {
+	static get<Res = any>(url: string, paramData?: { [key: string]: any }): Promise<Res> {
+		return HostApi.instance.send(new RequestType<any, Res, void, void>("codestream/api/get"), {
+			url: url,
+			paramData: paramData
+		});
+	}
+
+	static post<Res = any>(url: string, body?: any): Promise<Res> {
+		return HostApi.instance.send(new RequestType<any, Res, void, void>("codestream/api/post"), {
+			url: url,
+			body: body
+		});
+	}
+
+	static put<Res = any>(url: string, body?: any): Promise<Res> {
+		return HostApi.instance.send(new RequestType<any, Res, void, void>("codestream/api/put"), {
+			url: url,
+			body: body
+		});
+	}
+
+	static delete<Res = any>(url: string): Promise<Res> {
+		return HostApi.instance.send(new RequestType<any, Res, void, void>("codestream/api/delete"), {
+			url: url
+		});
 	}
 }

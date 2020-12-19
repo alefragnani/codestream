@@ -8,17 +8,13 @@ import styled from "styled-components";
 import { PRReactions, PRReaction } from "./PullRequestComponents";
 import Tooltip from "./Tooltip";
 import { SmartFormattedList } from "./SmartFormattedList";
-import { HostApi } from "../webview-api";
-import {
-	ExecuteThirdPartyTypedType,
-	FetchThirdPartyPullRequestPullRequest
-} from "@codestream/protocols/agent";
+import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/agent";
+import { api } from "../store/providerPullRequests/actions";
 
 interface Props {
 	pr: FetchThirdPartyPullRequestPullRequest;
 	targetId: string;
 	setIsLoadingMessage: Function;
-	fetch: Function;
 	className?: string;
 	reactionGroups?: any;
 }
@@ -43,10 +39,6 @@ export const PRReact = styled.div`
 
 export const PullRequestReactButton = styled((props: Props) => {
 	const dispatch = useDispatch();
-	const derivedState = useSelector((state: CodeStreamState) => {
-		return {};
-	});
-
 	const [open, setOpen] = React.useState<EventTarget | undefined>();
 	const [menuTitle, setMenuTitle] = React.useState("");
 
@@ -54,16 +46,13 @@ export const PullRequestReactButton = styled((props: Props) => {
 		props.setIsLoadingMessage("Saving Reaction...");
 		setOpen(undefined);
 
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "toggleReaction",
-			providerId: props.pr.providerId,
-			params: {
+		await dispatch(
+			api("toggleReaction", {
 				subjectId: props.targetId,
 				content: key,
 				onOff
-			}
-		});
-		props.fetch();
+			})
+		);
 	};
 
 	const isMine = (key: string) => {
@@ -136,7 +125,6 @@ interface ReactionProps {
 	reactionGroups: any;
 	targetId: string;
 	setIsLoadingMessage: Function;
-	fetch: Function;
 }
 
 const REACTION_MAP = {
@@ -165,19 +153,17 @@ export const PullRequestReactions = (props: ReactionProps) => {
 	const { reactionGroups } = props;
 	if (!reactionGroups) return null;
 
+	const dispatch = useDispatch();
 	const saveReaction = async (key: string, onOff: boolean) => {
 		props.setIsLoadingMessage("Saving Reaction...");
 
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "toggleReaction",
-			providerId: props.pr.providerId,
-			params: {
+		await dispatch(
+			api("toggleReaction", {
 				subjectId: props.targetId,
 				content: key,
 				onOff
-			}
-		});
-		props.fetch();
+			})
+		);
 	};
 
 	const me = props.pr.viewer.login;
@@ -215,7 +201,6 @@ export const PullRequestReactions = (props: ReactionProps) => {
 					pr={props.pr}
 					targetId={props.targetId}
 					setIsLoadingMessage={props.setIsLoadingMessage}
-					fetch={props.fetch}
 					reactionGroups={props.reactionGroups}
 				/>
 			</PRReactions>

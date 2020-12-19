@@ -1,19 +1,10 @@
 import React from "react";
-import { useDispatch, useSelector } from "react-redux";
-import { CodeStreamState } from "../store";
+import { useDispatch } from "react-redux";
 import Icon from "./Icon";
-import Menu from "./Menu";
-import { emojify } from "./Markdowner";
-import styled from "styled-components";
-import { PRReactions, PRReaction } from "./PullRequestComponents";
-import Tooltip from "./Tooltip";
-import { SmartFormattedList } from "./SmartFormattedList";
-import { HostApi } from "../webview-api";
-import { ExecuteThirdPartyTypedType } from "@codestream/protocols/agent";
-import { DropdownButton } from "./Review/DropdownButton";
 import { InlineMenu } from "../src/components/controls/InlineMenu";
 import copy from "copy-to-clipboard";
 import { confirmPopup } from "./Confirm";
+import { api } from "../store/providerPullRequests/actions";
 
 interface CommentMenuProps {
 	pr: any;
@@ -29,7 +20,7 @@ interface CommentMenuProps {
 
 export const PullRequestCommentMenu = (props: CommentMenuProps) => {
 	const { pr, node, setEdit, quote, isPending, fetch, setIsLoadingMessage } = props;
-
+	const dispatch = useDispatch();
 	const deleteComment = () => {
 		confirmPopup({
 			title: "Are you sure?",
@@ -43,31 +34,26 @@ export const PullRequestCommentMenu = (props: CommentMenuProps) => {
 					wait: true,
 					action: async () => {
 						setIsLoadingMessage("Deleting Comment...");
-						HostApi.instance.track("PR Comment Deleted", {
-							Host: pr.providerId
-						});
 
 						if (props.nodeType === "REVIEW") {
-							await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-								method: "deletePullRequestReview",
-								providerId: pr.providerId,
-								params: {
-									pullRequestId: pr.id,
+							await dispatch(
+								api("deletePullRequestReview", {
 									pullRequestReviewId: node.id
-								}
-							});
+								})
+							);
+							fetch();
 						} else {
-							await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-								method: "deletePullRequestComment",
-								providerId: pr.providerId,
-								params: {
-									pullRequestId: pr.id,
+							await dispatch(
+								api("deletePullRequestComment", {
 									type: props.nodeType,
-									id: node.id
-								}
-							});
+									id: node.id,
+									pullRequestId: pr.id
+								})
+							);
+							if (props.nodeType !== "ISSUE_COMMENT") {
+								fetch();
+							}
 						}
-						fetch();
 					}
 				}
 			]

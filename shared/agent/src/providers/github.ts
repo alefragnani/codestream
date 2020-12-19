@@ -1,20 +1,20 @@
 "use strict";
-import { GitRemote, GitRepository } from "git/gitService";
+import { GitRemoteLike, GitRepository } from "git/gitService";
 import { GraphQLClient } from "graphql-request";
-import { uniqBy as _uniqBy } from "lodash-es";
 import { Response } from "node-fetch";
 import * as paths from "path";
 import * as qs from "querystring";
 import { CodeStreamSession } from "session";
 import { URI } from "vscode-uri";
-import { MarkerLocation } from "../api/extensions";
+import { InternalError, ReportSuppressedMessages } from "../agentError";
 import { SessionContainer } from "../container";
-import { Logger } from "../logger";
-import { Markerish, MarkerLocationManager } from "../managers/markerLocationManager";
-import { findBestMatchingLine, MAX_RANGE_VALUE } from "../markerLocation/calculator";
+import { Logger, TraceLevel } from "../logger";
 import {
 	CreateThirdPartyCardRequest,
+	DidChangePullRequestCommentsNotificationType,
 	DocumentMarker,
+	EnterpriseConfigurationData,
+	FetchReposResponse,
 	FetchThirdPartyBoardsRequest,
 	FetchThirdPartyBoardsResponse,
 	FetchThirdPartyCardsRequest,
@@ -24,8 +24,10 @@ import {
 	FetchThirdPartyPullRequestCommitsRequest,
 	FetchThirdPartyPullRequestCommitsResponse,
 	FetchThirdPartyPullRequestFilesResponse,
+	FetchThirdPartyPullRequestPullRequest,
 	FetchThirdPartyPullRequestRequest,
 	FetchThirdPartyPullRequestResponse,
+	GetMyPullRequestsRequest,
 	GetMyPullRequestsResponse,
 	GitHubBoard,
 	GitHubCreateCardRequest,
@@ -34,16 +36,20 @@ import {
 	MergeMethod,
 	MoveThirdPartyCardRequest,
 	MoveThirdPartyCardResponse,
+	ThirdPartyDisconnect,
 	ThirdPartyProviderCard,
 	ThirdPartyProviderConfig
 } from "../protocol/agent.protocol";
-import { CodemarkType, CSGitHubProviderInfo, CSReferenceLocation } from "../protocol/api.protocol";
+
+import semver from "semver";
+import { CSGitHubProviderInfo, CSRepository } from "../protocol/api.protocol";
 import { Arrays, Functions, log, lspProvider, Strings } from "../system";
 import {
 	getOpenedRepos,
 	getRemotePaths,
 	ProviderCreatePullRequestRequest,
 	ProviderCreatePullRequestResponse,
+	ProviderGetForkedReposResponse,
 	ProviderGetRepoInfoResponse,
 	PullRequestComment,
 	REFRESH_TIMEOUT,
@@ -59,6 +65,26 @@ interface GitHubRepo {
 	has_issues: boolean;
 }
 
+interface Directives {
+	directives: {
+		type:
+			| "addNode"
+			| "addNodes"
+			| "addReaction"
+			| "removeNode"
+			| "removeReaction"
+			| "resolveReviewThread"
+			| "unresolveReviewThread"
+			| "updateNode"
+			| "updatePullRequest"
+			| "updatePullRequestReview"
+			| "updatePullRequestReviewers"
+			| "updatePullRequestReviewComment"
+			| "updatePullRequestReviewCommentNode";
+		data: any;
+	}[];
+}
+
 const diffHunkRegex = /^@@ -([\d]+)(?:,([\d]+))? \+([\d]+)(?:,([\d]+))? @@/;
 
 @lspProvider("github")
@@ -72,6 +98,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	}
 
 	async getRemotePaths(repo: any, _projectsByRemotePath: any) {
+		// TODO don't need this ensureConnected -- doesn't hit api
 		await this.ensureConnected();
 		const remotePaths = await getRemotePaths(
 			repo,
@@ -81,8 +108,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		return remotePaths;
 	}
 
-	private _githubUserId: string | undefined;
 	private _knownRepos = new Map<string, GitHubRepo>();
+	_pullRequestCache: Map<string, FetchThirdPartyPullRequestResponse> = new Map();
 
 	get displayName() {
 		return "GitHub";
@@ -90,6 +117,10 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 
 	get name() {
 		return "github";
+	}
+
+	get icon() {
+		return "mark-github";
 	}
 
 	get headers() {
@@ -100,29 +131,389 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		};
 	}
 
-	protected isPRApiCompatible(): Promise<boolean> {
-		return Promise.resolve(true);
+	protected getPRExternalContent(comment: PullRequestComment) {
+		return {
+			provider: {
+				name: this.displayName,
+				icon: "mark-github",
+				id: this.providerConfig.id
+			},
+			subhead: `#${comment.pullRequest.id}`,
+			externalId: comment.pullRequest.externalId,
+			externalChildId: comment.id,
+			externalType: "PullRequest",
+			title: comment.pullRequest.title,
+			diffHunk: comment.diffHunk,
+			actions: []
+		};
 	}
 
-	private _client: GraphQLClient | undefined;
-	private get client(): GraphQLClient {
-		if (this._client === undefined) {
-			if (!this.accessToken) {
-				throw new Error("No GitHub personal access token could be found");
-			}
+	get graphQlBaseUrl() {
+		return `${this.baseUrl}/graphql`;
+	}
 
-			this._client = new GraphQLClient(`${this.baseUrl}/graphql`, {
-				headers: {
-					Authorization: `Bearer ${this.accessToken}`
-				}
-			});
+	/**
+	 * The version of the GitHub api... note this is only set for enterprise
+	 *
+	 * @protected
+	 * @type {(string | undefined)}
+	 * @memberof GitHubProvider
+	 */
+	protected _version: string | undefined;
+
+	protected _client: GraphQLClient | undefined;
+	protected async client(): Promise<GraphQLClient> {
+		if (this._client === undefined) {
+			this._client = new GraphQLClient(this.graphQlBaseUrl);
 		}
+		if (!this.accessToken) {
+			throw new Error("Could not get a GitHub personal access token");
+		}
+
+		// set accessToken on a per-usage basis... possible for accessToken
+		// to be revoked from the source (github.com) and a stale accessToken
+		// could be cached in the _client instance.
+		this._client.setHeaders({
+			Authorization: `Bearer ${this.accessToken}`,
+			Accept: "application/vnd.github.merge-info-preview+json"
+		});
+
 		return this._client;
 	}
 
 	async onConnected() {
-		this._githubUserId = await this.getMemberId();
 		this._knownRepos = new Map<string, GitHubRepo>();
+	}
+
+	@log()
+	async onDisconnected(request?: ThirdPartyDisconnect) {
+		// delete the graphql client so it will be reconstructed if a new token is applied
+		delete this._client;
+		super.onDisconnected(request);
+	}
+
+	async ensureInitialized() {}
+
+	_queryLogger: {
+		restApi: {
+			rateLimit?: { remaining: number; limit: number; used: number; reset: number };
+			fns: any;
+		};
+		graphQlApi: {
+			rateLimit?: {
+				remaining: number;
+				resetAt: string;
+				resetInMinutes: number;
+				last?: { name: string; cost: number };
+			};
+			fns: any;
+		};
+	} = {
+		graphQlApi: { fns: {} },
+		restApi: { fns: {} }
+	};
+
+	_isSuppressedException(ex: any): ReportSuppressedMessages | undefined {
+		const networkErrors = [
+			"ENOTFOUND",
+			"ETIMEDOUT",
+			"EAI_AGAIN",
+			"ECONNRESET",
+			"ECONNREFUSED",
+			"ENETDOWN",
+			"socket disconnected before secure"
+		];
+
+		if (ex.message && networkErrors.some(e => ex.message.match(new RegExp(e)))) {
+			return ReportSuppressedMessages.NetworkError;
+		} else if (
+			(ex.message && ex.message.match(/GraphQL Error \(Code: 404\)/)) ||
+			(this.providerConfig.id === "github/enterprise" &&
+				ex.response &&
+				ex.response.error &&
+				ex.response.error.toLowerCase().indexOf("cookies must be enabled to use github") > -1)
+		) {
+			return ReportSuppressedMessages.ConnectionError;
+		} else if (
+			(ex.response && ex.response.message === "Bad credentials") ||
+			(ex.response &&
+				ex.response.errors instanceof Array &&
+				ex.response.errors.find((e: any) => e.type === "FORBIDDEN"))
+		) {
+			return ReportSuppressedMessages.AccessTokenInvalid;
+		} else {
+			return undefined;
+		}
+	}
+
+	async query<T = any>(query: string, variables: any = undefined) {
+		if (this._providerInfo && this._providerInfo.tokenError) {
+			delete this._client;
+			throw new InternalError(ReportSuppressedMessages.AccessTokenInvalid);
+		}
+
+		let response;
+		try {
+			response = await (await this.client()).request<any>(query, variables);
+		} catch (ex) {
+			Logger.warn("GitHub query caught:", ex);
+			const exType = this._isSuppressedException(ex);
+			if (exType !== undefined) {
+				if (exType !== ReportSuppressedMessages.NetworkError) {
+					// we know about this error, and we want to give the user a chance to correct it
+					// (but throwing up a banner), rather than logging the error to sentry
+					this.session.api.setThirdPartyProviderInfo({
+						providerId: this.providerConfig.id,
+						data: {
+							tokenError: {
+								error: ex,
+								occurredAt: Date.now(),
+								isConnectionError: exType === ReportSuppressedMessages.ConnectionError
+							}
+						}
+					});
+					delete this._client;
+				}
+				// this throws the error but won't log to sentry (for ordinary network errors that seem temporary)
+				throw new InternalError(exType, { error: ex });
+			} else {
+				// this is an unexpected error, throw the exception normally
+				throw ex;
+			}
+		}
+
+		try {
+			if (Logger.level === TraceLevel.Debug && response && response.rateLimit) {
+				this._queryLogger.graphQlApi.rateLimit = {
+					remaining: response.rateLimit.remaining,
+					resetAt: response.rateLimit.resetAt,
+					resetInMinutes: Math.floor(
+						(new Date(new Date(response.rateLimit.resetAt).toString()).getTime() -
+							new Date().getTime()) /
+							1000 /
+							60
+					)
+				};
+				const e = new Error();
+				if (e.stack) {
+					let functionName;
+					try {
+						functionName = e.stack
+							.split("\n")
+							.filter(
+								_ =>
+									(_.indexOf("GitHubProvider") > -1 ||
+										_.indexOf("GitHubEnterpriseProvider") > -1) &&
+									_.indexOf(".query") === -1
+							)![0]
+							.match(/GitHubProvider\.(\w+)/)![1];
+					} catch (err) {
+						functionName = "unknown";
+						Logger.warn(err);
+					}
+					this._queryLogger.graphQlApi.rateLimit.last = {
+						name: functionName,
+						cost: response.rateLimit.cost
+					};
+					if (!this._queryLogger.graphQlApi.fns[functionName]) {
+						this._queryLogger.graphQlApi.fns[functionName] = {
+							count: 1,
+							cumulativeCost: response.rateLimit.cost,
+							averageCost: response.rateLimit.cost
+						};
+					} else {
+						const existing = this._queryLogger.graphQlApi.fns[functionName];
+						existing.count++;
+						existing.cumulativeCost += response.rateLimit.cost;
+						existing.averageCost = Math.floor(existing.cumulativeCost / existing.count);
+						this._queryLogger.graphQlApi.fns[functionName] = existing;
+					}
+				}
+
+				Logger.log(JSON.stringify(this._queryLogger, null, 4));
+			}
+		} catch (err) {
+			Logger.warn(err);
+		}
+
+		return response;
+	}
+
+	async mutate<T>(query: string, variables: any = undefined) {
+		const response = await (await this.client()).request<T>(query, variables);
+		if (Logger.level === TraceLevel.Debug) {
+			try {
+				const e = new Error();
+				if (e.stack) {
+					let functionName;
+					try {
+						functionName = e.stack
+							.split("\n")
+							.filter(
+								_ =>
+									(_.indexOf("GitHubProvider") > -1 ||
+										_.indexOf("GitHubEnterpriseProvider") > -1) &&
+									_.indexOf(".mutate") === -1
+							)![0]
+							.match(/GitHubProvider\.(\w+)/)![1];
+					} catch (err) {
+						Logger.warn(err);
+						functionName = "unknown";
+					}
+					if (!this._queryLogger.graphQlApi.rateLimit) {
+						this._queryLogger.graphQlApi.rateLimit = {
+							remaining: -1,
+							resetAt: "",
+							resetInMinutes: -1
+						};
+					}
+					this._queryLogger.graphQlApi.rateLimit.last = {
+						name: functionName,
+						// mutate costs are 1
+						cost: 1
+					};
+					if (!this._queryLogger.graphQlApi.fns[functionName]) {
+						this._queryLogger.graphQlApi.fns[functionName] = {
+							count: 1
+						};
+					} else {
+						const existing = this._queryLogger.graphQlApi.fns[functionName];
+						existing.count++;
+
+						this._queryLogger.graphQlApi.fns[functionName] = existing;
+					}
+				}
+
+				Logger.log(JSON.stringify(this._queryLogger, null, 4));
+			} catch (err) {
+				Logger.warn(err);
+			}
+		}
+		return response;
+	}
+
+	async restPost<T extends object, R extends object>(url: string, variables: any) {
+		const response = await this.post<T, R>(url, variables);
+		if (
+			response &&
+			response.response &&
+			response.response.headers &&
+			Logger.level === TraceLevel.Debug
+		) {
+			try {
+				const rateLimit: any = {};
+				["limit", "remaining", "used", "reset"].forEach(key => {
+					try {
+						rateLimit[key] = parseInt(
+							response.response.headers.get(`x-ratelimit-${key}`) as string,
+							10
+						);
+					} catch (e) {
+						Logger.warn(e);
+					}
+				});
+
+				this._queryLogger.restApi.rateLimit = rateLimit;
+
+				const e = new Error();
+				if (e.stack) {
+					let functionName;
+					try {
+						functionName = e.stack
+							.split("\n")
+							.filter(
+								_ => _.indexOf("GitHubProvider") > -1 && _.indexOf("GitHubProvider.restPost") === -1
+							)![0]
+							.match(/GitHubProvider\.(\w+)/)![1];
+					} catch (ex) {
+						functionName = "unknown";
+					}
+
+					if (!this._queryLogger.restApi.fns[functionName]) {
+						this._queryLogger.restApi.fns[functionName] = {
+							count: 1
+						};
+					} else {
+						const existing = this._queryLogger.restApi.fns[functionName];
+						existing.count++;
+						this._queryLogger.restApi.fns[functionName] = existing;
+					}
+				}
+
+				Logger.log(JSON.stringify(this._queryLogger, null, 4));
+			} catch (err) {
+				console.warn(err);
+			}
+		}
+
+		return response;
+	}
+
+	async restGet<T extends object>(url: string) {
+		const response = await this.get<T>(url);
+		if (
+			response &&
+			response.response &&
+			response.response.headers &&
+			Logger.level === TraceLevel.Debug
+		) {
+			try {
+				const rateLimit: any = {};
+				["limit", "remaining", "used", "reset"].forEach(key => {
+					try {
+						rateLimit[key] = parseInt(
+							response.response.headers.get(`x-ratelimit-${key}`) as string,
+							10
+						);
+					} catch (e) {
+						Logger.warn(e);
+					}
+				});
+
+				this._queryLogger.restApi.rateLimit = rateLimit;
+
+				const e = new Error();
+				if (e.stack) {
+					let functionName;
+					try {
+						functionName = e.stack
+							.split("\n")
+							.filter(
+								_ => _.indexOf("GitHubProvider") > -1 && _.indexOf("GitHubProvider.restGet") === -1
+							)![0]
+							.match(/GitHubProvider\.(\w+)/)![1];
+					} catch (ex) {
+						functionName = "unknown";
+					}
+
+					if (!this._queryLogger.restApi.fns[functionName]) {
+						this._queryLogger.restApi.fns[functionName] = {
+							count: 1
+						};
+					} else {
+						const existing = this._queryLogger.restApi.fns[functionName];
+						existing.count++;
+						this._queryLogger.restApi.fns[functionName] = existing;
+					}
+				}
+
+				Logger.log(JSON.stringify(this._queryLogger, null, 4));
+			} catch (err) {
+				console.warn(err);
+			}
+		}
+
+		return response;
+	}
+
+	@log()
+	async configure(request: EnterpriseConfigurationData) {
+		await this.session.api.setThirdPartyProviderToken({
+			providerId: this.providerConfig.id,
+			token: request.token,
+			data: request.data
+		});
+		this.session.updateProviders();
 	}
 
 	@log()
@@ -131,7 +522,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 
 		const openReposMap = await getOpenedRepos<GitHubRepo>(
 			this.getIsMatchingRemotePredicate(),
-			p => this.get<GitHubRepo>(`/repos/${p}`),
+			p => this.restGet<GitHubRepo>(`/repos/${p}`),
 			this._knownRepos
 		);
 
@@ -150,7 +541,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			try {
 				let url: string | undefined = "/user/repos";
 				do {
-					const apiResponse = await this.get<{ [key: string]: string }[]>(url);
+					const apiResponse = await this.restGet<{ [key: string]: string }[]>(url);
 					userRepos.push(...apiResponse.body);
 					url = this.nextPage(apiResponse.response);
 				} while (url);
@@ -196,7 +587,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 						sort: "updated"
 				  })}`
 				: "/issues";
-			const result = await this.get<any>(url);
+			const result = await this.restGet<any>(url);
 			const items = request.customFilter ? result.body.items : result.body;
 			const cards: ThirdPartyProviderCard[] = items.map((card: any) => {
 				return {
@@ -216,11 +607,63 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			return { cards: [] };
 		}
 	}
+
+	async getPullRequestRepo(
+		allRepos: FetchReposResponse,
+		pullRequest: FetchThirdPartyPullRequestPullRequest
+	): Promise<CSRepository | undefined> {
+		let currentRepo: CSRepository | undefined = undefined;
+		try {
+			const repoName = pullRequest.repository.name.toLowerCase();
+			const repoUrl = pullRequest.repository.url.toLowerCase();
+			const repos = allRepos.repos;
+
+			const matchingRepos = repos.filter(_ =>
+				_.remotes.some(
+					r =>
+						r.normalizedUrl &&
+						r.normalizedUrl.length > 2 &&
+						r.normalizedUrl.match(/([a-zA-Z0-9]+)/) &&
+						repoUrl.indexOf(r.normalizedUrl.toLowerCase()) > -1
+				)
+			);
+			if (matchingRepos.length === 1) {
+				currentRepo = matchingRepos[0];
+			} else {
+				let matchingRepos2 = repos.filter(_ => _.name && _.name.toLowerCase() === repoName);
+				if (matchingRepos2.length !== 1) {
+					matchingRepos2 = repos.filter(_ =>
+						_.remotes.some(r => repoUrl.indexOf(r.normalizedUrl.toLowerCase()) > -1)
+					);
+					if (matchingRepos2.length === 1) {
+						currentRepo = matchingRepos2[0];
+					} else {
+						Logger.warn(`Could not find repo for repoName=${repoName} repoUrl=${repoUrl}`);
+					}
+				} else {
+					currentRepo = matchingRepos2[0];
+				}
+			}
+		} catch (error) {}
+		return currentRepo;
+	}
+
 	@log()
 	async getPullRequest(
 		request: FetchThirdPartyPullRequestRequest
 	): Promise<FetchThirdPartyPullRequestResponse> {
+		const { scm: scmManager } = SessionContainer.instance();
 		await this.ensureConnected();
+
+		if (request.force) {
+			this._pullRequestCache.delete(request.pullRequestId);
+		} else {
+			const cached = this._pullRequestCache.get(request.pullRequestId);
+			if (cached) {
+				return cached;
+			}
+		}
+
 		let response = {} as FetchThirdPartyPullRequestResponse;
 		let repoOwner: string;
 		let repoName: string;
@@ -256,6 +699,27 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		} catch (ex) {
 			Logger.error(ex);
 		}
+		if (response?.repository?.pullRequest) {
+			const { repos } = SessionContainer.instance();
+			const prRepo = await this.getPullRequestRepo(
+				await repos.get(),
+				response.repository.pullRequest
+			);
+
+			if (prRepo?.id) {
+				try {
+					const prForkPointSha = await scmManager.getForkPointRequestType({
+						repoId: prRepo.id,
+						baseSha: response.repository.pullRequest.baseRefOid,
+						headSha: response.repository.pullRequest.headRefOid
+					});
+
+					response.repository.pullRequest.forkPointSha = prForkPointSha?.sha;
+				} catch (err) {
+					Logger.error(err, `Could not find forkPoint for repoId=${prRepo.id}`);
+				}
+			}
+		}
 		if (response?.repository?.pullRequest?.timelineItems != null) {
 			response.repository.pullRequest.timelineItems.nodes = allTimelineItems;
 		}
@@ -267,8 +731,11 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 
 		response.repository.repoOwner = repoOwner!;
 		response.repository.repoName = repoName!;
-		response.repository.pullRequest.providerId = "github*com";
-		response.repository.providerId = "github*com";
+
+		response.repository.pullRequest.providerId = this.providerConfig.id;
+		response.repository.providerId = this.providerConfig.id;
+
+		this._pullRequestCache.set(request.pullRequestId, response);
 		return response;
 	}
 
@@ -277,7 +744,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		void (await this.ensureConnected());
 
 		const data = request.data as GitHubCreateCardRequest;
-		const response = await this.post<{}, GitHubCreateCardResponse>(
+		const response = await this.restPost<{}, GitHubCreateCardResponse>(
 			`/repos/${data.repoName}/issues`,
 			{
 				title: data.title,
@@ -291,12 +758,6 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	@log()
 	async moveCard(request: MoveThirdPartyCardRequest): Promise<MoveThirdPartyCardResponse> {
 		return { success: false };
-	}
-
-	private async getMemberId() {
-		const userResponse = await this.get<{ id: string; [key: string]: any }>(`/user`);
-
-		return userResponse.body.id;
 	}
 
 	private nextPage(response: Response): string | undefined {
@@ -319,12 +780,27 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	async getAssignableUsers(request: { boardId: string }) {
 		void (await this.ensureConnected());
 
-		const { body } = await this.get<GitHubUser[]>(`/repos/${request.boardId}/collaborators`);
-		return { users: body.map(u => ({ ...u, id: u.id, displayName: u.login })) };
+		try {
+			const { body } = await this.restGet<GitHubUser[]>(`/repos/${request.boardId}/collaborators`);
+			return {
+				users: body.map(u => ({
+					...u,
+					id: u.id,
+					displayName: u.login,
+					avatarUrl: u.avatar_url
+				}))
+			};
+		} catch (ex) {
+			// can't get assignable users for repos you don't have access to
+			Logger.warn(ex);
+		}
+		return {
+			users: []
+		};
 	}
 
 	@log()
-	async getPullRequestDocumentMarkers({
+	getPullRequestDocumentMarkers({
 		uri,
 		repoId,
 		streamId
@@ -333,157 +809,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		repoId: string | undefined;
 		streamId: string;
 	}): Promise<DocumentMarker[]> {
-		void (await this.ensureConnected());
-
-		const documentMarkers: DocumentMarker[] = [];
-
-		if (!(await this.isPRApiCompatible())) return documentMarkers;
-
-		const { git, session } = SessionContainer.instance();
-
-		const repo = await git.getRepositoryByFilePath(uri.fsPath);
-		if (repo === undefined) return documentMarkers;
-
-		const comments = await this._getCommentsForPath(uri.fsPath, repo);
-		if (comments === undefined) return documentMarkers;
-
-		const commentsById: { [id: string]: PullRequestComment } = Object.create(null);
-		const markersByCommit = new Map<string, Markerish[]>();
-		const trackingBranch = await git.getTrackingBranch(uri);
-
-		for (const c of comments) {
-			Logger.log(`GitHub.getPullRequestDocumentMarkers: processing comment ${c.id}`);
-
-			if (
-				c.pullRequest.isOpen &&
-				c.pullRequest.targetBranch !== trackingBranch?.shortName &&
-				c.pullRequest.sourceBranch !== trackingBranch?.shortName
-			) {
-				continue;
-			}
-
-			let rev;
-			let line;
-			if (c.line !== -1 && (await git.isValidReference(repo.path, c.commit))) {
-				rev = c.commit;
-				line = c.line;
-			} else if (
-				c.originalLine !== -1 &&
-				c.originalCommit &&
-				(await git.isValidReference(repo.path, c.originalCommit))
-			) {
-				rev = c.originalCommit!;
-				line = c.originalLine;
-			}
-
-			if (rev == undefined || line === undefined || line === -1) {
-				Logger.log(
-					`GitHub.getPullRequestDocumentMarkers: could not get position information comment ${c.id} from PR`
-				);
-				Logger.log(
-					`GitHub.getPullRequestDocumentMarkers: attempting to determine current revision for content-based calculation`
-				);
-				rev = await git.getFileCurrentRevision(uri);
-				if (!rev) {
-					Logger.log(
-						`GitHub.getPullRequestDocumentMarkers: could not determine current revision for file ${uri.fsPath}`
-					);
-					continue;
-				}
-
-				Logger.log(
-					`GitHub.getPullRequestDocumentMarkers: attempting to determine current revision for content-based calculation`
-				);
-				const contents = await git.getFileContentForRevision(uri, rev);
-				if (!contents) {
-					Logger.log(
-						`GitHub.getPullRequestDocumentMarkers: could not read contents of ${uri.fsPath}@${rev} from git`
-					);
-					continue;
-				}
-
-				Logger.log(
-					`GitHub.getPullRequestDocumentMarkers: calculating comment line via content analysis`
-				);
-				line = await findBestMatchingLine(contents, c.code, c.line);
-			}
-
-			Logger.log(
-				`GitHub.getPullRequestDocumentMarkers: comment ${c.id} located at line ${line}, commit ${rev}`
-			);
-
-			let markers = markersByCommit.get(rev);
-			if (markers === undefined) {
-				markers = [];
-				markersByCommit.set(rev, markers);
-			}
-
-			commentsById[c.id] = c;
-			if (line !== -1) {
-				const referenceLocation: CSReferenceLocation = {
-					commitHash: rev,
-					location: [line, 1, line, MAX_RANGE_VALUE, undefined],
-					flags: {
-						canonical: true
-					}
-				};
-				markers.push({
-					id: c.id,
-					referenceLocations: [referenceLocation]
-				});
-			} else {
-				Logger.log(
-					`GitHub.getPullRequestDocumentMarkers: could not find current location for comment ${c.url}`
-				);
-			}
-		}
-
-		const locations = await MarkerLocationManager.computeCurrentLocations(uri, markersByCommit);
-
-		const teamId = session.teamId;
-
-		for (const [id, location] of Object.entries(locations.locations)) {
-			const comment = commentsById[id];
-
-			documentMarkers.push({
-				id: id,
-				codemarkId: undefined,
-				fileUri: uri.toString(),
-				fileStreamId: streamId,
-				// postId: undefined!,
-				// postStreamId: undefined!,
-				repoId: repoId!,
-				teamId: teamId,
-				file: uri.fsPath,
-				// commitHashWhenCreated: revision!,
-				// locationWhenCreated: MarkerLocation.toArray(location),
-				modifiedAt: new Date(comment.createdAt).getTime(),
-				code: "",
-
-				createdAt: new Date(comment.createdAt).getTime(),
-				creatorId: comment.author.id,
-				creatorName: comment.author.nickname,
-				externalContent: {
-					provider: {
-						name: this.displayName,
-						icon: "mark-github"
-					},
-					subhead: `#${comment.pullRequest.id}`,
-					externalId: comment.pullRequest.externalId,
-					externalType: "PullRequest",
-					title: comment.pullRequest.title,
-					diffHunk: comment.diffHunk,
-					actions: []
-				},
-				range: MarkerLocation.toRange(location),
-				location: location,
-				summary: comment.text,
-				summaryMarkdown: `\n\n${Strings.escapeMarkdown(comment.text)}`,
-				type: CodemarkType.Comment
-			});
-		}
-
-		return documentMarkers;
+		return super.getPullRequestDocumentMarkersCore({ uri, repoId, streamId });
 	}
 
 	@log()
@@ -502,15 +828,22 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				};
 			}
 
-			const repoInfo = await this.getRepoInfo({ remote: request.remote });
-			if (repoInfo && repoInfo.error) {
-				return {
-					error: repoInfo.error
-				};
+			let repositoryId = "";
+			if (request.providerRepositoryId) {
+				repositoryId = request.providerRepositoryId;
+			} else {
+				const repoInfo = await this.getRepoInfo({ remote: request.remote });
+				if (repoInfo && repoInfo.id) {
+					repositoryId = repoInfo.id;
+				} else {
+					return {
+						error: repoInfo.error
+					};
+				}
 			}
 
-			const createPullRequestResponse = await this.client.request<GitHubCreatePullRequestResponse>(
-				`mutation CreatePullRequest($repositoryId:String!, $baseRefName:String!, $headRefName:String!, $title:String!, $body:String!) {
+			const createPullRequestResponse = await this.mutate<GitHubCreatePullRequestResponse>(
+				`mutation CreatePullRequest($repositoryId:ID!, $baseRefName:String!, $headRefName:String!, $title:String!, $body:String!) {
 					__typename
 					createPullRequest(input: {repositoryId: $repositoryId, baseRefName: $baseRefName, headRefName: $headRefName, title: $title, body: $body}) {
 					  pullRequest {
@@ -522,7 +855,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					}
 				  }`,
 				{
-					repositoryId: repoInfo!.id,
+					repositoryId: repositoryId,
 					baseRefName: request.baseRefName,
 					title: request.title,
 					headRefName: request.headRefName,
@@ -558,13 +891,19 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		try {
 			const { owner, name } = this.getOwnerFromRemote(request.remote);
 
-			const response = await this.client.request<any>(
+			const response = await this.query<any>(
 				`query getRepoInfo($owner:String!, $name:String!) {
-				repository(owner:$owner, name:$name) {
-				   id
-				   defaultBranchRef {
-						name
-				   }
+					rateLimit {
+						cost
+						resetAt
+						remaining
+						limit
+					}
+					repository(owner:$owner, name:$name) {
+				   		id
+				   		defaultBranchRef {
+							name
+				   		}
 				   pullRequests(first: 25, orderBy: {field: CREATED_AT, direction: DESC}, states: OPEN) {
 					totalCount
 					nodes {
@@ -606,6 +945,121 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		}
 	}
 
+	async getForkedRepos(
+		request: { remote: string },
+		recurseFailsafe?: boolean
+	): Promise<ProviderGetForkedReposResponse> {
+		try {
+			const { owner, name } = this.getOwnerFromRemote(request.remote);
+
+			const response = await this.query<any>(
+				`query getForkedRepos($owner:String!, $name:String!) {
+					rateLimit {
+						cost
+						resetAt
+						remaining
+						limit
+					}
+					repository(owner:$owner, name:$name) {
+				   		id
+						name
+						nameWithOwner
+						parent {
+							id
+							nameWithOwner
+						}
+						defaultBranchRef {
+							name
+						}
+						refs(first: 100, refPrefix: "refs/heads/") {
+						   nodes {
+							 name
+							 target {
+							   ... on Commit {
+								 oid
+								 committedDate
+							   }
+							 }
+						   }
+						}
+					    forks(first: 50, orderBy: {field: CREATED_AT, direction: DESC}) {
+							totalCount
+							pageInfo {
+								startCursor
+								endCursor
+								hasNextPage
+							}
+							nodes {
+								id
+								name
+								nameWithOwner
+								owner {
+									login
+								}
+								defaultBranchRef {
+									name
+								}
+								refs(first: 100, refPrefix: "refs/heads/") {
+									nodes {
+									  name
+									  target {
+										... on Commit {
+										  oid
+										  committedDate
+										}
+									  }
+									}
+								}
+							}
+						}
+				  	}
+				}
+			  `,
+				{
+					owner: owner,
+					name: name
+				}
+			);
+
+			// if this is a fork, get the forks of the parent
+			if (response.repository.parent && !recurseFailsafe) {
+				Logger.log("Getting parent forked repos");
+				const result = await this.getForkedRepos(
+					// this use of "example.com" is just to provide the URL parser something to parse
+					{ remote: "https://example.com/" + response.repository.parent.nameWithOwner },
+					true
+				);
+				return {
+					parent: result.parent,
+					forks: result.forks
+				};
+			}
+
+			const forks = response.repository.forks.nodes.sort((a: any, b: any) => {
+				if (b.nameWithOwner < a.nameWithOwner) return 1;
+				if (a.nameWithOwner < b.nameWithOwner) return -1;
+				return 0;
+			});
+			return {
+				parent: response.repository,
+				forks
+			};
+		} catch (ex) {
+			Logger.error(ex, "GitHub: getRepoInfo", {
+				remote: request.remote
+			});
+			let errorMessage =
+				ex.response && ex.response.errors ? ex.response.errors[0].message : "Unknown GitHub error";
+			errorMessage = `GitHub: ${errorMessage}`;
+			return {
+				error: {
+					type: "PROVIDER",
+					message: errorMessage
+				}
+			};
+		}
+	}
+
 	protected getOwnerFromRemote(remote: string): { owner: string; name: string } {
 		// HACKitude yeah, sorry
 		const uri = URI.parse(remote);
@@ -624,13 +1078,13 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	>();
 	private _prsByRepo = new Map<string, { expiresAt: number; prs: Promise<GitHubPullRequest[]> }>();
 
-	private _isMatchingRemotePredicate = (r: GitRemote) => r.domain === "github.com";
+	private _isMatchingRemotePredicate = (r: GitRemoteLike) => r.domain === "github.com";
 	getIsMatchingRemotePredicate() {
 		return this._isMatchingRemotePredicate;
 	}
 
 	@log()
-	private async _getCommentsForPath(
+	protected async getCommentsForPath(
 		filePath: string,
 		repo: GitRepository
 	): Promise<PullRequestComment[] | undefined> {
@@ -814,8 +1268,14 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		| undefined;
 
 	async getLabels(request: { owner: string; repo: string }) {
-		const query = await this.client.request<any>(
+		const query = await this.query<any>(
 			`query getLabels($owner:String!, $name:String!) {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
 				repository(owner:$owner, name:$name) {
 				  id
 				  labels(first: 50) {
@@ -837,8 +1297,14 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	}
 
 	async getProjects(request: { owner: string; repo: string }) {
-		const query = await this.client.request<any>(
+		const query = await this.query<any>(
 			`query GetProjects($owner:String!, $name:String!) {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
 				repository(owner:$owner, name:$name) {
 				  id
 				  projects(first: 50) {
@@ -860,8 +1326,14 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	}
 
 	async getMilestones(request: { owner: string; repo: string }) {
-		const query = await this.client.request<any>(
+		const query = await this.query<any>(
 			`query GetMilestones($owner:String!, $name:String!) {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
 				repository(owner:$owner, name:$name) {
 				  id
 				  milestones(first: 50) {
@@ -885,8 +1357,14 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	}
 
 	async getReviewers(request: { owner: string; repo: string }) {
-		const query = await this.client.request<any>(
+		const query = await this.query<any>(
 			`query FindReviewers($owner:String!, $name:String!)  {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
 				repository(owner:$owner, name:$name) {
 				  id
 				  collaborators(first: 50) {
@@ -908,157 +1386,445 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		return query.repository.collaborators.nodes;
 	}
 
-	async setIsDraftPullRequest(request: { pullRequestId: string; isDraft: boolean }) {
-		if (!request.isDraft) {
-			const query = `mutation MarkPullRequestReadyForReview($pullRequestId: String!) {
+	async markPullRequestReadyForReview(request: {
+		pullRequestId: string;
+		isReady: boolean;
+	}): Promise<Directives | undefined> {
+		if (request.isReady) {
+			const query = `mutation MarkPullRequestReadyForReview($pullRequestId:ID!) {
 				markPullRequestReadyForReview(input: {pullRequestId: $pullRequestId}) {
 					  clientMutationId
+					  pullRequest{
+						isDraft
+						updatedAt
+						state
+					  }
 					}
 				  }`;
 
-			const response = await this.client.request<any>(query, {
+			const response = await this.mutate<any>(query, {
 				pullRequestId: request.pullRequestId
 			});
-			return response;
+			return {
+				directives: [
+					{ type: "updatePullRequest", data: response.markPullRequestReadyForReview.pullRequest }
+				]
+			};
 		} else {
-			// const query = `mutation UpdateDraft($pullRequestId: String!, $isDraft:Boolean!) {
+			// const query = `mutation UpdateDraft($pullRequestId:ID!, $isDraft:Boolean!) {
 			// 	updatePullRequest(input: {pullRequestId: $pullRequestId, isDraft:$isDraft}) {
 			// 		  clientMutationId
 			// 		}
 			// 	  }`;
-			// const response = await this.client.request<any>(query, {
+			// const response = await this.mutate<any>(query, {
 			// 	pullRequestId: request.pullRequestId,
 			// 	isDraft: request.isDraft
 			// });
 			// return response;
+			return undefined;
 		}
 	}
 
-	async setLabelOnPullRequest(request: { pullRequestId: string; labelId: string; onOff: boolean }) {
+	async setLabelOnPullRequest(request: {
+		pullRequestId: string;
+		labelId: string;
+		onOff: boolean;
+	}): Promise<Directives> {
 		const method = request.onOff ? "addLabelsToLabelable" : "removeLabelsFromLabelable";
 		const Method = request.onOff ? "AddLabelsToLabelable" : "RemoveLabelsFromLabelable";
-		const query = `mutation ${Method}($labelableId: String!,$labelIds:String!) {
-			${method}(input: {labelableId: $labelableId, labelIds:$labelIds}) {
-				  clientMutationId
+		const query = `mutation ${Method}($labelableId: ID!,$labelIds:[ID!]!) {
+			${method}(input: {labelableId:$labelableId, labelIds:$labelIds}) {
+				clientMutationId
+				labelable {
+					... on PullRequest {
+					  updatedAt
+					  labels(first: 10) {
+						nodes {
+						  color
+						  description
+						  name
+						  id
+						}
+					  }
+					  timelineItems(last: 1, itemTypes: [LABELED_EVENT, UNLABELED_EVENT]) {
+						nodes {
+						  ... on LabeledEvent {
+							__typename
+							id
+							actor {
+							  login
+							  avatarUrl
+							}
+							label {
+							  id
+							  name
+							  description
+							  color
+							}
+							createdAt
+						  }
+						  ... on UnlabeledEvent {
+							id
+							__typename
+							actor {
+							  login
+							  avatarUrl
+							}
+							label {
+							  id
+							  name
+							  description
+							  color
+							}
+							createdAt
+						  }
+						}
+					  }
+					}
+				  }
 				}
 			  }`;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			labelableId: request.pullRequestId,
 			labelIds: request.labelId
 		});
-		return response;
+
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: {
+						labels: response[method].labelable.labels,
+						updatedAt: response[method].labelable.updatedAt
+					}
+				},
+				{ type: "addNode", data: response[method].labelable.timelineItems.nodes[0] }
+			]
+		};
 	}
 
 	async setAssigneeOnPullRequest(request: {
 		pullRequestId: string;
 		assigneeId: string;
 		onOff: boolean;
-	}) {
+	}): Promise<Directives> {
 		const method = request.onOff ? "addAssigneesToAssignable" : "removeAssigneesFromAssignable";
 		const Method = request.onOff ? "AddAssigneesFromAssignable" : "RemoveAssigneesFromAssignable";
-		const query = `mutation ${Method}($assignableId: String!,$assigneeIds:String!) {
+		const query = `mutation ${Method}($assignableId:ID!, $assigneeIds:[ID!]!) {
+			${method}(input: {assignableId:$assignableId, assigneeIds:$assigneeIds}) {
+				  clientMutationId
+				  assignable {
+					assignees(first: 10) {
+					  nodes {
+						bio
+						avatarUrl(size: 20)
+						id
+						name
+						login
+					  }
+					}
+					... on PullRequest {
+					  id
+					  timelineItems(last: 1, itemTypes: [ASSIGNED_EVENT, UNASSIGNED_EVENT]) {
+						  nodes {
+							... on AssignedEvent {
+							  __typename
+							  id
+							  actor {
+								login
+								avatarUrl
+							  }
+							  createdAt
+							  assignee {
+								... on User {
+								  id
+								  email
+								  login
+								}
+							  }
+							}
+							... on UnassignedEvent {
+							  __typename
+							  id
+							  actor {
+								login
+								avatarUrl
+							  }
+							  createdAt
+							  assignee {
+								... on User {
+								  id
+								  email
+								  login
+								}
+							  }
+							}
+						}
+					  }
+					}
+				  }
+				}
+			  }`;
+
+		const response = await this.mutate<any>(query, {
+			assignableId: request.pullRequestId,
+			assigneeIds: request.assigneeId
+		});
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: {
+						assignees: response[method].assignable.assignees,
+						updatedAt: response[method].assignable.updatedAt
+					}
+				},
+				{
+					type: "addNode",
+					data: response[method].assignable.timelineItems.nodes[0]
+				}
+			]
+		};
+	}
+
+	async setAssigneeOnIssue(request: { issueId: string; assigneeId: string; onOff: boolean }) {
+		// does not require return directives
+		const method = request.onOff ? "addAssigneesToAssignable" : "removeAssigneesFromAssignable";
+		const Method = request.onOff ? "AddAssigneesFromAssignable" : "RemoveAssigneesFromAssignable";
+		const query = `mutation ${Method}($assignableId: ID!,$assigneeIds:[ID!]!) {
 			${method}(input: {assignableId: $assignableId, assigneeIds:$assigneeIds}) {
 				  clientMutationId
 				}
 			  }`;
 
-		const response = await this.client.request<any>(query, {
-			assignableId: request.pullRequestId,
+		const response = await this.mutate<any>(query, {
+			assignableId: request.issueId,
 			assigneeIds: request.assigneeId
 		});
 		return response;
 	}
 
-	async toggleReaction(request: { subjectId: string; content: string; onOff: boolean }) {
+	async toggleReaction(request: {
+		subjectId: string;
+		content: string;
+		onOff: boolean;
+	}): Promise<Directives> {
 		const method = request.onOff ? "addReaction" : "removeReaction";
 		const Method = request.onOff ? "AddReaction" : "RemoveReaction";
-		const query = `mutation ${Method}($subjectId: String!,$content:String!) {
+		const query = `mutation ${Method}($subjectId: ID!, $content:ReactionContent!) {
 			${method}(input: {subjectId: $subjectId, content:$content}) {
 				  clientMutationId
+				  subject {
+					... on PullRequestReviewComment {
+						__typename
+						id
+					}
+					... on PullRequestReview {
+						__typename
+						id
+					}
+					... on IssueComment {
+						__typename
+						id
+					}
+					... on CommitComment {
+						__typename
+						id
+					}
+					... on TeamDiscussionComment {
+						__typename
+						id
+					}
+					... on PullRequest {
+						__typename
+						id
+					}
+					... on Issue {
+						__typename
+						id
+					}
+					}
+					reaction {
+					content
+					user {
+						login
+					}
+					}
 				}
 			  }`;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			subjectId: request.subjectId,
 			content: request.content
 		});
-		return response;
+
+		return {
+			directives: [
+				{
+					type: request.onOff ? "addReaction" : "removeReaction",
+					data: response[method]
+				}
+			]
+		};
 	}
 
-	async updatePullRequestSubscription(request: { pullRequestId: string; onOff: boolean }) {
-		const query = `mutation UpdateSubscription($subscribableId: String!,$state:String!) {
+	async updatePullRequestSubscription(request: {
+		pullRequestId: string;
+		onOff: boolean;
+	}): Promise<Directives> {
+		const query = `mutation UpdateSubscription($subscribableId:ID!, $state:SubscriptionState!) {
 			updateSubscription(input: {subscribableId: $subscribableId, state:$state}) {
 				  clientMutationId
+				   subscribable {
+					... on PullRequest {
+						id
+						updatedAt
+						viewerSubscription
+						}
+					}
 				}
 			  }`;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			subscribableId: request.pullRequestId,
 			state: request.onOff ? "SUBSCRIBED" : "UNSUBSCRIBED"
 		});
-		return response;
+		return {
+			directives: [
+				{ type: "updatePullRequest", data: response.updateSubscription.subscribable.pullRequest }
+			]
+		};
 	}
 
-	async updateIssueComment(request: { id: string; body: string }) {
-		const query = `mutation UpdateComment($id: String!, $body:String!) {
+	async updateIssueComment(request: { id: string; body: string }): Promise<Directives> {
+		const query = `mutation UpdateComment($id:ID!, $body:String!) {
 			updateIssueComment(input: {id: $id, body:$body}) {
-				  clientMutationId
+				clientMutationId
+				issueComment {
+					id,
+					includesCreatedEdit,
+					body,
+					bodyHTML,
+					bodyText
+					}
 				}
 			  }`;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			id: request.id,
 			body: request.body
 		});
-		return response;
+
+		return {
+			directives: [
+				{
+					type: "updateNode",
+					data: response.updateIssueComment.issueComment
+				}
+			]
+		};
 	}
 
-	async updateReviewComment(request: { id: string; body: string }) {
-		const query = `mutation UpdateComment($pullRequestReviewCommentId: String!, $body:String!) {
-			updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $pullRequestReviewCommentId, body:$body}) {
-				  clientMutationId
+	async updateReviewComment(request: { id: string; body: string }): Promise<Directives> {
+		const query = `mutation UpdateComment($pullRequestReviewCommentId: ID!, $body: String!) {
+			updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $pullRequestReviewCommentId, body: $body}) {
+			  clientMutationId
+			  pullRequestReviewComment {
+				id
+				includesCreatedEdit
+				body
+				bodyHTML
+				bodyText
+				pullRequestReview {
+				  id
 				}
-			  }`;
+			  }
+			}
+		  }
+		  `;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestReviewCommentId: request.id,
 			body: request.body
 		});
-		return response;
+		return {
+			directives: [
+				{
+					type: "updatePullRequestReviewComment",
+					data: response.updatePullRequestReviewComment.pullRequestReviewComment
+				},
+				{
+					type: "updatePullRequestReviewCommentNode",
+					data: response.updatePullRequestReviewComment.pullRequestReviewComment
+				}
+			]
+		};
 	}
 
-	async updateReview(request: { id: string; body: string }) {
-		const query = `mutation UpdateComment($pullRequestReviewId: String!, $body:String!) {
+	async updateReview(request: { id: string; body: string }): Promise<Directives> {
+		const query = `mutation UpdateComment($pullRequestReviewId:ID!, $body:String!) {
 			updatePullRequestReview(input: {pullRequestReviewId: $pullRequestReviewId, body:$body}) {
 				  clientMutationId
+				     pullRequestReview {
+						bodyText
+						bodyHTML
+						body
+						includesCreatedEdit
+						id
+					}
 				}
 			  }`;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestReviewId: request.id,
 			body: request.body
 		});
-		return response;
+		return {
+			directives: [
+				{
+					type: "updatePullRequestReview",
+					data: response.updatePullRequestReview.pullRequestReview
+				}
+			]
+		};
 	}
 
-	async updatePullRequestBody(request: { id: string; body: string }) {
-		const query = `mutation UpdateComment($pullRequestId: String!, $body:String!) {
+	async updatePullRequestBody(request: { id: string; body: string }): Promise<Directives> {
+		const query = `mutation UpdateComment($pullRequestId:ID!, $body:String!) {
 			updatePullRequest(input: {pullRequestId: $pullRequestId, body:$body}) {
 				  clientMutationId
+				    pullRequest {
+						body
+						bodyHTML
+						bodyText
+						includesCreatedEdit
+						updatedAt
+					}
 				}
 			  }`;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestId: request.id,
 			body: request.body
 		});
-		return response;
+		return {
+			directives: [{ type: "updatePullRequest", data: response.updatePullRequest.pullRequest }]
+		};
 	}
 
-	async addPullRequestReview(request: { pullRequestId: string }) {
+	async addPullRequestReview(request: {
+		pullRequestId: string;
+	}): Promise<{
+		addPullRequestReview: {
+			pullRequestReview: {
+				id: string;
+			};
+		};
+	}> {
+		// TODO add directives
 		const query = `
-		mutation AddPullRequestReview($pullRequestId:String!) {
+		mutation AddPullRequestReview($pullRequestId:ID!) {
 		addPullRequestReview(input: {pullRequestId: $pullRequestId}) {
 			clientMutationId
 			pullRequestReview {
@@ -1066,7 +1832,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			}
 		  }
 		}`;
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestId: request.pullRequestId
 		});
 		return response;
@@ -1079,6 +1845,12 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	async getPullRequestReviewId(request: { pullRequestId: string }) {
 		const metaData = await this.getRepoOwnerFromPullRequestId(request.pullRequestId);
 		const query = `query GetPullRequestReviewId($owner:String!, $name:String!, $pullRequestNumber:Int!) {
+			rateLimit {
+				cost
+				resetAt
+				remaining
+				limit
+			}
 			viewer {
 			  login
 			}
@@ -1097,7 +1869,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			}
 		  }
 		  `;
-		const response = await this.client.request<any>(query, metaData);
+		const response = await this.query<any>(query, metaData);
 		if (!response) return undefined;
 
 		const user = response.viewer.login;
@@ -1118,39 +1890,107 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	}) {
 		let query;
 		if (request.pullRequestReviewId) {
-			query = `mutation AddPullRequestReviewComment($text:String!, $pullRequestId:String!, $pullRequestReviewId:String!, $filePath:String, $position:Int) {
-			addPullRequestReviewComment(input: {body:$text, pullRequestId:$pullRequestId, pullRequestReviewId:$pullRequestReviewId, path:$filePath, position:$position}) {
-			  clientMutationId
-			}
-		  }
-		  `;
+			query = `mutation AddPullRequestReviewComment($text:String!, $pullRequestId:ID!, $pullRequestReviewId:ID!, $filePath:String, $position:Int) {
+					addPullRequestReviewComment(input: {body:$text, pullRequestId:$pullRequestId, pullRequestReviewId:$pullRequestReviewId, path:$filePath, position:$position}) {
+					  clientMutationId
+					}
+				  }
+				  `;
 		} else {
 			request.pullRequestReviewId = await this.getPullRequestReviewId(request);
-			query = `mutation AddPullRequestReviewComment($text:String!, $pullRequestId:String!, $filePath:String, $position:Int) {
-				addPullRequestReviewComment(input: {body:$text, pullRequestId:$pullRequestId, path:$filePath, position:$position}) {
-				  clientMutationId
+			if (!request.pullRequestReviewId) {
+				const result = await this.addPullRequestReview(request);
+				if (result?.addPullRequestReview?.pullRequestReview?.id) {
+					request.pullRequestReviewId = result.addPullRequestReview.pullRequestReview.id;
 				}
-			  }
-			  `;
+			}
+			query = `mutation AddPullRequestReviewComment($text:String!, $pullRequestId:ID!, $filePath:String, $position:Int) {
+					addPullRequestReviewComment(input: {body:$text, pullRequestId:$pullRequestId, path:$filePath, position:$position}) {
+					  clientMutationId
+					}
+				  }
+				  `;
 		}
-		const response = await this.client.request<any>(query, request);
+
+		const response = await this.mutate<any>(query, request);
+
+		this._pullRequestCache.delete(request.pullRequestId);
+		this.session.agent.sendNotification(DidChangePullRequestCommentsNotificationType, {
+			pullRequestId: request.pullRequestId,
+			filePath: request.filePath
+		});
+
 		return response;
 	}
 
 	async deletePullRequestReview(request: { pullRequestId: string; pullRequestReviewId: string }) {
-		const query = `mutation DeletePullRequestReview($pullRequestReviewId:String!) {
+		const query = `mutation DeletePullRequestReview($pullRequestReviewId:ID!) {
 			deletePullRequestReview(input: {pullRequestReviewId: $pullRequestReviewId}){
 			  clientMutationId
 			}
 		  }
 		  `;
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestReviewId: request.pullRequestReviewId
 		});
+
+		this._pullRequestCache.delete(request.pullRequestId);
+		this.session.agent.sendNotification(DidChangePullRequestCommentsNotificationType, {
+			pullRequestId: request.pullRequestId
+		});
+
 		return response;
 	}
 
-	async submitReview(request: { pullRequestId: string; text: string; eventType: string }) {
+	async getPendingReview(request: {
+		pullRequestId: string;
+	}): Promise<
+		| {
+				pullRequestReviewId: string;
+		  }
+		| undefined
+	> {
+		const existingReview = await this.query<any>(
+			`query ExistingReviews($pullRequestId:ID!) {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
+				node(id: $pullRequestId) {
+					... on PullRequest {
+						id
+						reviews(last: 100) {
+							nodes {
+								state
+								id
+								viewerDidAuthor
+							}
+						}
+					}
+				}
+		 	 }
+		  `,
+			{
+				pullRequestId: request.pullRequestId
+			}
+		);
+
+		const review = existingReview?.node?.reviews?.nodes?.find(
+			(_: any) => _.viewerDidAuthor && _.state === "PENDING"
+		);
+		return review ? { pullRequestReviewId: review?.id } : undefined;
+	}
+
+	async submitReview(request: {
+		pullRequestId: string;
+		text: string;
+		eventType: string;
+		// used with old servers
+		pullRequestReviewId?: string;
+	}) {
+		// TODO add directives
 		if (!request.eventType) {
 			request.eventType = "COMMENT";
 		}
@@ -1164,65 +2004,140 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			throw new Error("Invalid eventType");
 		}
 
-		const query = `mutation SubmitPullRequestReview($pullRequestId:String!, $body:String) {
+		const existingReview = await this.getPendingReview(request);
+		if (!existingReview) {
+			void (await this.mutate<any>(
+				`mutation AddPullRequestReview($pullRequestId:ID!) {
+					addPullRequestReview(input: {pullRequestId: $pullRequestId, body: ""}) {
+						clientMutationId
+					}
+			  	}`,
+				{
+					pullRequestId: request.pullRequestId
+				}
+			));
+		}
+		const query = `mutation SubmitPullRequestReview($pullRequestId:ID!, $body:String) {
 			submitPullRequestReview(input: {event: ${request.eventType}, body: $body, pullRequestId: $pullRequestId}){
 			  clientMutationId
 			}
 		  }
 		  `;
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestId: request.pullRequestId,
 			body: request.text
 		});
+
 		return response;
 	}
 
-	// async closePullRequest(request: { pullRequestId: string }) {
-	// 	const query = `mutation ClosePullRequest($pullRequestId: String!) {
-	// 		closePullRequest(input: {pullRequestId: $pullRequestId}) {
-	// 			  clientMutationId
-	// 			}
-	// 		  }`;
-
-	// 	const response = await this.client.request<any>(query, {
-	// 		pullRequestId: request.pullRequestId
-	// 	});
-	// 	return true;
-	// }
-
-	_getMyPullRequestsCache = new Map<string, GetMyPullRequestsResponse[]>();
-	async getMyPullRequests(request: {
-		owner: string;
-		repo: string;
-		isOpen?: boolean;
-		force?: boolean;
-	}): Promise<GetMyPullRequestsResponse[]> {
-		const cacheKey = [request.owner, request.repo, request.isOpen].join("-");
-		if (!request.force) {
-			const cached = this._getMyPullRequestsCache.get(cacheKey);
-			if (cached) {
-				Logger.debug(`github getMyPullRequests got from cache, key=${cacheKey}`);
-				return cached!;
-			} else {
-				Logger.debug(`github getMyPullRequests cache miss, key=${cacheKey}`);
+	/**
+	 * Returns a string only if it satisfies the current version (GHE only)
+	 *
+	 * @param {string} query
+	 * @return {*}  {string}
+	 * @memberof GitHubProvider
+	 */
+	_transform(query: string): string {
+		if (!query) return "";
+		const v = this._version;
+		query = query.replace(
+			/\[([\s\S]+?)\:([>=<]+)(\d+\.\d+\.\d+)\]/g,
+			(substring: string, ...args: any[]) => {
+				if (v) {
+					const comparer = args[1];
+					if (comparer === "<") {
+						return semver.lt(v, args[2]) ? args[0] : "";
+					} else if (comparer === ">") {
+						return semver.gt(v, args[2]) ? args[0] : "";
+					} else if (comparer === ">=") {
+						return semver.gte(v, args[2]) ? args[0] : "";
+					} else if (comparer === "<=") {
+						return semver.lte(v, args[2]) ? args[0] : "";
+					} else {
+						return "";
+					}
+				}
+				return args[0];
 			}
-		} else {
-			Logger.debug(`github getMyPullRequests removed from cache, key=${cacheKey}`);
-			this._getMyPullRequestsCache.delete(cacheKey);
-		}
-		let results: any = [];
-		const repoQuery =
-			request && request.owner && request.repo ? `repo:${request.owner}/${request.repo} ` : "";
-		const isOpenQuery = request && request.isOpen === true ? "is:open " : "";
+		);
+		return query;
+	}
 
-		const query = (q: string) => `query Search {
+	// _getMyPullRequestsCache = new Map<string, GetMyPullRequestsResponse[][]>();
+	async getMyPullRequests(
+		request: GetMyPullRequestsRequest
+	): Promise<GetMyPullRequestsResponse[][] | undefined> {
+		void (await this.ensureConnected());
+		// const cacheKey = JSON.stringify({ ...request, providerId: this.providerConfig.id });
+		// if (!request.force) {
+		// 	const cached = this._getMyPullRequestsCache.get(cacheKey);
+		// 	if (cached) {
+		// 		Logger.debug(`github getMyPullRequests got from cache, key=${cacheKey}`);
+		// 		return cached!;
+		// 	} else {
+		// 		Logger.debug(`github getMyPullRequests cache miss, key=${cacheKey}`);
+		// 	}
+		// } else {
+		// 	Logger.debug(`github getMyPullRequests removed from cache, key=${cacheKey}`);
+		// 	this._getMyPullRequestsCache.delete(cacheKey);
+		// }
+		let repoQuery =
+			request && request.owner && request.repo ? `repo:${request.owner}/${request.repo} ` : "";
+		if (request.isOpen) {
+			try {
+				const { scm, providerRegistry } = SessionContainer.instance();
+				const reposResponse = await scm.getRepos({ inEditorOnly: true, includeProviders: true });
+				const repos = [];
+				if (reposResponse?.repositories) {
+					for (const repo of reposResponse.repositories) {
+						if (repo.remotes) {
+							for (const remote of repo.remotes) {
+								const urlToTest = `anything://${remote.domain}/${remote.path}`;
+								const results = await providerRegistry.queryThirdParty({ url: urlToTest });
+								if (results && results.providerId === this.providerConfig.id) {
+									const ownerData = this.getOwnerFromRemote(urlToTest);
+									if (ownerData) {
+										repos.push(`${ownerData.owner}/${ownerData.name}`);
+									}
+								}
+							}
+						}
+					}
+				}
+				if (repos.length) {
+					repoQuery = repos.map(_ => `repo:${_}`).join(" ") + " ";
+				} else {
+					Logger.log(`getMyPullRequests: request.isOpen=true, but no repos found, returning empty`);
+					return [];
+				}
+			} catch (ex) {
+				Logger.error(ex);
+			}
+		}
+
+		const queries = request.queries;
+		const buildQuery = (query: string, repoQuery: string) => {
+			const limit = query === "recent" ? 5 : 100;
+			// recent is kind of a magic string, where we just look
+			// for some random PR activity to at least show you
+			// something. if you have the repo query checked, and
+			// we can query by repo, then use that. otherwise github
+			// needs at least one qualifier so we query for PRs
+			// that you were the author of
+			// https://trello.com/c/XIg6MKWy/4813-add-4th-default-pr-query-recent
+			if (query === "recent") {
+				if (repoQuery.length > 0) query = "is:pr";
+				else query = "is:pr author:@me";
+			}
+			return `query Search {
 			rateLimit {
 				limit
 				cost
 				remaining
 				resetAt
 			}
-			search(query: "${q}", type: ISSUE, last: 100) {
+			search(query: "${repoQuery}${query}", type: ISSUE, last: ${limit}) {
 			edges {
 			  node {
 				... on PullRequest {
@@ -1236,15 +2151,15 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 						nameWithOwner
 					}
 					author {
-					  login
-					  avatarUrl(size: 20)
-					  url
+						login
+						avatarUrl(size: 20)
+						url
 					}
 					body
 					bodyText
 					number
 					state
-					isDraft
+					${this._transform(`[isDraft:>=2.21.0]`)}
 					updatedAt
 					lastEditedAt
 					id
@@ -1254,52 +2169,81 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					}
 					labels(first: 10) {
 						nodes {
-						  color
-						  description
-						  name
-						  id
+							color
+							description
+							name
+							id
 						}
-					  }
+					}
 				  }
 			  }
 			}
 		  }
 		}`;
+		};
 		// NOTE: there is also `reviewed-by` which `review-requested` translates to after the user
 		// has started or completed the review.
 
+		// const queries = [
+		// 	{ name: "Local PR Branches", query: `is:pr author:@me` },
+		// 	{ name: "Waiting on my Review", query: `is:pr review-requested:@me` },
+		// 	{ name: "Assigned to Me", query: `is:pr assignee:@me` },
+		// 	{ name: "Created by Me", query: `is:pr author:@me` }
+		// ];
+
 		// see: https://docs.github.com/en/github/searching-for-information-on-github/searching-issues-and-pull-requests
-		const items = await Promise.all([
-			this.client.request<any>(query(`${repoQuery}${isOpenQuery}is:pr author:@me`)),
-			this.client.request<any>(query(`${repoQuery}${isOpenQuery}is:pr assignee:@me`)),
-			this.client.request<any>(query(`${repoQuery}${isOpenQuery}is:pr review-requested:@me`)),
-			this.client.request<any>(query(`${repoQuery}${isOpenQuery}is:pr reviewed-by:@me`))
-		]).catch(ex => {
+		const items = await Promise.all(
+			queries.map(_ => this.query<any>(buildQuery(_, repoQuery)))
+		).catch(ex => {
 			Logger.error(ex);
-			throw new Error(ex.response ? JSON.stringify(ex.response) : ex.message);
+			let errString;
+			if (ex.response) {
+				errString = JSON.stringify(ex.response);
+			} else {
+				errString = ex.message;
+			}
+			throw new Error(errString);
 		});
-
-		for (const item of items) {
+		const response: GetMyPullRequestsResponse[][] = [];
+		items.forEach((item, index) => {
 			if (item && item.search && item.search.edges) {
-				results = results.concat(item.search.edges.map((_: any) => _.node));
+				response[index] = item.search.edges
+					.map((_: any) => _.node)
+					.filter((_: any) => _.id)
+					.map((pr: { createdAt: string }) => ({
+						...pr,
+						providerId: this.providerConfig?.id,
+						createdAt: new Date(pr.createdAt).getTime()
+					}));
+				if (!queries[index].match(/\bsort:/)) {
+					response[index] = response[index].sort(
+						(a: { createdAt: number }, b: { createdAt: number }) => b.createdAt - a.createdAt
+					);
+				}
 			}
-			if (item.rateLimit) {
-				Logger.debug(`github getMyPullRequests rateLimit=${JSON.stringify(item.rateLimit)}`);
-			}
-		}
-
-		results = _uniqBy(results, (_: { id: string }) => _.id);
-		const response: GetMyPullRequestsResponse[] = results
-			.map((pr: { createdAt: string }) => ({ ...pr, createdAt: new Date(pr.createdAt).getTime() }))
-			.sort((a: { createdAt: number }, b: { createdAt: number }) => b.createdAt - a.createdAt);
-		this._getMyPullRequestsCache.set(cacheKey, response);
+			// if (item.rateLimit) {
+			// 	Logger.debug(`github getMyPullRequests rateLimit=${JSON.stringify(item.rateLimit)}`);
+			// }
+		});
+		// results = _uniqBy(results, (_: { id: string }) => _.id);
+		// this._getMyPullRequestsCache.set(cacheKey, response);
 		return response;
 	}
 
+	protected async getMe() {
+		return "@me";
+	}
+
 	async getPullRequestLastUpdated(request: { pullRequestId: string }) {
-		const response = await this.client.request<any>(
+		const response = await this.query<any>(
 			`query GetPullRequestLastUpdated($pullRequestId:ID!) {
-					node(id:$pullRequestId) {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
+				node(id:$pullRequestId) {
 						... on PullRequest {
 							updatedAt
 							mergeable
@@ -1324,52 +2268,176 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		const owner = path[1];
 		const repo = path[2];
 		const pullRequestNumber = parseInt(path[4], 10);
-		const pullRequestInfo = await this.client.request<any>(
-			`query FindPullRequest($owner:String!,$name:String!,$pullRequestNumber:Int!) {
-					repository(owner:$owner name:$name) {
-					  pullRequest(number: $pullRequestNumber) {
+		const pullRequestInfo = await this.query<any>(
+			`query FindPullRequest($owner:String!, $name:String!, $pullRequestNumber:Int!) {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
+				repository(owner:$owner, name:$name) {
+					pullRequest(number: $pullRequestNumber) {
 						id
 					  }
 					}
-				  }`,
+				}`,
 			{
 				owner: owner,
 				name: repo,
 				pullRequestNumber: pullRequestNumber
 			}
 		);
-		return pullRequestInfo.repository.pullRequest.id;
+		try {
+			return pullRequestInfo.repository.pullRequest.id;
+		} catch (ex) {
+			Logger.warn(ex, "Ensure you have the correct scopes");
+			throw ex;
+		}
+	}
+
+	async getIssueIdFromUrl(request: { url: string }) {
+		// since we only have the url for the Issue -- parse it out for the
+		// data we need.
+		const uri = URI.parse(request.url);
+		const path = uri.path.split("/");
+		const owner = path[1];
+		const repo = path[2];
+		const issueNumber = parseInt(path[4], 10);
+		const issueInfo = await this.query<any>(
+			`query FindIssue($owner:String!, $name:String!, $issueNumber:Int!) {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
+					repository(owner:$owner name:$name) {
+					  issue(number: $issueNumber) {
+						id
+						number
+						title
+						body
+					  }
+					}
+					viewer {
+						login
+						id
+					}
+				  }`,
+			{
+				owner: owner,
+				name: repo,
+				issueNumber: issueNumber
+			}
+		);
+		Logger.log("Fired off a query: ", JSON.stringify(issueInfo, null, 4));
+		// const issue = issueInfo.repository.issue;
+		// issue.viewer = issueInfo.viewer;
+		// translate to our card shape
+		const { repository } = issueInfo;
+		const { issue } = repository;
+		const card = {
+			id: issue.id,
+			tokenId: issue.number,
+			number: issue.number,
+			title: issue.title,
+			body: issue.body,
+			url: request.url,
+			providerIcon: "mark-github"
+		};
+		return { ...card, viewer: issueInfo.viewer };
 	}
 
 	async toggleMilestoneOnPullRequest(request: {
 		pullRequestId: string;
 		milestoneId: string;
 		onOff: boolean;
-	}) {
-		const query = `mutation UpdatePullRequest($pullRequestId: String!, $milestoneId: String) {
+	}): Promise<Directives> {
+		const query = `mutation UpdatePullRequest($pullRequestId:ID!, $milestoneId: ID) {
 			updatePullRequest(input: {pullRequestId: $pullRequestId, milestoneId: $milestoneId}) {
 				  clientMutationId
+				  pullRequest {
+					updatedAt
+					milestone {
+					  id
+					  title
+					  state
+					  description
+					  number
+					}
+					timelineItems(last: 1, itemTypes: [MILESTONED_EVENT,DEMILESTONED_EVENT]) {
+					  nodes {
+						  ... on MilestonedEvent {
+							__typename
+							id
+							actor {
+								login
+								avatarUrl
+								resourcePath
+								url
+							}
+							createdAt
+							milestoneTitle
+						}
+						... on DemilestonedEvent {
+						  __typename
+						  id
+						  actor {
+							login
+							avatarUrl
+							resourcePath
+							url
+						  }
+						  milestoneTitle
+						  createdAt
+						}
+					  }
+					}
+				  }
 				}
 			  }`;
 
 		// remove it by setting it to null
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestId: request.pullRequestId,
 			milestoneId: request.onOff ? request.milestoneId : null
 		});
-		return response;
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: { milestone: response.updatePullRequest.pullRequest.milestone }
+				},
+				{ type: "addNode", data: response.updatePullRequest.pullRequest.timelineItems.nodes[0] }
+			]
+		};
 	}
 
 	async toggleProjectOnPullRequest(request: {
 		pullRequestId: string;
 		projectId: string;
 		onOff: boolean;
-	}) {
+	}): Promise<Directives> {
 		const metadata = await this.getPullRequestMetadata(request.pullRequestId);
 		const projectIds = new Set(metadata.projectCards.map(_ => _.project.id));
-		const query = `mutation UpdatePullRequest($pullRequestId: String!, $projectIds: [String]) {
+		const query = `mutation UpdatePullRequest($pullRequestId:ID!, $projectIds: [ID!]) {
 			updatePullRequest(input: {pullRequestId: $pullRequestId, projectIds: $projectIds}) {
 				  clientMutationId
+				  pullRequest {
+					updatedAt
+					projectCards(first: 10) {
+						nodes {
+						  id
+						  note
+						  state
+						  project {
+							name
+							id
+						  }
+						}
+					  }
+				  }
 				}
 			  }`;
 		if (request.onOff) {
@@ -1378,66 +2446,196 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			projectIds.delete(request.projectId);
 		}
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestId: request.pullRequestId,
 			projectIds: [...projectIds]
 		});
-		return response;
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: {
+						projectCards: response.updatePullRequest.pullRequest.projectCards,
+						updatedAt: response.updatePullRequest.pullRequest.updatedAt
+					}
+				}
+			]
+		};
 	}
 
-	async updatePullRequestTitle(request: { pullRequestId: string; title: string }) {
-		const query = `mutation UpdatePullRequest($pullRequestId: String!, $title: String) {
+	async updatePullRequestTitle(request: {
+		pullRequestId: string;
+		title: string;
+	}): Promise<Directives> {
+		const query = `mutation UpdatePullRequest($pullRequestId:ID!, $title: String) {
 			updatePullRequest(input: {pullRequestId: $pullRequestId, title: $title}) {
 				  clientMutationId
+				  pullRequest {
+					title
+					updatedAt
+				  }
 				}
 			  }`;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestId: request.pullRequestId,
 			title: request.title
 		});
-		return response;
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: response.updatePullRequest.pullRequest
+				}
+			]
+		};
 	}
 
-	async mergePullRequest(request: { pullRequestId: string; mergeMethod: MergeMethod }) {
+	async mergePullRequest(request: {
+		pullRequestId: string;
+		mergeMethod: MergeMethod;
+	}): Promise<Directives> {
 		if (!request.mergeMethod) throw new Error("InvalidMergeMethod");
 		const mergeMethods = new Set(["MERGE", "REBASE", "SQUASH"]);
 		if (!mergeMethods.has(request.mergeMethod)) throw new Error("InvalidMergeMethod");
 
-		const query = `mutation MergePullRequest($pullRequestId: String!) {
+		const query = `mutation MergePullRequest($pullRequestId:ID!) {
 			mergePullRequest(input: {pullRequestId: $pullRequestId, mergeMethod: ${request.mergeMethod}}) {
 				  clientMutationId
+				  pullRequest {
+					state
+					mergeable
+					merged
+					mergedAt
+					updatedAt
+					timelineItems(last: 10) {
+					  nodes {
+						... on ReferencedEvent {
+						  id
+						  __typename
+						  actor {
+							login
+							avatarUrl
+						  }
+						  commit {
+							messageBody
+							messageHeadline
+							status {
+							  state
+							}
+							oid
+							abbreviatedOid
+							author {
+							  avatarUrl
+							  name
+							  user {
+								login
+							  }
+							}
+							committer {
+							  avatarUrl
+							  name
+							  user {
+								login
+							  }
+							}
+						  }
+						}
+						... on MergedEvent {
+						  __typename
+						  id
+						  actor {
+							login
+							avatarUrl
+						  }
+						  mergeRefName
+						  createdAt
+						  commit {
+							abbreviatedOid
+						  }
+						}
+						... on ClosedEvent {
+						  __typename
+						  id
+						  actor {
+							login
+							avatarUrl
+						  }
+						  createdAt
+						}
+					  }
+					}
+				  }
 				}
 			  }`;
-
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			pullRequestId: request.pullRequestId
 		});
-		return true;
+
+		const pullRequestData = {
+			canBeRebased: false,
+			mergeStateStatus: "UNKNOWN",
+			mergeable: response.mergePullRequest.pullRequest.mergeable,
+			merged: response.mergePullRequest.pullRequest.merged,
+			mergedAt: response.mergePullRequest.pullRequest.mergedAt,
+			state: response.mergePullRequest.pullRequest.state,
+			updatedAt: response.mergePullRequest.pullRequest.updatedAt
+		};
+
+		return {
+			directives: [
+				{ type: "updatePullRequest", data: pullRequestData },
+				{ type: "addNodes", data: response.mergePullRequest.pullRequest.timelineItems.nodes }
+			]
+		};
 	}
 
-	async lockPullRequest(request: { pullRequestId: string; lockReason: string }) {
+	async lockPullRequest(request: {
+		pullRequestId: string;
+		lockReason: string;
+	}): Promise<Directives> {
 		// OFF_TOPIC, TOO_HEATED, SPAM
-		await this.client.request<any>(
-			`mutation LockPullRequest($pullRequestId: String!, $lockReason:String!) {
-				lockLockable(input: {lockableId: $pullRequestId, lockReason:$lockReason}) {
+		const response = await this.mutate<any>(
+			`mutation LockPullRequest($lockableId:ID!, $lockReason:LockReason) {
+				lockLockable(input: {lockableId:$lockableId, lockReason:$lockReason}) {
 				  clientMutationId
+				  lockedRecord {
+					... on PullRequest {
+					  locked
+					  activeLockReason
+					  updatedAt
+					}
+				  }
 				}
 			  }`,
 			{
-				pullRequestId: request.pullRequestId,
+				lockableId: request.pullRequestId,
 				lockReason: request.lockReason
 			}
 		);
 
-		return true;
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: response.lockLockable.lockedRecord
+				}
+			]
+		};
 	}
 
-	async unlockPullRequest(request: { pullRequestId: string }) {
-		await this.client.request<any>(
-			`mutation UnlockPullRequest($pullRequestId: String!) {
+	async unlockPullRequest(request: { pullRequestId: string }): Promise<Directives> {
+		const response = await this.mutate<any>(
+			`mutation UnlockPullRequest($pullRequestId:ID!) {
 				unlockLockable(input: {lockableId: $pullRequestId}) {
 				  clientMutationId
+				  unlockedRecord {
+					... on PullRequest {
+					  locked
+					  activeLockReason
+					  updatedAt
+					}
+				  }
 				}
 			  }`,
 			{
@@ -1445,13 +2643,26 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			}
 		);
 
-		return true;
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: response.unlockLockable.unlockedRecord
+				}
+			]
+		};
 	}
 
 	async getReviewersForPullRequest(request: { pullRequestId: string }) {
 		const ownerData = await this.getRepoOwnerFromPullRequestId(request.pullRequestId);
-		const response = await this.client.request<any>(
+		const response = await this.query<any>(
 			`query GetReviewersForPullRequest($owner:String!, $name:String!, $pullRequestNumber:Int!) {
+				rateLimit {
+					cost
+					resetAt
+					remaining
+					limit
+				}
 			repository(name:$name, owner:$owner) {
 			  pullRequest(number: $pullRequestNumber) {
 				id
@@ -1462,6 +2673,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					  requestedReviewer {
 						... on User {
 						  id
+						  avatarUrl
 						  login
 						}
 					  }
@@ -1482,12 +2694,51 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		);
 	}
 
-	async addReviewerToPullRequest(request: { pullRequestId: string; userId: string }) {
+	async addReviewerToPullRequest(request: {
+		pullRequestId: string;
+		userId: string;
+	}): Promise<Directives> {
 		const currentReviewers = await this.getReviewersForPullRequest(request);
-		const response = await this.client.request<any>(
-			`mutation RequestReviews($pullRequestId: String!, $userIds:[String!]!) {
+		const response = await this.mutate<any>(
+			`mutation RequestReviews($pullRequestId:ID!, $userIds:[ID!]!) {
 				requestReviews(input: {pullRequestId:$pullRequestId, userIds:$userIds}) {
 			  clientMutationId
+			  pullRequest {
+				updatedAt
+				reviewRequests(last: 10) {
+				  nodes {
+					requestedReviewer {
+					  ... on User {
+						id
+						avatarUrl
+						login
+						email
+					  }
+					}
+				  }
+				}
+				timelineItems(last: 1, itemTypes: REVIEW_REQUESTED_EVENT) {
+				  nodes {
+					... on ReviewRequestedEvent {
+					  __typename
+					  id
+					  actor {
+						login
+						avatarUrl
+					  }
+					  createdAt
+					  requestedReviewer {
+						... on User {
+						  id
+						  avatarUrl
+						  login
+						  avatarUrl
+						}
+					  }
+					}
+				  }
+				}
+			  }
 			}
 		  }`,
 			{
@@ -1495,15 +2746,48 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				userIds: (currentReviewers || []).concat(request.userId)
 			}
 		);
-		return response;
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: { updatedAt: response.requestReviews.pullRequest.updatedAt }
+				},
+				{
+					type: "updatePullRequestReviewers",
+					data: response.requestReviews.pullRequest.reviewRequests.nodes
+				},
+				{
+					type: "addNode",
+					data: response.requestReviews.pullRequest.timelineItems.nodes[0]
+				}
+			]
+		};
 	}
 
-	async removeReviewerFromPullRequest(request: { pullRequestId: string; userId: string }) {
+	async removeReviewerFromPullRequest(request: {
+		pullRequestId: string;
+		userId: string;
+	}): Promise<Directives> {
 		const currentReviewers = await this.getReviewersForPullRequest(request);
-		const response = await this.client.request<any>(
-			`mutation RequestReviews($pullRequestId: String!, $userIds:[String!]!) {
+		const response = await this.mutate<any>(
+			`mutation RequestReviews($pullRequestId:ID!, $userIds:[ID!]!) {
 				requestReviews(input: {pullRequestId:$pullRequestId, userIds:$userIds}) {
 			  clientMutationId
+			  pullRequest {
+				updatedAt
+				reviewRequests(last: 10) {
+				  nodes {
+					requestedReviewer {
+					  ... on User {
+						id
+						avatarUrl
+						login
+						email
+					  }
+					}
+				  }
+				}
+			  }
 			}
 		  }`,
 			{
@@ -1511,15 +2795,63 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				userIds: (currentReviewers || []).filter((_: string) => _ !== request.userId)
 			}
 		);
-		return response;
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: { updatedAt: response.requestReviews.pullRequest.updatedAt }
+				},
+				{
+					type: "updatePullRequestReviewers",
+					data: response.requestReviews.pullRequest.reviewRequests.nodes
+				}
+			]
+		};
 	}
 
-	async createPullRequestCommentAndClose(request: { pullRequestId: string; text: string }) {
+	async createPullRequestCommentAndClose(request: {
+		pullRequestId: string;
+		text: string;
+	}): Promise<Directives> {
+		const directives: any = [];
+		const response = { directives: directives };
 		if (request.text) {
-			await this.client.request<any>(
-				`mutation AddCommentToPullRequest($pullRequestId: String!, $body:String!) {
+			const response1 = await this.mutate<any>(
+				`mutation AddCommentToPullRequest($pullRequestId:ID!, $body:String!) {
 				addComment(input: {subjectId: $pullRequestId, body:$body}) {
 				  clientMutationId
+				  timelineEdge {
+					node {
+					  ... on IssueComment {
+						__typename
+						id
+						author {
+						  login
+						  avatarUrl
+						}
+						authorAssociation
+						body
+						bodyText
+						bodyHTML
+						createdAt
+						includesCreatedEdit
+						isMinimized
+						minimizedReason
+						reactionGroups {
+						  content
+						  users(first: 10) {
+							nodes {
+							  login
+							}
+						  }
+						}
+						resourcePath
+						viewerCanUpdate
+						viewerCanReact
+						viewerCanDelete
+					  }
+					}
+				  }
 				}
 			  }`,
 				{
@@ -1527,12 +2859,37 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					body: request.text
 				}
 			);
+
+			directives.push({
+				type: "addNode",
+				data: response1.addComment.timelineEdge.node
+			});
 		}
 
-		await this.client.request<any>(
-			`mutation ClosePullRequest($pullRequestId: String!) {
+		const response2 = await this.mutate<any>(
+			`mutation ClosePullRequest($pullRequestId:ID!) {
 			closePullRequest(input: {pullRequestId: $pullRequestId}) {
 				  clientMutationId
+				  pullRequest {
+					state
+					mergeable
+					merged
+					mergedAt
+					updatedAt
+					timelineItems(last: 10) {
+						nodes {
+						  ... on ClosedEvent {
+							__typename
+							id
+							actor {
+							  login
+							  avatarUrl
+							}
+							createdAt
+						  }
+						}
+					  }
+				  }
 				}
 			}`,
 			{
@@ -1540,15 +2897,67 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			}
 		);
 
-		return true;
+		directives.push({
+			type: "updatePullRequest",
+			data: {
+				mergeable: response2.closePullRequest.pullRequest.mergeable,
+				merged: response2.closePullRequest.pullRequest.merged,
+				mergedAt: response2.closePullRequest.pullRequest.mergedAt,
+				state: response2.closePullRequest.pullRequest.state,
+				updatedAt: response2.closePullRequest.pullRequest.updatedAt
+			}
+		});
+		directives.push({
+			type: "addNodes",
+			data: response2.closePullRequest.pullRequest.timelineItems.nodes
+		});
+
+		return response;
 	}
 
-	async createPullRequestCommentAndReopen(request: { pullRequestId: string; text: string }) {
+	async createPullRequestCommentAndReopen(request: {
+		pullRequestId: string;
+		text: string;
+	}): Promise<Directives> {
+		const directives: any = [];
+		const response = { directives: directives };
 		if (request.text) {
-			await this.client.request<any>(
-				`mutation AddCommentToPullRequest($pullRequestId: String!, $body:String!) {
+			const response1 = await this.mutate<any>(
+				`mutation AddCommentToPullRequest($pullRequestId:ID!, $body:String!) {
 				addComment(input: {subjectId: $pullRequestId, body:$body}) {
 				  clientMutationId
+				  timelineEdge {
+					node {
+					  ... on IssueComment {
+						__typename
+						id
+						author {
+						  login
+						  avatarUrl
+						}
+						authorAssociation
+						body
+						bodyText
+						bodyHTML
+						createdAt
+						includesCreatedEdit
+						isMinimized
+						minimizedReason
+						reactionGroups {
+						  content
+						  users(first: 10) {
+							nodes {
+							  login
+							}
+						  }
+						}
+						resourcePath
+						viewerCanUpdate
+						viewerCanReact
+						viewerCanDelete
+					  }
+					}
+				  }
 				}
 			  }`,
 				{
@@ -1556,53 +2965,131 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					body: request.text
 				}
 			);
+
+			directives.push({
+				type: "addNode",
+				data: response1.addComment.timelineEdge.node
+			});
 		}
 
-		await this.client.request<any>(
-			`mutation ReopenPullRequest($pullRequestId: String!) {
+		const response2 = await this.mutate<any>(
+			`mutation ReopenPullRequest($pullRequestId:ID!) {
 			reopenPullRequest(input: {pullRequestId: $pullRequestId}) {
 				  clientMutationId
+				  pullRequest {
+					state
+					mergeable
+					merged
+					mergedAt
+					updatedAt
+					timelineItems(last: 1) {
+						nodes {
+						  ... on ReopenedEvent {
+							id
+							__typename
+							actor {
+							  login
+							  avatarUrl
+							}
+							createdAt
+						  }
+						}
+					  }
+				  }
 				}
 			}`,
 			{
 				pullRequestId: request.pullRequestId
 			}
 		);
+		directives.push({
+			type: "updatePullRequest",
+			data: {
+				mergeable: response2.reopenPullRequest.pullRequest.mergeable,
+				merged: response2.reopenPullRequest.pullRequest.merged,
+				mergedAt: response2.reopenPullRequest.pullRequest.mergedAt,
+				state: response2.reopenPullRequest.pullRequest.state,
+				updatedAt: response2.reopenPullRequest.pullRequest.updatedAt
+			}
+		});
+		directives.push({
+			type: "addNodes",
+			data: response2.reopenPullRequest.pullRequest.timelineItems.nodes
+		});
 
-		return true;
+		return response;
 	}
 
-	async resolveReviewThread(request: { threadId: string }) {
-		const response = await this.client.request<any>(
-			`mutation ResolveReviewThread($threadId:String!) {
+	async resolveReviewThread(request: { threadId: string }): Promise<Directives> {
+		const response = await this.mutate<any>(
+			`mutation ResolveReviewThread($threadId:ID!) {
 				resolveReviewThread(input: {threadId:$threadId}) {
 				  clientMutationId
+				  thread {
+					isResolved
+					viewerCanResolve
+					viewerCanUnresolve
+					id
+				  }
 				}
 			}`,
 			{
 				threadId: request.threadId
 			}
 		);
-		return response;
+		const thread = response.resolveReviewThread.thread;
+		return {
+			directives: [
+				{
+					type: "resolveReviewThread",
+					data: {
+						isResolved: thread.isResolved,
+						viewerCanResolve: thread.viewerCanResolve,
+						viewerCanUnresolve: thread.viewerCanUnresolve,
+						threadId: thread.id
+					}
+				}
+			]
+		};
 	}
 
-	async unresolveReviewThread(request: { threadId: string }) {
-		const response = await this.client.request<any>(
-			`mutation UnresolveReviewThread($threadId:String!) {
+	async unresolveReviewThread(request: { threadId: string }): Promise<Directives> {
+		const response = await this.mutate<any>(
+			`mutation UnresolveReviewThread($threadId:ID!) {
 				unresolveReviewThread(input: {threadId:$threadId}) {
 				  clientMutationId
+				  thread {
+					isResolved
+					viewerCanResolve
+					viewerCanUnresolve
+					id
+				  }
 				}
 			}`,
 			{
 				threadId: request.threadId
 			}
 		);
-		return response;
+		const thread = response.unresolveReviewThread.thread;
+		return {
+			directives: [
+				{
+					type: "unresolveReviewThread",
+					data: {
+						isResolved: thread.isResolved,
+						viewerCanResolve: thread.viewerCanResolve,
+						viewerCanUnresolve: thread.viewerCanUnresolve,
+						threadId: thread.id
+					}
+				}
+			]
+		};
 	}
 
 	async addComment(request: { subjectId: string; text: string }) {
-		const response = await this.client.request<any>(
-			`mutation AddComment($subjectId:String!,$body:String!) {
+		// does not require return directives
+		const response = await this.mutate<any>(
+			`mutation AddComment($subjectId:ID!,$body:String!) {
 				addComment(input: {subjectId:$subjectId, body:$body}) {
 				  clientMutationId
 				}
@@ -1623,26 +3110,47 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		startLine: number;
 		// use endLine for multi-line comments
 		endLine?: number;
+		// used for old servers
+		position?: number;
 	}) {
 		// https://github.community/t/feature-commit-comments-for-a-pull-request/13986/9
 		const ownerData = await this.getRepoOwnerFromPullRequestId(request.pullRequestId);
-		const payload = {
-			body: request.text,
-			commit_id: request.sha,
-			side: "RIGHT",
-			path: request.path
-		} as any;
-		if (request.endLine != null && request.endLine !== request.startLine) {
-			payload.start_line = request.startLine;
-			payload.line = request.endLine;
+		let payload;
+		if (this._version && semver.lt(this._version, "2.20.0")) {
+			// old servers dont have line/start_line
+			// https://docs.github.com/en/enterprise-server@2.19/rest/reference/pulls#create-a-review-comment-for-a-pull-request-alternative
+			payload = {
+				body: request.text,
+				commit_id: request.sha,
+				path: request.path,
+				position: request.position!
+			} as any;
 		} else {
-			payload.line = request.startLine;
+			// enterprise 2.20.X and beyond allows this
+			// https://docs.github.com/en/enterprise-server@2.20/rest/reference/pulls#create-a-review-comment-for-a-pull-request
+			payload = {
+				body: request.text,
+				commit_id: request.sha,
+				side: "RIGHT",
+				path: request.path
+			} as any;
+			if (request.endLine != null && request.endLine !== request.startLine) {
+				payload.start_line = request.startLine;
+				payload.line = request.endLine;
+			} else {
+				payload.line = request.startLine;
+			}
 		}
-
-		const data = await this.post<any, any>(
+		const data = await this.restPost<any, any>(
 			`/repos/${ownerData.owner}/${ownerData.name}/pulls/${ownerData.pullRequestNumber}/comments`,
 			payload
 		);
+
+		this._pullRequestCache.delete(request.pullRequestId);
+		this.session.agent.sendNotification(DidChangePullRequestCommentsNotificationType, {
+			pullRequestId: request.pullRequestId
+		});
+
 		return data.body;
 	}
 
@@ -1655,7 +3163,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	}) {
 		// https://github.community/t/feature-commit-comments-for-a-pull-request/13986/9
 		const ownerData = await this.getRepoOwnerFromPullRequestId(request.pullRequestId);
-		const data = await this.post<any, any>(
+		const data = await this.restPost<any, any>(
 			`/repos/${ownerData.owner}/${ownerData.name}/pulls/${ownerData.pullRequestNumber}/comments`,
 			{
 				body: request.text,
@@ -1671,7 +3179,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	async createCommentReply(request: { pullRequestId: string; commentId: string; text: string }) {
 		// https://developer.github.com/v3/pulls/comments/#create-a-reply-for-a-review-comment
 		const ownerData = await this.getRepoOwnerFromPullRequestId(request.pullRequestId);
-		const data = await this.post<any, any>(
+		const data = await this.restPost<any, any>(
 			`/repos/${ownerData.owner}/${ownerData.name}/pulls/${ownerData.pullRequestNumber}/comments/${request.commentId}/replies`,
 			{
 				body: request.text
@@ -1680,36 +3188,152 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		return data.body;
 	}
 
-	async createPullRequestComment(request: { pullRequestId: string; text: string }) {
-		const query = `mutation AddCommentToPullRequest($subjectId: String!, $body: String!) {
+	async createPullRequestComment(request: {
+		pullRequestId: string;
+		text: string;
+	}): Promise<Directives> {
+		// TODO move all that added code into a shared location
+		const query = `mutation AddCommentToPullRequest($subjectId:ID!, $body:String!) {
 				addComment(input: {subjectId: $subjectId, body:$body}) {
-				  clientMutationId
-				}
-			  }`;
+					clientMutationId
+					commentEdge {
+						node {
+						  pullRequest {
+							updatedAt
+						  }
+						}
+					  }
+				   		timelineEdge {
+							node {
+								... on IssueComment {
+									__typename
+									id
+									author {
+										login
+										avatarUrl
+									}
+									authorAssociation
+									body
+									bodyText
+									bodyHTML
+									createdAt
+									includesCreatedEdit
+									isMinimized
+									minimizedReason
+									reactionGroups {
+										content
+										users(first: 1) {
+												nodes {
+													login
+												}
+											}
+									}
+									resourcePath
+									viewerCanUpdate
+									viewerCanReact
+									viewerCanDelete
+								}
+							}
+						}
+					}
+			  	}`;
 
-		const response = await this.client.request<any>(query, {
+		const response = await this.mutate<any>(query, {
 			subjectId: request.pullRequestId,
 			body: request.text
 		});
-		return true;
+
+		// NOTE must use the commentEdge to get the PR
+		// and not from the subject, as the subject data is stale
+		// at this point
+		return {
+			directives: [
+				{
+					type: "updatePullRequest",
+					data: response.addComment.commentEdge.node.pullRequest
+				},
+				{
+					type: "addNode",
+					data: response.addComment.timelineEdge.node
+				}
+			]
+		};
+	}
+
+	async createPullRequestInlineComment(request: {
+		pullRequestId: string;
+		text: string;
+		rightSha: string;
+		filePath: string;
+		startLine: number;
+		position?: number;
+	}) {
+		const result = await this.createCommitComment({
+			pullRequestId: request.pullRequestId,
+			sha: request.rightSha,
+			text: request.text || "",
+			path: request.filePath,
+			startLine: request.startLine,
+			position: request.position
+		});
+
+		return result;
+	}
+
+	async createPullRequestInlineReviewComment(request: {
+		pullRequestId: string;
+		text: string;
+		filePath: string;
+		position: number;
+	}) {
+		const result = await this.createPullRequestReviewComment({
+			pullRequestId: request.pullRequestId,
+			text: request.text || "",
+			filePath: request.filePath,
+			position: request.position
+		});
+
+		return result;
 	}
 
 	async deletePullRequestComment(request: {
 		id: string;
+		pullRequestId: string;
 		type: "ISSUE_COMMENT" | "REVIEW_COMMENT";
-	}) {
+	}): Promise<Directives | undefined> {
 		const method =
 			request.type === "ISSUE_COMMENT" ? "deleteIssueComment" : "deletePullRequestReviewComment";
-		const query = `mutation DeleteCommentFromPullRequest($id: String!) {
+
+		const query = `mutation DeleteCommentFromPullRequest($id: ID!) {
 				${method}(input: {id: $id}) {
 				  clientMutationId
 				}
 			  }`;
 
-		await this.client.request<any>(query, {
+		await this.mutate<any>(query, {
 			id: request.id
 		});
-		return true;
+
+		this._pullRequestCache.delete(request.pullRequestId);
+		this.session.agent.sendNotification(DidChangePullRequestCommentsNotificationType, {
+			pullRequestId: request.pullRequestId,
+			commentId: request.id
+		});
+
+		if (request.type === "ISSUE_COMMENT") {
+			return {
+				directives: [
+					{
+						type: "removeNode",
+						data: {
+							id: request.id
+						}
+					}
+				]
+			};
+		}
+		// TODO for other types
+		return undefined;
 	}
 
 	_pullRequestIdCache: Map<
@@ -1758,7 +3382,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			  }
 			}
 		  }`;
-		const response = await this.client.request<any>(query, {
+		const response = await this.query<any>(query, {
 			id: pullRequestId
 		});
 
@@ -1789,7 +3413,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			  }
 			}
 		  }`;
-		const response = await this.client.request<any>(query, {
+		const response = await this.query<any>(query, {
 			id: id
 		});
 		return response.node.number;
@@ -1834,7 +3458,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			}
 		  }
 		  `;
-		const response = await this.client.request<any>(query, {
+		const response = await this.query<any>(query, {
 			id: id
 		});
 		return {
@@ -1859,7 +3483,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				| string
 				| undefined = `/repos/${ownerData.owner}/${ownerData.name}/pulls/${ownerData.pullRequestNumber}/files`;
 			do {
-				const apiResponse = await this.get<FetchThirdPartyPullRequestFilesResponse[]>(url);
+				const apiResponse = await this.restGet<FetchThirdPartyPullRequestFilesResponse[]>(url);
 				changedFiles.push(...apiResponse.body);
 				url = this.nextPage(apiResponse.response);
 			} while (url);
@@ -1870,7 +3494,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 
 		return changedFiles;
 
-		// const data = await this.get<any>(
+		// const data = await this.restGet<any>(
 		// 	`/repos/${ownerData.owner}/${ownerData.name}/pulls/${ownerData.pullRequestNumber}/files`
 		// );
 		// return data.body;
@@ -1898,6 +3522,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			//   }`,
 			`... on AssignedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -1922,6 +3547,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			//   }`,
 			`... on BaseRefForcePushedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -1939,6 +3565,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on ClosedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -1955,13 +3582,15 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			// 	`... on ConnectedEvent {
 			// 	__typename
 			//   }`,
-			`... on ConvertToDraftEvent {
-			__typename
-			actor {
-			  login
-			  avatarUrl
-			}
-		  }`,
+			this._transform(`[... on ConvertToDraftEvent {
+				__typename
+				id
+				createdAt
+				actor {
+				  login
+				  avatarUrl
+				}
+			  }:>=2.21.0]`),
 			// 	`... on ConvertedNoteToIssueEvent {
 			// 	__typename
 			// 	id
@@ -1976,13 +3605,13 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			//   }`,
 			`... on DemilestonedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
 			  resourcePath
 			  url
 			}
-			id
 			milestoneTitle
 			createdAt
 		  }`,
@@ -2000,6 +3629,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			//   }`,
 			`... on HeadRefDeletedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2007,6 +3637,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on HeadRefForcePushedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2055,6 +3686,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		}`,
 			`... on LabeledEvent {
 			__typename
+			id
 			label {
 			  name
 			  description
@@ -2068,6 +3700,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on LockedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2077,9 +3710,11 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on MarkedAsDuplicateEvent {
 			__typename
+			id
 		  }`,
 			`... on MentionedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2088,6 +3723,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on MergedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2100,6 +3736,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on MilestonedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2148,8 +3785,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			// 	__typename
 			//   }`,
 			`... on PullRequestReview {
-			  id
 			__typename
+			id
 			author {
 			  login
 			  avatarUrl
@@ -2254,11 +3891,18 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			  }
 			}
 		  }`,
-			// 	`... on ReadyForReviewEvent {
-			// 	__typename
-			//   }`,
+			this._transform(`[... on ReadyForReviewEvent {
+			__typename
+			id
+			createdAt
+			actor {
+			  login
+			  avatarUrl
+			}
+		  }:>=2.21.0]`),
 			`... on ReferencedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2270,13 +3914,29 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				state
 			  }
 			  oid
+			  abbreviatedOid
+			  author {
+				avatarUrl
+				name
+				user {
+				  login
+				}
+			  }
+			  committer {
+				avatarUrl
+				name
+				user {
+				  login
+				}
+			  }
 			}
 		  }`,
-			`... on RemovedFromProjectEvent {
-			__typename
-		  }`,
+			// 	`... on RemovedFromProjectEvent {
+			// 	__typename
+			//   }`,
 			`... on RenamedTitleEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2287,6 +3947,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on ReopenedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2295,6 +3956,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on ReviewDismissedEvent {
 			__typename
+			id
 			actor {
 				login
 				avatarUrl
@@ -2311,9 +3973,18 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			//   }`,
 			`... on ReviewRequestedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
+			}
+			createdAt
+			requestedReviewer {
+				... on User {
+					id
+					login
+					avatarUrl
+				}
 			}
 		  }`,
 			// 	`... on SubscribedEvent {
@@ -2324,6 +3995,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			//   }`,
 			`... on UnassignedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2339,6 +4011,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on UnlabeledEvent {
 			__typename
+			id
 			label {
 			  color
 			  name
@@ -2352,6 +4025,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		  }`,
 			`... on UnlockedEvent {
 			__typename
+			id
 			actor {
 			  login
 			  avatarUrl
@@ -2436,10 +4110,12 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					createdAt
 					activeLockReason
 					includesCreatedEdit
-					isDraft
+					${this._transform(`
+					[isDraft:>2.20.0]
+					[reviewDecision:>2.20.0]
+					`)}
 					locked
 					resourcePath
-					reviewDecision
 					viewerSubscription
 					viewerDidAuthor
 					viewerCanUpdate
@@ -2473,6 +4149,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 								includesCreatedEdit
 								isMinimized
 								minimizedReason
+								outdated
 								replyTo {
 								  id
 								}
@@ -2595,6 +4272,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					mergeable
 					merged
 					mergedAt
+					canBeRebased
+					mergeStateStatus
 					title
 					url
 					updatedAt
@@ -2603,21 +4282,34 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				  squashMergeAllowed
 				  mergeCommitAllowed
 				  viewerPermission
+				  branchProtectionRules(first:100) {
+				  	nodes {
+				  		requiredApprovingReviewCount
+				  		matchingRefs(first:100) {
+				  			nodes {
+				  				name
+				  			}
+				  		}
+				  	}
+				  }
 				}
 			  }`;
-			const response = (await this.client.request<any>(query, {
+			const response = (await this.query<any>(query, {
 				owner: owner,
 				name: repo,
 				pullRequestNumber: pullRequestNumber,
 				cursor: cursor
 			})) as FetchThirdPartyPullRequestResponse;
 
-			this._prTimelineQueryRateLimit = {
-				cost: response.rateLimit.cost,
-				limit: response.rateLimit.limit,
-				remaining: response.rateLimit.remaining,
-				resetAt: new Date(response.rateLimit.resetAt)
-			};
+			if (response.rateLimit) {
+				this._prTimelineQueryRateLimit = {
+					cost: response.rateLimit.cost,
+					limit: response.rateLimit.limit,
+					remaining: response.rateLimit.remaining,
+					resetAt: new Date(response.rateLimit.resetAt)
+				};
+			}
+
 			// this is sheer insanity... there's no way to get replies to parent comments
 			// as a child object of that comment. all replies are treated as `reviewThreads`
 			// and they live on the parent `pullRequest` object. below, we're stiching together
@@ -2724,8 +4416,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		const data = await this.getRepoOwnerFromPullRequestId(request.pullRequestId);
 		const pullRequestNumber = await this.getPullRequestNumber(request.pullRequestId);
 
-		const query = await this.client.request<any>(
-			`query pr($owner: String!, $name: String!, $pullRequestNumber: Int!) {
+		const query = await this.query<any>(
+			`query pr($owner:String!, $name:String!, $pullRequestNumber:Int!) {
 				  rateLimit {
 					limit
 					cost
@@ -2799,9 +4491,11 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 
 		// TODO: Need to page if there are more than 100 review threads
 		try {
-			const query = `query pr($owner: String!, $repo: String!) {
-				repository(name: $repo, owner: $owner${cursor ? `after: $cursor` : ""}) {
-					pullRequests(states: [OPEN, MERGED], first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) {
+			const query = `query pr($owner:String!, $repo:String!${cursor ? `, $cursor:String` : ""}) {
+				repository(name: $repo, owner: $owner) {
+					pullRequests(states: [OPEN, MERGED], first: 100, orderBy: { field: UPDATED_AT, direction: DESC }${
+						cursor ? `, after: $cursor` : ""
+					}) {
 						totalCount
 						pageInfo {
 							startCursor
@@ -2865,18 +4559,20 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				}
 			}`;
 
-			const response = await this.client.request<GetPullRequestsResponse>(query, {
+			const response = await this.query<GetPullRequestsResponse>(query, {
 				owner: owner,
 				repo: repo,
 				cursor: cursor
 			});
 
-			this._prQueryRateLimit = {
-				cost: response.rateLimit.cost,
-				limit: response.rateLimit.limit,
-				remaining: response.rateLimit.remaining,
-				resetAt: new Date(response.rateLimit.resetAt)
-			};
+			if (response.rateLimit) {
+				this._prQueryRateLimit = {
+					cost: response.rateLimit.cost,
+					limit: response.rateLimit.limit,
+					remaining: response.rateLimit.remaining,
+					resetAt: new Date(response.rateLimit.resetAt)
+				};
+			}
 
 			return response.repository.pullRequests;
 		} catch (ex) {

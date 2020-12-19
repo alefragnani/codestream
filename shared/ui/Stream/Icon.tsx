@@ -20,8 +20,10 @@ interface Props {
 	muted?: boolean;
 	loading?: boolean;
 	onClick?(event: React.SyntheticEvent): any;
+	onMouseDown?(event: React.SyntheticEvent): any;
 	onPopupAlign?: any;
 	trigger?: Trigger[];
+	tabIndex?: number;
 }
 
 const Icon = React.forwardRef<any, Props>((props, ref) => {
@@ -39,9 +41,11 @@ const Icon = React.forwardRef<any, Props>((props, ref) => {
 				muted: props.muted
 			})}
 			onClick={props.onClick}
+			onMouseDown={props.onMouseDown}
 			style={props.style}
 			dangerouslySetInnerHTML={{ __html: icon.toSVG() }}
 			ref={ref}
+			tabIndex={props.tabIndex}
 		/>
 	);
 

@@ -293,18 +293,20 @@ export namespace User {
 		name: string,
 		host?: string
 	) {
-		if (me.providerInfo == null) return undefined;
+		if (me.providerInfo == null) {
+			return undefined;
+		}
 
 		const userProviderInfo = me.providerInfo[name];
 		const teamProviderInfo = me.providerInfo[teamId] && me.providerInfo[teamId][name];
 		const namedProvider = userProviderInfo || teamProviderInfo;
-		if (!namedProvider) return;
+		if (!namedProvider) {
+			return undefined;
+		}
 		const typedProvider = (namedProvider as any) as T;
-
 		if (!host) {
 			return typedProvider;
 		}
-
 		const starredHost = host.replace(/\./g, "*");
 		if (typedProvider.hosts && typedProvider.hosts[starredHost]) {
 			return typedProvider.hosts[starredHost] as T;

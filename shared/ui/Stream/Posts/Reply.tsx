@@ -72,9 +72,6 @@ const Root = styled.div`
 	${AuthorInfo} {
 		font-weight: 700;
 	}
-	${KebabIcon}, .icon.reply, ${AddReactionIcon} {
-		visibility: hidden;
-	}
 	.icon.reply {
 		margin-left: 5px;
 		margin-right: 10px;
@@ -119,7 +116,14 @@ const ReplyBody = styled.span`
 	flex-direction: column;
 	position: relative;
 
-	:hover ${KebabIcon}, :hover .icon.reply,
+	.kebab,
+	.icon.reply,
+	${AddReactionIcon} {
+		visibility: hidden;
+	}
+
+	:hover .kebab,
+	:hover .icon.reply,
 	:hover ${AddReactionIcon} {
 		visibility: visible;
 	}
@@ -211,7 +215,7 @@ export const Reply = (props: ReplyProps) => {
 		setIsLoading(true);
 
 		if (codemark) {
-			await dispatch(editCodemark(codemark.id, { text: replaceHtml(newReplyText)! }));
+			await dispatch(editCodemark(codemark, { text: replaceHtml(newReplyText)! }));
 		} else {
 			await dispatch(
 				editPost(
@@ -257,13 +261,7 @@ export const Reply = (props: ReplyProps) => {
 	const renderEmote = () => {
 		let matches = (props.post.text || "").match(/^\/me\s+(.*)/);
 		if (matches) {
-			return (
-				<MarkdownText
-					text={matches[1]}
-					className="emote"
-					excludeParagraphWrap={true}
-				></MarkdownText>
-			);
+			return <MarkdownText text={matches[1]} className="emote" inline={true}></MarkdownText>;
 		} else return null;
 	};
 	const emote = renderEmote();
@@ -275,7 +273,7 @@ export const Reply = (props: ReplyProps) => {
 		// not allowing any of the capabilities (they default to off anyway)
 		const capabilities: any = {};
 		return codemark.markers.map((marker, index) => (
-			<ReviewMarkerActionsWrapper>
+			<ReviewMarkerActionsWrapper key={index}>
 				<MarkerActions
 					key={marker.id}
 					codemark={codemark}
@@ -346,6 +344,7 @@ export const Reply = (props: ReplyProps) => {
 						{renderedMenu}
 						{props.renderMenu && (
 							<KebabIcon
+								className="kebab"
 								onClick={e => {
 									e.preventDefault();
 									e.stopPropagation();

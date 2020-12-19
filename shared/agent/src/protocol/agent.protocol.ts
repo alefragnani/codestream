@@ -1,6 +1,6 @@
 "use strict";
 import { RequestInit } from "node-fetch";
-import { InitializeResult, RequestType } from "vscode-languageserver-protocol";
+import { InitializeResult, RequestType, WorkspaceFolder } from "vscode-languageserver-protocol";
 import { LoginResponse } from "./agent.protocol.auth";
 import { Unreads } from "./agent.protocol.notifications";
 import { ThirdPartyProviders } from "./agent.protocol.providers";
@@ -34,6 +34,7 @@ export * from "./agent.protocol.trello";
 export * from "./agent.protocol.youtrack";
 export * from "./agent.protocol.azuredevops";
 export * from "./agent.protocol.okta";
+export * from "./agent.protocol.clubhouse";
 
 export interface Document {
 	uri: string;
@@ -110,6 +111,7 @@ export interface BaseAgentOptions {
 	disableStrictSSL?: boolean;
 	traceLevel: TraceLevel;
 	recordRequests?: boolean;
+	workspaceFolders?: WorkspaceFolder[];
 }
 
 export interface AgentOptions extends BaseAgentOptions {
@@ -146,6 +148,9 @@ export interface VerifyConnectivityResponse {
 	error?: {
 		message: string;
 		details?: string;
+	};
+	capabilities?: {
+		[key: string]: any;
 	};
 }
 
@@ -201,9 +206,12 @@ export interface ReportBreadcrumbRequest {
 	data?: object;
 }
 
-export const ReportBreadcrumbRequestType = new RequestType<ReportBreadcrumbRequest, void, void, void>(
-	"codestream/reporting/breadcrumb"
-);
+export const ReportBreadcrumbRequestType = new RequestType<
+	ReportBreadcrumbRequest,
+	void,
+	void,
+	void
+>("codestream/reporting/breadcrumb");
 
 /**
  * @param eventName The name of the telemetry event you want to track, eg: "Page Viewed"
@@ -262,3 +270,16 @@ export interface CodeStreamDiffUriData {
 		};
 	};
 }
+
+export const CodeStreamApiGetRequestType = new RequestType<any, any, void, void>(
+	"codestream/api/get"
+);
+export const CodeStreamApiPostRequestType = new RequestType<any, any, void, void>(
+	"codestream/api/post"
+);
+export const CodeStreamApiPutRequestType = new RequestType<any, any, void, void>(
+	"codestream/api/put"
+);
+export const CodeStreamApiDeleteRequestType = new RequestType<any, any, void, void>(
+	"codestream/api/delete"
+);

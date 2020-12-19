@@ -7,17 +7,17 @@ import com.codestream.protocols.webview.ReviewNotifications
 import com.codestream.webViewService
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.LowPriorityAction
-import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.IconLoader
 import com.intellij.openapi.util.Iconable
 import com.intellij.psi.PsiFile
 import java.awt.event.KeyEvent
 
-class CreateReview : AnAction(), IntentionAction, LowPriorityAction, Iconable {
+class CreateReview : DumbAwareAction(), IntentionAction, LowPriorityAction, Iconable {
     private fun execute(project: Project, source: String) {
         FileEditorManager.getInstance(project).selectedTextEditor?.run {
             project.codeStream?.show {
@@ -51,7 +51,7 @@ class CreateReview : AnAction(), IntentionAction, LowPriorityAction, Iconable {
 
     override fun isAvailable(project: Project, editor: Editor?, file: PsiFile?) = true
 
-    override fun getText() = "Request a code review"
+    override fun getText() = "Request feedback"
 
     override fun getIcon(flags: Int) = IconLoader.getIcon("/images/review.svg")
 }

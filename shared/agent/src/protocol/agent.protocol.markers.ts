@@ -111,6 +111,27 @@ export const MoveMarkerRequestType = new RequestType<
 	void
 >("codestream/marker/move");
 
+export interface AddMarkersRequest {
+	codemarkId: string;
+	newMarkers: {
+		code: string;
+		documentId: TextDocumentIdentifier;
+		range: Range;
+		source: CodeBlockSource;
+	}[];
+}
+
+export interface AddMarkersResponse {
+	codemark: CSCodemark;
+}
+
+export const AddMarkersRequestType = new RequestType<
+	AddMarkersRequest,
+	AddMarkersResponse,
+	void,
+	void
+>("codestream/markers/add");
+
 export interface AddReferenceLocationRequest {
 	markerId: string;
 	commitHash: string;
@@ -122,3 +143,16 @@ export interface AddReferenceLocationResponse {
 	// marker: < some directive >,
 	// markerLocations: < markerLocations update >
 }
+
+export interface DeleteMarkerRequest {
+	markerId: string;
+}
+
+export interface DeleteMarkerResponse {}
+
+export const DeleteMarkerRequestType = new RequestType<
+	DeleteMarkerRequest,
+	DeleteMarkerResponse,
+	void,
+	void
+>("codestream/marker/delete");

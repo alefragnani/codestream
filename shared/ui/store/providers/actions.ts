@@ -9,11 +9,14 @@ import {
 	RemoveEnterpriseProviderRequestType,
 	TelemetryRequestType
 } from "@codestream/protocols/agent";
+import {
+	ConnectToIDEProviderRequestType,
+	DisconnectFromIDEProviderRequestType
+} from "../../ipc/host.protocol";
 import { CSMe } from "@codestream/protocols/api";
 import { logError } from "../../logger";
-import { setIssueProvider } from "../context/actions";
+import { setIssueProvider, openPanel } from "../context/actions";
 import { deleteForProvider } from "../activeIntegrations/actions";
-import { CodeStreamState } from "..";
 
 export const reset = () => action("RESET");
 
@@ -26,11 +29,29 @@ export const getUserProviderInfo = (user: CSMe, provider: string, teamId: string
 
 export const updateProviders = (data: ProvidersState) => action(ProvidersActionsType.Update, data);
 
-export const connectProvider = (providerId: string, connectionLocation: ViewLocation) => async (
-	dispatch,
-	getState
-) => {
-	const { context, users, session, providers } = getState();
+export const configureAndConnectProvider = (
+	providerId: string,
+	connectionLocation: ViewLocation,
+	force?: boolean
+) => async (dispatch, getState) => {
+	const { providers } = getState();
+	const provider = providers[providerId];
+	const { forEnterprise, isEnterprise, name, needsConfigure } = provider;
+	if (needsConfigure) {
+		dispatch(openPanel(`configure-provider-${provider.name}-${provider.id}-Integrations Panel`));
+	} else if ((forEnterprise || isEnterprise) && name !== "jiraserver") {
+		dispatch(openPanel(`configure-enterprise-${name}-${provider.id}-Integrations Panel`));
+	} else {
+		dispatch(connectProvider(provider.id, connectionLocation, force));
+	}
+};
+
+export const connectProvider = (
+	providerId: string,
+	connectionLocation: ViewLocation,
+	force?: boolean
+) => async (dispatch, getState) => {
+	const { context, users, session, providers, ide, capabilities } = getState();
 	const provider = providers[providerId];
 	if (!provider) return;
 	const user = users[session.userId];
@@ -39,7 +60,7 @@ export const connectProvider = (providerId: string, connectionLocation: ViewLoca
 	if (providerInfo && isEnterprise) {
 		providerInfo = (providerInfo.hosts || {})[id];
 	}
-	if (providerInfo && providerInfo.accessToken) {
+	if (!force && providerInfo && providerInfo.accessToken) {
 		if (provider.hasIssues) {
 			dispatch(setIssueProvider(providerId));
 		}
@@ -47,7 +68,19 @@ export const connectProvider = (providerId: string, connectionLocation: ViewLoca
 	}
 	try {
 		const api = HostApi.instance;
-		await api.send(ConnectThirdPartyProviderRequestType, { providerId });
+		if (ide.name === "VSC" && name === "github" && capabilities.vsCodeGithubSignin) {
+			const result = await api.send(ConnectToIDEProviderRequestType, { provider: name });
+			dispatch(
+				configureProvider(
+					providerId,
+					{ token: result.accessToken, data: { sessionId: result.sessionId } },
+					true
+				)
+			);
+			return {};
+		} else {
+			await api.send(ConnectThirdPartyProviderRequestType, { providerId });
+		}
 		if (provider.hasIssues) {
 			dispatch(sendIssueProviderConnected(providerId, connectionLocation));
 			dispatch(setIssueProvider(providerId));
@@ -65,7 +98,11 @@ export type ViewLocation =
 	| "PR Toggle"
 	| "Integrations Panel"
 	| "Status"
-	| "Create Pull Request Panel";
+	| "Sidebar"
+	| "Create Pull Request Panel"
+	| "Issues Section"
+	| "Provider Error Banner"
+	| "Onboard";
 
 export const sendIssueProviderConnected = (
 	providerId: string,
@@ -160,11 +197,14 @@ export const disconnectProvider = (
 	providerTeamId?: string
 ) => async (dispatch, getState) => {
 	try {
-		const { providers } = getState();
+		const { context, providers, users, session, ide } = getState();
 		const provider = providers[providerId];
 		if (!provider) return;
 		const api = HostApi.instance;
 		await api.send(DisconnectThirdPartyProviderRequestType, { providerId, providerTeamId });
+		if (ide.name === "VSC" && provider.name === "github") {
+			await api.send(DisconnectFromIDEProviderRequestType, { provider: provider.name });
+		}
 		api.send(TelemetryRequestType, {
 			eventName: "Issue Service Connected",
 			properties: {

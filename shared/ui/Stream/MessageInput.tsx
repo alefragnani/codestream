@@ -5,7 +5,7 @@ import ContentEditable from "react-contenteditable";
 import * as codemarkSelectors from "../store/codemarks/reducer";
 import * as actions from "./actions";
 const emojiData = require("../node_modules/markdown-it-emoji-mart/lib/data/full.json");
-import { CSChannelStream, CSPost, CSUser, CSTeam, CSTag } from "@codestream/protocols/api";
+import { CSChannelStream, CSPost, CSUser, CSTeam, CSTag, CSMe } from "@codestream/protocols/api";
 import KeystrokeDispatcher from "../utilities/keystroke-dispatcher";
 import {
 	createRange,
@@ -24,11 +24,13 @@ import Icon from "./Icon";
 import { confirmPopup } from "./Confirm";
 import { CodemarkPlus } from "@codestream/protocols/agent";
 import { CodeStreamState } from "../store";
-import { getTeamTagsArray, getTeamMembers } from "../store/users/reducer";
+import { getTeamTagsArray, getTeamMembers, getUsernames } from "../store/users/reducer";
 import { getChannelStreamsForTeam } from "../store/streams/reducer";
 import { ServicesState } from "../store/services/types";
 import { getSlashCommands } from "./SlashCommands";
 import { MarkdownText } from "./MarkdownText";
+
+import { getProviderPullRequestCollaborators } from "../store/providerPullRequests/reducer";
 
 type PopupType = "at-mentions" | "slash-commands" | "channels" | "emojis";
 
@@ -62,6 +64,7 @@ interface State {
 
 interface ConnectedProps {
 	isInVscode: boolean;
+	currentUser: CSMe;
 	currentTeam: CSTeam;
 	codemarks: CodemarkPlus[];
 	teammates: CSUser[];
@@ -70,6 +73,7 @@ interface ConnectedProps {
 	channelStreams: CSChannelStream[];
 	services: ServicesState;
 	slashCommands: any[];
+	usernames: string[];
 }
 
 interface Props extends ConnectedProps {
@@ -83,10 +87,12 @@ interface Props extends ConnectedProps {
 	quotePost?: QuotePost;
 	shouldShowRelatableCodemark?(codemark: CodemarkPlus): boolean;
 	onChange?(text: string, formatCode: boolean): any;
+	onKeypress?(event: React.KeyboardEvent): any;
 	updateTeamTag?(team: any, tag: any): any;
 	onChangeSelectedTags?(tag: any): any;
 	onEmptyUpArrow?(event: React.KeyboardEvent): any;
 	onDismiss?(): any;
+	setIsPreviewing?(value: boolean): any;
 	onSubmit?: any;
 	onFocus?: any;
 	selectedTags?: any;
@@ -95,6 +101,8 @@ interface Props extends ConnectedProps {
 	toggleCodemark?: Function;
 	autoFocus?: boolean;
 	className?: string;
+	renderCodeBlock?(index: number, force: boolean): React.ReactNode | null;
+	renderCodeBlocks?(): React.ReactNode | null;
 	__onDidRender?(stuff: { [key: string]: any }): any; // HACKy: sneaking internals to parent
 }
 
@@ -273,11 +281,15 @@ export class MessageInput extends React.Component<Props, State> {
 				const toMatch = `${person.fullName}*${person.username}`.toLowerCase();
 				if (toMatch.indexOf(normalizedPrefix) !== -1) {
 					const you = person.id === this.props.currentUserId ? " (you)" : "";
+					let description = person.fullName || person.email;
+					if (description) {
+						description += you;
+					}
 					itemsToShow.push({
 						id: person.id,
 						headshot: person,
 						identifier: person.username || person.email,
-						description: (person.fullName || person.email) + you
+						description: description
 					});
 				}
 			});
@@ -451,6 +463,12 @@ export class MessageInput extends React.Component<Props, State> {
 	// insert the given text at the cursor of the input field
 	// after first deleting the text in toDelete
 	insertTextAtCursor = (text: string, toDelete: string = "") => {
+		if (this.state.isPreviewing) return;
+
+		if (!this._contentEditable) return;
+		if (document.activeElement !== this._contentEditable.htmlEl)
+			this._contentEditable.htmlEl.focus();
+
 		let sel, range;
 		sel = window.getSelection();
 
@@ -488,6 +506,8 @@ export class MessageInput extends React.Component<Props, State> {
 	};
 
 	insertNewlineAtCursor = () => {
+		if (this.state.isPreviewing) return;
+
 		let sel, range;
 		sel = window.getSelection();
 
@@ -566,13 +586,15 @@ export class MessageInput extends React.Component<Props, State> {
 			(event.ctrlKey || event.metaKey || !multiCompose)
 		) {
 			event.preventDefault();
-			this.setState({ isPreviewing: false });
+			this.setIsPreviewing(false);
 			const { onSubmit } = this.props;
 			onSubmit && onSubmit();
 		} else if (event.key == "Escape" && multiCompose && this.props.onDismiss) {
-			this.setState({ isPreviewing: false });
+			this.setIsPreviewing(false);
 			this.props.onDismiss();
 		}
+
+		if (this.props.onKeypress) this.props.onKeypress(event);
 	};
 
 	// the keypress handler for tracking up and down arrow
@@ -645,7 +667,7 @@ export class MessageInput extends React.Component<Props, State> {
 			} else if ((event.key === "Enter" || event.which === 13) && event.metaKey && multiCompose) {
 				// command-enter should submit for multiCompose
 				event.preventDefault();
-				this.setState({ isPreviewing: false });
+				this.setIsPreviewing(false);
 				const { onSubmit } = this.props;
 				onSubmit && onSubmit();
 			}
@@ -692,22 +714,6 @@ export class MessageInput extends React.Component<Props, State> {
 		}
 	};
 
-	buildCodemarkMenuOld = () => {
-		if (!this.state.codemarkOpen) return null;
-
-		const menuItems = [
-			{ label: "Attach Codemark...", action: "attach" },
-			{ label: "Post as reply to Codemark...", action: "reply" }
-		];
-		return (
-			<Menu
-				items={menuItems}
-				action={this.codemarkMenuAction}
-				target={this.state.codemarkMenuTarget}
-			/>
-		);
-	};
-
 	buildCodemarkMenu = () => {
 		if (!this.state.codemarkOpen) return null;
 
@@ -717,6 +723,8 @@ export class MessageInput extends React.Component<Props, State> {
 		];
 
 		const { codemarks = [] } = this.props;
+		if (codemarks.length === 0) return null;
+
 		menuItems = menuItems.concat(
 			codemarks
 				.sort((a, b) => b.createdAt - a.createdAt)
@@ -751,12 +759,6 @@ export class MessageInput extends React.Component<Props, State> {
 				})
 				.filter(Boolean)
 		);
-		if (codemarks.length === 0) {
-			menuItems = menuItems.concat(
-				{ label: "-" },
-				{ label: "No Codemarks! FIXME", action: "more" }
-			);
-		}
 		// menuItems = menuItems.concat({ label: "-" }, { label: "Show More...", action: "more" });
 		return (
 			<Menu
@@ -1017,8 +1019,13 @@ export class MessageInput extends React.Component<Props, State> {
 		);
 	};
 
+	setIsPreviewing = value => {
+		this.setState({ isPreviewing: value });
+		if (this.props.setIsPreviewing) this.props.setIsPreviewing(value);
+	};
+
 	handleClickPreview = () => {
-		this.setState({ isPreviewing: !this.state.isPreviewing });
+		this.setIsPreviewing(!this.state.isPreviewing);
 		this.focus();
 	};
 
@@ -1051,6 +1058,44 @@ export class MessageInput extends React.Component<Props, State> {
 		});
 	};
 
+	renderTextReplaceCodeBlocks = (text: string) => {
+		if (!this.props.renderCodeBlock) return <MarkdownText text={text} inline={false} />;
+
+		const blocks: any[] = [];
+		const groups = text.split(/\[#(\d+)]/);
+		let index = 0;
+		while (index < groups.length) {
+			blocks.push(<MarkdownText text={groups[index]} inline={false} />);
+			if (index + 1 < groups.length) {
+				const markerIndex = parseInt(groups[index + 1], 10);
+				if (markerIndex > 0) {
+					blocks.push(this.props.renderCodeBlock(markerIndex - 1, true));
+				}
+			}
+			index += 2;
+		}
+		if (this.props.renderCodeBlocks) blocks.push(this.props.renderCodeBlocks());
+		return <>{blocks}</>;
+	};
+
+	renderExitPreview = () => {
+		return (
+			<div className="button-group float-wrap">
+				<Button
+					type="submit"
+					className="control-button"
+					style={{ width: "100px" }}
+					onClick={e => {
+						this.setIsPreviewing(false);
+						this.focus();
+					}}
+				>
+					Exit Preview
+				</Button>
+			</div>
+		);
+	};
+
 	render() {
 		const { isPreviewing, formatCode } = this.state;
 		const { placeholder, text, __onDidRender } = this.props;
@@ -1063,149 +1108,161 @@ export class MessageInput extends React.Component<Props, State> {
 			});
 
 		return (
-			<div
-				className="message-input-wrapper"
-				onKeyPress={this.handleKeyPress}
-				onKeyDown={this.handleKeyDown}
-				style={{ position: "relative" }}
-			>
-				<div key="message-attach-icons" className="message-attach-icons">
-					{
-						// <Icon
-						// 	key="code-box"
-						// 	name="code-box"
-						// 	title="Format as code"
-						// 	placement="top"
-						// 	align={{ offset: [5, 0] }}
-						// 	delay={1}
-						// 	className={cx("code-box", { selected: this.state.formatCode })}
-						// 	onClick={this.handleClickFormatCode}
-						// />
-					}
-					<Icon
-						key="preview"
-						name="markdown"
-						title={
-							<div style={{ textAlign: "center" }}>
-								Click to Preview
-								<div style={{ paddingTop: "5px" }}>
-									<a href="https://www.markdownguide.org/cheat-sheet/">Markdown help</a>
-								</div>
-							</div>
-						}
-						placement="top"
-						align={{ offset: [5, 0] }}
-						delay={1}
-						className={cx("preview", { hover: isPreviewing })}
-						onClick={this.handleClickPreview}
-					/>
-					{this.props.teammates.length > 0 && (
-						<Icon
-							key="mention"
-							name="mention"
-							title="Mention a teammate"
-							placement="topRight"
-							align={{ offset: [18, 0] }}
-							delay={1}
-							className={cx("mention", { hover: this.state.currentPopup === "at-mentions" })}
-							onClick={this.handleClickAtMentions}
-						/>
-					)}
-					<Icon
-						key="smiley"
-						name="smiley"
-						title="Add an emoji"
-						placement="topRight"
-						align={{ offset: [9, 0] }}
-						delay={1}
-						className={cx("smiley", {
-							hover: this.state.emojiOpen
-						})}
-						onClick={this.handleClickEmojiButton}
-					/>
-					{this.state.emojiOpen && (
-						<EmojiPicker
-							addEmoji={this.addEmoji}
-							target={this.state.emojiMenuTarget}
-							autoFocus={true}
-						/>
-					)}
-					{this.props.relatedCodemarkIds && (
-						<Icon
-							key="codestream"
-							name="codestream"
-							title="Add a related codemark"
-							placement="top"
-							align={{ offset: [5, 0] }}
-							delay={1}
-							className={cx("codestream", { hover: this.state.codemarkOpen })}
-							onClick={this.handleClickCodemarkButton}
-						/>
-					)}
-					{this.buildCodemarkMenu()}
-					{this.props.withTags && (
-						<Icon
-							key="tag"
-							name="tag"
-							title="Add tags"
-							placement="top"
-							align={{ offset: [5, 0] }}
-							delay={1}
-							className={cx("tags", { hover: this.state.tagsOpen })}
-							onClick={this.handleClickTagButton}
-						/>
-					)}
-					{this.buildTagMenu()}
-				</div>
-				{isPreviewing && (
-					<div className={cx("message-input preview", { "format-code": formatCode })}>
-						<MarkdownText text={replaceHtml(this._contentEditable!.htmlEl.innerHTML) || ""} />
-					</div>
-				)}
-				<AtMentionsPopup
-					on={this.state.currentPopup}
-					items={this.state.popupItems || emptyArray}
-					prefix={this.state.popupPrefix}
-					selected={this.state.selectedPopupItem}
-					handleHoverAtMention={this.handleHoverAtMention}
-					handleSelectAtMention={this.handleSelectAtMention}
+			<>
+				<div
+					className="message-input-wrapper"
+					onKeyPress={this.handleKeyPress}
+					onKeyDown={this.handleKeyDown}
+					style={{ position: "relative" }}
 				>
-					<ContentEditable
-						className={cx("message-input", btoa(unescape(encodeURIComponent(placeholder || ""))), {
-							"format-code": formatCode,
-							hide: isPreviewing
-						})}
-						id="input-div"
-						onChange={this.handleChange}
-						onBlur={this.handleBlur}
-						onFocus={this.props.onFocus}
-						onClick={this.handleClick}
-						html={text}
-						placeholder={placeholder}
-						ref={ref => (this._contentEditable = ref)}
-					/>
-				</AtMentionsPopup>
-			</div>
+					<div key="message-attach-icons" className="message-attach-icons">
+						{!isPreviewing && (
+							<>
+								<Icon
+									key="preview"
+									name="markdown"
+									title={
+										<div style={{ textAlign: "center" }}>
+											Click to Preview
+											<div style={{ paddingTop: "5px" }}>
+												<a href="https://www.markdownguide.org/cheat-sheet/">Markdown help</a>
+											</div>
+										</div>
+									}
+									placement="top"
+									align={{ offset: [5, 0] }}
+									delay={1}
+									className={cx("preview", { hover: isPreviewing })}
+									onClick={this.handleClickPreview}
+								/>
+								{this.props.teammates.length > 0 && (
+									<Icon
+										key="mention"
+										name="mention"
+										title="Mention a teammate"
+										placement="topRight"
+										align={{ offset: [18, 0] }}
+										delay={1}
+										className={cx("mention", { hover: this.state.currentPopup === "at-mentions" })}
+										onClick={this.handleClickAtMentions}
+									/>
+								)}
+								<Icon
+									key="smiley"
+									name="smiley"
+									title="Add an emoji"
+									placement="topRight"
+									align={{ offset: [9, 0] }}
+									delay={1}
+									className={cx("smiley", {
+										hover: this.state.emojiOpen
+									})}
+									onClick={this.handleClickEmojiButton}
+								/>
+								{this.state.emojiOpen && (
+									<EmojiPicker
+										addEmoji={this.addEmoji}
+										target={this.state.emojiMenuTarget}
+										autoFocus={true}
+									/>
+								)}
+								{this.props.relatedCodemarkIds && this.props.codemarks.length > 0 && (
+									<Icon
+										key="codestream"
+										name="codestream"
+										title="Add a related codemark"
+										placement="top"
+										align={{ offset: [5, 0] }}
+										delay={1}
+										className={cx("codestream", { hover: this.state.codemarkOpen })}
+										onClick={this.handleClickCodemarkButton}
+									/>
+								)}
+								{this.buildCodemarkMenu()}
+								{this.props.withTags && (
+									<Icon
+										key="tag"
+										name="tag"
+										title="Add tags"
+										placement="top"
+										align={{ offset: [5, 0] }}
+										delay={1}
+										className={cx("tags", { hover: this.state.tagsOpen })}
+										onClick={this.handleClickTagButton}
+									/>
+								)}
+								{this.buildTagMenu()}
+							</>
+						)}
+					</div>
+					{isPreviewing && (
+						<div className={cx("message-input preview", { "format-code": formatCode })}>
+							{this.renderTextReplaceCodeBlocks(
+								replaceHtml(this._contentEditable!.htmlEl.innerHTML) || ""
+							)}
+						</div>
+					)}
+					<AtMentionsPopup
+						on={this.state.currentPopup}
+						items={this.state.popupItems || emptyArray}
+						prefix={this.state.popupPrefix}
+						selected={this.state.selectedPopupItem}
+						handleHoverAtMention={this.handleHoverAtMention}
+						handleSelectAtMention={this.handleSelectAtMention}
+					>
+						<ContentEditable
+							className={cx(
+								"message-input",
+								btoa(unescape(encodeURIComponent(placeholder || ""))),
+								{
+									"format-code": formatCode,
+									hide: isPreviewing
+								}
+							)}
+							id="input-div"
+							onChange={this.handleChange}
+							onBlur={this.handleBlur}
+							onFocus={this.props.onFocus}
+							onClick={this.handleClick}
+							html={text}
+							placeholder={placeholder}
+							ref={ref => (this._contentEditable = ref)}
+						/>
+					</AtMentionsPopup>
+				</div>
+				{isPreviewing && this.renderExitPreview()}
+			</>
 		);
 	}
 }
 
+const EMPTY_ARRAY = [];
 const mapStateToProps = (
 	state: CodeStreamState,
 	props: Omit<Props, keyof ConnectedProps>
 ): ConnectedProps => {
 	const currentTeam = state.teams[state.context.currentTeamId];
 
+	const currentPullRequest = state.context.currentPullRequest;
+	let teammates;
+	if (currentPullRequest) {
+		teammates = getProviderPullRequestCollaborators(state);
+	} else {
+		teammates = getTeamMembers(state);
+	}
+
 	return {
 		currentTeam,
 		currentUserId: state.session.userId!,
-		teammates: getTeamMembers(state),
-		codemarks: codemarkSelectors.getTypeFilteredCodemarks(state) || [],
+		teammates: teammates,
+		codemarks: codemarkSelectors.getTypeFilteredCodemarks(state) || EMPTY_ARRAY,
 		isInVscode: state.ide.name === "VSC",
 		teamTags: Boolean(props.withTags) ? getTeamTagsArray(state) : emptyArray,
 		channelStreams: getChannelStreamsForTeam(state, state.context.currentTeamId),
 		services: state.services,
-		slashCommands: getSlashCommands(state.capabilities)
+		slashCommands: getSlashCommands(state.capabilities),
+		currentUser: state.users[state.session.userId!] as CSMe,
+		usernames: getUsernames(state)
 	};
 };
 

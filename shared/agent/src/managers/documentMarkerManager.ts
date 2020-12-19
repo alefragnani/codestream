@@ -2,6 +2,7 @@
 import * as path from "path";
 import {
 	ThirdPartyIssueProvider,
+	ThirdPartyProvider,
 	ThirdPartyProviderSupportsPullRequests
 } from "providers/provider";
 import { CodeStreamSession } from "session";
@@ -9,9 +10,11 @@ import { Range, TextDocumentChangeEvent } from "vscode-languageserver";
 import { URI } from "vscode-uri";
 import { Marker, MarkerLocation, Ranges } from "../api/extensions";
 import { Container, SessionContainer } from "../container";
+import * as gitUtils from "../git/utils";
 import { Logger } from "../logger";
-import { calculateLocations } from "../markerLocation/calculator";
+import { findBestMatchingLine, MAX_RANGE_VALUE } from "../markerLocation/calculator";
 import {
+	CodeStreamDiffUriData,
 	CreateDocumentMarkerPermalinkRequest,
 	CreateDocumentMarkerPermalinkRequestType,
 	CreateDocumentMarkerPermalinkResponse,
@@ -33,6 +36,7 @@ import {
 	CodemarkStatus,
 	CodemarkType,
 	CSCodemark,
+	CSLocationArray,
 	CSMarker,
 	CSMe,
 	CSUser
@@ -112,7 +116,14 @@ export class DocumentMarkerManager {
 
 	async fireDidChangeDocumentMarkers(uri: string, reason: "document" | "codemarks") {
 		// Normalize the uri to vscode style uri formating
-		uri = URI.parse(uri).toString();
+		try {
+			uri = URI.parse(uri).toString();
+		}
+		catch (e) {
+			// capture the URI being used so we'll have it for the sentry error and can diagnose
+			e.message = `${e.message}: ${uri}`;
+			throw e;
+		}
 
 		let fn = this._debouncedDocumentMarkersChangedByReason.get(reason);
 		if (fn === undefined) {
@@ -222,17 +233,132 @@ export class DocumentMarkerManager {
 	@log()
 	@lspHandler(FetchDocumentMarkersRequestType)
 	async get(request: FetchDocumentMarkersRequest): Promise<FetchDocumentMarkersResponse> {
-		if (request.textDocument.uri.startsWith("codestream-diff://")) {
-			if (csUri.Uris.isCodeStreamDiffUri(request.textDocument.uri)) {
+		const uri = request.textDocument.uri;
+		if (uri.startsWith("codestream-diff://")) {
+			if (csUri.Uris.isCodeStreamDiffUri(uri)) {
+				return this.getDocumentMarkersForPullRequestDiff(request);
 				return emptyResponse;
 			}
-			return this.getDocumentMarkersForDiff(request);
+			return this.getDocumentMarkersForReviewDiff(request);
 		} else {
 			return this.getDocumentMarkersForRegularFile(request);
 		}
 	}
 
-	private async getDocumentMarkersForDiff({
+	private async getDocumentMarkersForPullRequestDiff({
+		textDocument: documentId,
+		filters: filters
+	}: FetchDocumentMarkersRequest) {
+		const { git, providerRegistry } = SessionContainer.instance();
+		const uri = documentId.uri;
+
+		const cc = Logger.getCorrelationContext();
+		const parsedUri = csUri.Uris.fromCodeStreamDiffUri<CodeStreamDiffUriData>(uri);
+		if (!parsedUri) throw new Error(`Could not parse uri ${uri}`);
+		let providerId;
+		let pullRequestId;
+		if (parsedUri.context && parsedUri.context.pullRequest) {
+			providerId = parsedUri.context.pullRequest.providerId;
+			if (!providerRegistry.providerSupportsPullRequests(providerId)) {
+				Logger.log(cc, `UnsupportedProvider ${providerId}`);
+				return emptyResponse;
+			}
+			pullRequestId = parsedUri.context.pullRequest.id;
+		} else {
+			Logger.log(cc, `missing context for uri ${uri}`);
+			return emptyResponse;
+		}
+
+		const result = await providerRegistry.executeMethod({
+			method: "getPullRequest",
+			providerId,
+			params: {
+				pullRequestId
+			}
+		});
+		const pr = result.repository.pullRequest;
+		const comments: any[] = [];
+		pr.timelineItems.nodes
+			.filter((node: any) => node.__typename === "PullRequestReview")
+			.forEach((review: any) => {
+				review.comments &&
+					review.comments.nodes.forEach((comment: any) => {
+						if (comment.path === parsedUri.path) comments.push(comment);
+					});
+			});
+
+		const documentMarkers: DocumentMarker[] = [];
+
+		const provider = providerRegistry
+			.getProviders()
+			.find((provider: ThirdPartyProvider) => provider.getConfig().id === pr.providerId);
+		if (provider) {
+			const gitRepo = await git.getRepositoryById(parsedUri.repoId);
+			const repoPath = path.join(gitRepo ? gitRepo.path : "", parsedUri.path);
+			const diff = await git.getDiffBetweenCommits(
+				parsedUri.leftSha,
+				parsedUri.rightSha,
+				repoPath,
+				true
+			);
+
+			const diffWithMetadata = gitUtils.translatePositionToLineNumber(diff);
+
+			comments.forEach(async (comment: any) => {
+				let summary = comment.body || comment.bodyText;
+				if (summary.length !== 0) {
+					summary = summary.replace(emojiRegex, (s: string, code: string) => emojiMap[code] || s);
+				}
+
+				let gotoLine = 1;
+				if (comment.diffHunk && diffWithMetadata) {
+					const lineNumber = gitUtils.getLineNumber(diffWithMetadata, comment.position);
+					if (lineNumber != null) {
+						gotoLine = lineNumber;
+					} else {
+						return;
+					}
+				} else {
+					return;
+				}
+
+				const location: CSLocationArray = [gotoLine, 0, gotoLine, 0, undefined];
+				documentMarkers.push({
+					createdAt: +new Date(comment.createdAt),
+					modifiedAt: +new Date(comment.createdAt),
+					id: comment.id,
+					file: comment.path,
+					repoId: "",
+					creatorId: comment.author.login,
+					teamId: "",
+					fileStreamId: "",
+					creatorAvatar: comment.author ? comment.author.avatarUrl : undefined,
+					code: "",
+					fileUri: documentId.uri,
+					creatorName: comment.author ? comment.author.login : "Unknown",
+					range: MarkerLocation.toRangeFromArray(location),
+					location: MarkerLocation.fromArray(location, comment.id),
+					summary: summary,
+					summaryMarkdown: `${Strings.escapeMarkdown(summary, { quoted: false })}`,
+					type: CodemarkType.Comment,
+					externalContent: {
+						provider: { name: provider.name, id: pr.providerId, icon: provider.icon },
+						externalId: pr.id,
+						externalChildId: comment.id,
+						externalType: "pr",
+						title: comment.bodyText,
+						subhead: ""
+					}
+				});
+			});
+		}
+		return {
+			markers: documentMarkers,
+			markersNotLocated: []
+		};
+	}
+
+	private async getDocumentMarkersForReviewDiff({
 		textDocument: documentId,
 		filters: filters
 	}: FetchDocumentMarkersRequest) {
@@ -259,11 +385,11 @@ export class DocumentMarkerManager {
 			if (!marker.postId) continue; // permalinks
 			const post = await posts.getById(marker.postId);
 			if (review.postId !== post.parentPostId) continue;
-			const canonicalLocation = marker.referenceLocations.find(l => l.flags.canonical);
+			const canonicalLocation = marker.referenceLocations.find(l => l.flags?.canonical);
 			if (canonicalLocation == null) continue;
 
 			const codemark = await codemarks.getEnrichedCodemarkById(marker.codemarkId);
-			const creator = await users.getById(marker.creatorId, { avoidCachingOnFetch: true });
+			const creator = await users.getById(marker.creatorId);
 			let summary = codemark.title || codemark.text || "";
 			if (summary.length !== 0) {
 				summary = (codemark.title || codemark.text).replace(
@@ -279,7 +405,7 @@ export class DocumentMarkerManager {
 				range: MarkerLocation.toRangeFromArray(canonicalLocation.location),
 				location: MarkerLocation.fromArray(canonicalLocation.location, marker.id),
 				summary: summary,
-				summaryMarkdown: `\n\n${Strings.escapeMarkdown(summary, { quoted: true })}`,
+				summaryMarkdown: `${Strings.escapeMarkdown(summary, { quoted: false })}`,
 				type: codemark.type
 			});
 		}
@@ -297,6 +423,7 @@ export class DocumentMarkerManager {
 		const cc = Logger.getCorrelationContext();
 
 		const { codemarks, files, markers, markerLocations, users } = SessionContainer.instance();
+		const { documents } = Container.instance();
 
 		try {
 			const documentUri = URI.parse(documentId.uri);
@@ -346,7 +473,7 @@ export class DocumentMarkerManager {
 							creator = usersById.get(marker.creatorId);
 							if (creator === undefined) {
 								// HACK: This is a total hack for non-CS teams (slack, msteams) to avoid getting codestream users mixed with slack users in the cache
-								creator = await users.getById(marker.creatorId, { avoidCachingOnFetch: true });
+								creator = await users.getById(marker.creatorId);
 
 								if (creator !== undefined) {
 									usersById.set(marker.creatorId, creator);
@@ -364,6 +491,27 @@ export class DocumentMarkerManager {
 							);
 						}
 
+						if (!locations[marker.id]) {
+							const doc = documents.get(documentId.uri);
+							const currentBufferText = doc && doc.getText();
+							if (currentBufferText) {
+								const line = await findBestMatchingLine(
+									currentBufferText,
+									marker.code,
+									marker.locationWhenCreated[0]
+								);
+								if (line > 0) {
+									locations[marker.id] = {
+										id: marker.id,
+										lineStart: line,
+										colStart: 0,
+										lineEnd: line,
+										colEnd: MAX_RANGE_VALUE
+									};
+								}
+							}
+						}
+
 						const location = locations[marker.id];
 						if (location) {
 							documentMarkers.push({
@@ -374,7 +522,7 @@ export class DocumentMarkerManager {
 								range: MarkerLocation.toRange(location),
 								location: location,
 								summary: summary,
-								summaryMarkdown: `\n\n${Strings.escapeMarkdown(summary, { quoted: true })}`,
+								summaryMarkdown: `${Strings.escapeMarkdown(summary, { quoted: false })}`,
 								type: codemark.type
 							});
 							Logger.log(
@@ -387,7 +535,7 @@ export class DocumentMarkerManager {
 								markersNotLocated.push({
 									...marker,
 									summary: summary,
-									summaryMarkdown: `\n\n${Strings.escapeMarkdown(summary, { quoted: true })}`,
+									summaryMarkdown: `${Strings.escapeMarkdown(summary, { quoted: false })}`,
 									creatorName: (creator && creator.username) || "Unknown",
 									codemark: codemark,
 									notLocatedReason: missingLocation.reason,
@@ -402,7 +550,7 @@ export class DocumentMarkerManager {
 								markersNotLocated.push({
 									...marker,
 									summary: summary,
-									summaryMarkdown: `\n\n${Strings.escapeMarkdown(summary, { quoted: true })}`,
+									summaryMarkdown: `${Strings.escapeMarkdown(summary, { quoted: false })}`,
 									creatorName: (creator && creator.username) || "Unknown",
 									codemark: codemark,
 									notLocatedReason: MarkerNotLocatedReason.UNKNOWN

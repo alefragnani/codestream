@@ -4,7 +4,7 @@ import AbortController from "abort-controller";
 import { Agent as HttpAgent } from "http";
 import { Agent as HttpsAgent } from "https";
 import HttpsProxyAgent from "https-proxy-agent";
-import { isEqual } from "lodash-es";
+import { debounce, isEqual } from "lodash-es";
 import fetch, { Headers, RequestInit, Response } from "node-fetch";
 import * as qs from "querystring";
 import { URLSearchParams } from "url";
@@ -13,14 +13,18 @@ import { ServerError } from "../../agentError";
 import { Team, User } from "../../api/extensions";
 import { Container, SessionContainer } from "../../container";
 import { Logger } from "../../logger";
-import { isDirective, resolve, safeDecode, safeEncode  } from "../../managers/operations";
+import { isDirective, resolve, safeDecode, safeEncode } from "../../managers/operations";
 import {
 	AddBlameMapRequest,
 	AddBlameMapRequestType,
+	AddMarkersResponse,
 	AgentOpenUrlRequestType,
 	ChangeDataType,
+	DeleteMarkerRequest,
+	DeleteMarkerResponse,
 	DidChangeDataNotificationType,
 	ReportingMessageType,
+	RepoScmStatus,
 	UpdateInvisibleRequest
 } from "../../protocol/agent.protocol";
 import {
@@ -31,7 +35,6 @@ import {
 	ArchiveStreamRequest,
 	Capabilities,
 	CloseStreamRequest,
-	CodeStreamEnvironment,
 	CreateChannelStreamRequest,
 	CreateCodemarkPermalinkRequest,
 	CreateCodemarkRequest,
@@ -101,6 +104,8 @@ import {
 	MuteStreamRequest,
 	OpenStreamRequest,
 	PinReplyToCodemarkRequest,
+	ProviderTokenRequest,
+	ProviderTokenRequestType,
 	ReactToPostRequest,
 	RemoveEnterpriseProviderHostRequest,
 	RenameStreamRequest,
@@ -134,6 +139,8 @@ import {
 	VerifyConnectivityResponse
 } from "../../protocol/agent.protocol";
 import {
+	CSAddMarkersRequest,
+	CSAddMarkersResponse,
 	CSAddProviderHostRequest,
 	CSAddProviderHostResponse,
 	CSAddReferenceLocationRequest,
@@ -286,6 +293,7 @@ export class CodeStreamApiProvider implements ApiProvider {
 	private _preferences: CodeStreamPreferences | undefined;
 	private _features: CSApiFeatures | undefined;
 	private _runTimeEnvironment: string | undefined;
+	private _debouncedSetModifiedReposUpdate: (request: SetModifiedReposRequest) => {};
 
 	readonly capabilities: Capabilities = {
 		channelMute: true,
@@ -301,7 +309,15 @@ export class CodeStreamApiProvider implements ApiProvider {
 		private readonly _version: VersionInfo,
 		private readonly _httpsAgent: HttpsAgent | HttpsProxyAgent | HttpAgent | undefined,
 		private readonly _strictSSL: boolean
-	) {}
+	) {
+		this._debouncedSetModifiedReposUpdate = debounce(
+			request => {
+				return this.setModifiedReposDebounced(request);
+			},
+			15000,
+			{ leading: true }
+		);
+	}
 
 	get teamId(): string {
 		return this._teamId!;
@@ -321,6 +337,10 @@ export class CodeStreamApiProvider implements ApiProvider {
 
 	get runTimeEnvironment() {
 		return this._runTimeEnvironment;
+	}
+
+	get meUser() {
+		return this._user;
 	}
 
 	setServerUrl(serverUrl: string) {
@@ -579,6 +599,7 @@ export class CodeStreamApiProvider implements ApiProvider {
 		});
 		this._events.onDidReceiveMessage(this.onPubnubMessageReceived, this);
 
+		/* No longer need to subscribe to streams
 		if (types === undefined || types.includes(MessageType.Streams)) {
 			const streams = (await SessionContainer.instance().streams.getSubscribable(this.teamId))
 				.streams;
@@ -586,6 +607,8 @@ export class CodeStreamApiProvider implements ApiProvider {
 		} else {
 			await this._events.connect();
 		}
+		*/
+		await this._events.connect();
 
 		this._onDidSubscribe.fire();
 	}
@@ -594,7 +617,6 @@ export class CodeStreamApiProvider implements ApiProvider {
 		if (this._subscribedMessageTypes !== undefined && !this._subscribedMessageTypes.has(e.type)) {
 			return;
 		}
-
 		// Resolve any directives in the message data
 		switch (e.type) {
 			case MessageType.Codemarks:
@@ -711,6 +733,7 @@ export class CodeStreamApiProvider implements ApiProvider {
 				};
 
 				const userPreferencesBefore = JSON.stringify(me.preferences);
+
 				e.data = await SessionContainer.instance().users.resolve(e, {
 					onlyIfNeeded: true
 				});
@@ -724,14 +747,6 @@ export class CodeStreamApiProvider implements ApiProvider {
 						this._unreads !== undefined &&
 						!Objects.shallowEquals(lastReads, this._user.lastReads || {})
 					) {
-						Container.instance().errorReporter.reportBreadcrumb({
-							message: "Computing lastReads from user message",
-							category: "unreads",
-							data: {
-								lastReads: me.lastReads,
-								prevLastReads: this._user.lastReads
-							}
-						});
 						this._unreads.compute(me.lastReads);
 					}
 					if (!this._preferences) {
@@ -842,17 +857,34 @@ export class CodeStreamApiProvider implements ApiProvider {
 	}
 
 	@log()
-	async setModifiedRepos(request: SetModifiedReposRequest) {
-		const update = await this.put<{ [key: string]: any }, any>(
+	async setModifiedReposDebounced(request: SetModifiedReposRequest) {
+		// eventually, when support for compactified modifiedRepos is full (both cloud and on-prem),
+		// we'll eliminate this completely and go only with compactified, below
+		const prunedModifiedRepos = SessionContainer.instance().users.pruneModifiedRepos(
+			request.modifiedRepos
+		);
+		this.put<{ [key: string]: any }, any>(
 			"/users/me",
-			{ modifiedRepos: { [request.teamId]: request.modifiedRepos } },
+			{ modifiedRepos: { [request.teamId]: prunedModifiedRepos } },
 			this._token
 		);
-		const [user] = (await SessionContainer.instance().users.resolve({
-			type: MessageType.Users,
-			data: [update.user]
-		})) as CSMe[];
-		return { user };
+
+		const capabilities = SessionContainer.instance().session.apiCapabilities;
+		if (capabilities.compactModifiedRepos) {
+			const compactModifiedRepos = SessionContainer.instance().users.compactifyModifiedRepos(
+				request.modifiedRepos
+			);
+			this.put<{ [key: string]: any }, any>(
+				"/users/me",
+				{ compactModifiedRepos: { [request.teamId]: compactModifiedRepos } },
+				this._token
+			);
+		}
+	}
+
+	@log()
+	async setModifiedRepos(request: SetModifiedReposRequest) {
+		this._debouncedSetModifiedReposUpdate(request);
 	}
 
 	@log()
@@ -961,6 +993,23 @@ export class CodeStreamApiProvider implements ApiProvider {
 			request.newMarker,
 			this._token
 		);
+	}
+
+	@log()
+	addMarkers(request: {
+		codemarkId: string;
+		newMarkers: CreateMarkerRequest[];
+	}): Promise<AddMarkersResponse> {
+		return this.put<CSAddMarkersRequest, CSAddMarkersResponse>(
+			`/codemarks/${request.codemarkId}/add-markers`,
+			{ markers: request.newMarkers },
+			this._token
+		);
+	}
+
+	@log()
+	deleteMarker(request: DeleteMarkerRequest): Promise<DeleteMarkerResponse> {
+		return this.delete<{}>(`/markers/${request.markerId}`, this._token);
 	}
 
 	@log()
@@ -1635,10 +1684,6 @@ export class CodeStreamApiProvider implements ApiProvider {
 		);
 	}
 
-	convertUserIdToCodeStreamUserId(id: string): string {
-		return id;
-	}
-
 	@log()
 	async fetchUsers(request: FetchUsersRequest) {
 		const response = await this.get<CSGetUsersResponse>(
@@ -2002,7 +2047,23 @@ export class CodeStreamApiProvider implements ApiProvider {
 		}
 	}
 
-	private delete<R extends object>(url: string, token?: string): Promise<R> {
+	@lspHandler(ProviderTokenRequestType)
+	async setProviderToken(request: ProviderTokenRequest) {
+		const repoInfo =
+			request.repoInfo &&
+			`${request.repoInfo.teamId}|${request.repoInfo.repoId}|${request.repoInfo.commitHash}`;
+		await this.post(`/no-auth/provider-token/${request.provider}`, {
+			token: request.token,
+			data: request.data,
+			invite_code: request.inviteCode,
+			repo_info: repoInfo || undefined,
+			no_signup: request.noSignup,
+			signup_token: request.signupToken
+		});
+	}
+
+	async delete<R extends object>(url: string, token?: string): Promise<R> {
+		if (!token && url.indexOf("/no-auth/") === -1) token = this._token;
 		let resp = undefined;
 		if (resp === undefined) {
 			resp = this.fetch<R>(url, { method: "DELETE" }, token) as Promise<R>;
@@ -2010,15 +2071,17 @@ export class CodeStreamApiProvider implements ApiProvider {
 		return resp;
 	}
 
-	private get<R extends object>(url: string, token?: string): Promise<R> {
+	async get<R extends object>(url: string, token?: string): Promise<R> {
+		if (!token && url.indexOf("/no-auth/") === -1) token = this._token;
 		return this.fetch<R>(url, { method: "GET" }, token) as Promise<R>;
 	}
 
-	private post<RQ extends object, R extends object>(
+	async post<RQ extends object, R extends object>(
 		url: string,
 		body: RQ,
 		token?: string
 	): Promise<R> {
+		if (!token && url.indexOf("/no-auth/") === -1) token = this._token;
 		return this.fetch<R>(
 			url,
 			{
@@ -2029,11 +2092,12 @@ export class CodeStreamApiProvider implements ApiProvider {
 		);
 	}
 
-	private put<RQ extends object, R extends object>(
+	async put<RQ extends object, R extends object>(
 		url: string,
 		body: RQ,
 		token?: string
 	): Promise<R> {
+		if (!token && url.indexOf("/no-auth/") === -1) token = this._token;
 		return this.fetch<R>(
 			url,
 			{
@@ -2168,6 +2232,10 @@ export class CodeStreamApiProvider implements ApiProvider {
 
 			if (resp !== undefined && !resp.ok) {
 				traceResult = `API(${id}): FAILED(${retryCount}x) ${method} ${sanitizedUrl}`;
+				Container.instance().errorReporter.reportBreadcrumb({
+					message: traceResult,
+					category: "apiErrorResponse"
+				});
 				throw await this.handleErrorResponse(resp);
 			}
 
@@ -2357,6 +2425,8 @@ export class CodeStreamApiProvider implements ApiProvider {
 				response.error = {
 					message: resp.status.toString() + resp.statusText
 				};
+			} else {
+				response.capabilities = (await resp.json()).capabilities;
 			}
 		} catch (err) {
 			Logger.log(`Error connecting to the API server: ${err.message}`);

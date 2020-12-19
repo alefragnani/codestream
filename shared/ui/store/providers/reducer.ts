@@ -8,6 +8,9 @@ import { mapFilter, safe } from "@codestream/webview/utils";
 import { ThirdPartyProviderConfig } from "@codestream/protocols/agent";
 import { createSelector } from "reselect";
 import { PROVIDER_MAPPINGS } from "@codestream/webview/Stream/CrossPostIssueControls/types";
+import { ContextState } from "../context/types";
+import { UsersState } from "../users/types";
+import { SessionState } from "../session/types";
 
 type ProviderActions = ActionType<typeof actions>;
 
@@ -77,10 +80,39 @@ export const getPRLabelForProvider = (provider: string): LabelHash => {
 export const isConnected = (
 	state: CodeStreamState,
 	option: ProviderPropertyOption,
-	requiredScope?: string // ONLY WORKS FOR SLACK AND MSTEAMS
+	requiredScope?: string, // ONLY WORKS FOR SLACK AND MSTEAMS
+	accessTokenError?: { accessTokenError?: any }
 ) => {
-	const currentUser = state.users[state.session.userId!] as CSMe;
-	const { currentTeamId } = state.context;
+	return isConnectedSelectorFriendly(
+		state.users,
+		state.context.currentTeamId,
+		state.session,
+		state.providers,
+		option,
+		requiredScope,
+		accessTokenError
+	);
+};
+
+// isConnected, as originally written, took `state` as an argument, which means
+// that it doesn't work well as a selector since every time anything at all changes
+// in state, it wil re-fire. this version takes slices of what's really neeed
+// rather than the overall state object.
+export const isConnectedSelectorFriendly = (
+	users: UsersState,
+	currentTeamId: string,
+	session: SessionState,
+	providers: ProvidersState,
+	option: ProviderPropertyOption,
+	requiredScope?: string, // ONLY WORKS FOR SLACK AND MSTEAMS
+
+	// if the parameter below is provided, it is a container for the token error...
+	// basically acts like an additional return value that avoids changing the call signature for this method
+	// if filled, it indicates that the provider is technically connected (we have an access token),
+	// but the access token has come back from the provider as invalid
+	accessTokenError?: { accessTokenError?: any }
+) => {
+	const currentUser = users[session.userId!] as CSMe;
 
 	// ensure there's provider info for the user
 	if (currentUser.providerInfo == undefined) return false;
@@ -98,15 +130,24 @@ export const isConnected = (
 					info != undefined &&
 					info.hosts != undefined &&
 					Object.keys(info.hosts).some(host => {
-						return state.providers[host] != undefined && info.hosts![host].accessToken != undefined;
+						const isConnected =
+							providers[host] != undefined && info.hosts![host].accessToken != undefined;
+						if (isConnected && accessTokenError) {
+							// see comment on accessTokenError in the method parameters, above
+							accessTokenError.accessTokenError = info.hosts![host].tokenError;
+						}
+						return isConnected;
 					})
 				);
 			}
 			default: {
 				// is there an accessToken for the provider?
 				if (info == undefined) return false;
-				if (info.accessToken != undefined) return true;
-
+				if (info.accessToken != undefined) {
+					// see comment on accessTokenError in the method parameters, above
+					if (accessTokenError) accessTokenError.accessTokenError = info.tokenError;
+					return true;
+				}
 				if (["slack", "msteams"].includes(providerName)) {
 					const infoPerTeam = (info as any).multiple as { [key: string]: CSProviderInfos };
 					if (requiredScope) {
@@ -117,39 +158,75 @@ export const isConnected = (
 						)
 							return false;
 					}
-					if (infoPerTeam && Object.values(infoPerTeam).some(i => i.accessToken != undefined))
+					if (
+						infoPerTeam &&
+						Object.values(infoPerTeam).some(i => {
+							const isConnected = i.accessToken != undefined;
+							if (isConnected && accessTokenError) {
+								// see comment on accessTokenError in the method parameters, above
+								accessTokenError.accessTokenError = i.tokenError;
+							}
+							return isConnected;
+						})
+					) {
 						return true;
+					}
 				}
 				return false;
 			}
 		}
 	} else {
-		const providerConfig = state.providers[option.id];
+		const providerConfig = providers[option.id];
 		const infoForProvider = getUserProviderInfo(currentUser, providerConfig.name, currentTeamId);
 		if (infoForProvider == undefined) return false;
 
 		if (!providerConfig.isEnterprise) {
-			if (infoForProvider.accessToken) return true;
-			const infoPerTeam = (infoForProvider as any).multiple as { [key: string]: CSProviderInfos };
-			if (infoPerTeam && Object.values(infoPerTeam).some(i => i.accessToken != undefined))
+			if (infoForProvider.accessToken) {
+				if (accessTokenError) {
+					// see comment on accessTokenError in the method parameters, above
+					accessTokenError.accessTokenError = infoForProvider.tokenError;
+				}
 				return true;
+			}
+			const infoPerTeam = (infoForProvider as any).multiple as { [key: string]: CSProviderInfos };
+			if (
+				infoPerTeam &&
+				Object.values(infoPerTeam).some(i => {
+					const isConnected = i.accessToken != undefined;
+					if (isConnected && accessTokenError) {
+						// see comment on accessTokenError in the method parameters, above
+						accessTokenError.accessTokenError = i.tokenError;
+					}
+					return isConnected;
+				})
+			) {
+				return true;
+			}
 			return false;
 		}
 
-		return !!(
+		const isConnected = !!(
 			infoForProvider.hosts &&
 			infoForProvider.hosts[providerConfig.id] &&
 			infoForProvider.hosts[providerConfig.id].accessToken
 		);
+		if (isConnected && accessTokenError) {
+			// see comment on accessTokenError in the method parameters, above
+			accessTokenError.accessTokenError = infoForProvider.hosts![providerConfig.id].tokenError;
+		}
+		return isConnected;
 	}
 };
 
-export const getConnectedProviderNames = (state: CodeStreamState) => {
-	return mapFilter<ThirdPartyProviderConfig, string>(
-		Object.values(state.providers),
-		providerConfig => (isConnected(state, providerConfig) ? providerConfig.name : undefined)
-	);
-};
+export const getConnectedProviderNames = createSelector(
+	(state: CodeStreamState) => state,
+	(state: CodeStreamState) => {
+		return mapFilter<ThirdPartyProviderConfig, string>(
+			Object.values(state.providers),
+			providerConfig => (isConnected(state, providerConfig) ? providerConfig.name : undefined)
+		);
+	}
+);
 
 export const getConnectedProviders = createSelector(
 	(state: CodeStreamState) => state,
@@ -213,5 +290,43 @@ export const getProviderConfig = createSelector(
 			if (providerConfigs[id].name === name) return providerConfigs[id];
 		}
 		return undefined;
+	}
+);
+
+export const getSupportedPullRequestHosts = createSelector(
+	(state: CodeStreamState) => state.providers,
+	(providerConfigs: ProvidersState) => {
+		return Object.values(providerConfigs).filter(
+			_ => _.id === "github*com" || _.id === "github/enterprise"
+		);
+	}
+);
+
+export const getConnectedSupportedPullRequestHosts = createSelector(
+	(state: CodeStreamState) => state.users,
+	(state: CodeStreamState) => state.context.currentTeamId,
+	(state: CodeStreamState) => state.session,
+	(state: CodeStreamState) => state.providers,
+	(users: UsersState, currentTeamId: string, session: SessionState, providers: ProvidersState) => {
+		return Object.values(providers)
+			.filter(_ => _.id === "github*com" || _.id === "github/enterprise")
+			.map(_ => {
+				let obj: { accessTokenError?: boolean } = {};
+				const value = isConnectedSelectorFriendly(
+					users,
+					currentTeamId,
+					session,
+					providers,
+					{ id: _.id },
+					undefined,
+					obj
+				);
+				return {
+					..._,
+					hasAccessTokenError: !!obj.accessTokenError,
+					isConnected: value
+				};
+			})
+			.filter(_ => _.isConnected);
 	}
 );

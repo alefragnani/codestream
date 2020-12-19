@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import {
 	FetchThirdPartyPullRequestPullRequest,
-	FetchAllRemotesRequestType,
 	GetReposScmRequestType,
 	FetchForkPointRequestType
 } from "@codestream/protocols/agent";
@@ -22,36 +21,64 @@ import * as path from "path-browserify";
 import { Range } from "vscode-languageserver-types";
 import styled from "styled-components";
 import { parseCodeStreamDiffUri } from "../store/codemarks/actions";
-import { LocateRepoButton } from "./LocateRepoButton";
 import { Link } from "./Link";
 import { Meta, MetaLabel } from "./Codemark/BaseCodemark";
 import { MetaIcons } from "./Review";
 import { getProviderPullRequestRepo } from "../store/providerPullRequests/reducer";
+import { CompareFilesProps } from "./PullRequestFilesChangedList";
+import { TernarySearchTree } from "../utilities/searchTree";
+import { PRErrorBox } from "./PullRequestComponents";
 
-// const VISITED_REVIEW_FILES = "review:changeset-file-list";
+const Directory = styled.div`
+	cursor: pointer;
+	padding: 2px 0;
+	&:hover {
+		background: var(--app-background-color-hover);
+		color: var(--text-color-highlight);
+	}
+`;
+
 const NOW = new Date().getTime(); // a rough timestamp so we know when the file was visited
-// const visitedFiles = localStore.get(VISITED_REVIEW_FILES) || {};
 
-export const PullRequestFilesChanged = (props: {
-	pr: FetchThirdPartyPullRequestPullRequest;
+interface Props extends CompareFilesProps {
 	filesChanged: any[];
+	isLoading: boolean;
+	pr?: FetchThirdPartyPullRequestPullRequest;
 	withTelemetry?: boolean;
-}) => {
+	viewMode: "tree" | "files";
+	visitFile: (filename: string, index: number) => void;
+	unVisitFile: (filename: string) => void;
+	toggleDirectory: (hideKey: string) => void;
+	visitedFiles: {
+		_latest: number;
+		[key: string]: boolean | number;
+	};
+	commentMap: {
+		[path: string]: any;
+	};
+}
+
+export const PullRequestFilesChanged = (props: Props) => {
 	const { pr, filesChanged } = props;
 	// const dispatch = useDispatch<Dispatch>();
 	const [repoId, setRepoId] = useState("");
 	const derivedState = useSelector((state: CodeStreamState) => {
 		const userId = state.session.userId || "";
+		const currentPullRequestId = state.context.currentPullRequest
+			? state.context.currentPullRequest.id
+			: undefined;
 		const matchFile =
-			state.context.currentPullRequestId &&
+			currentPullRequestId &&
 			state.editorContext.scmInfo &&
 			state.editorContext.scmInfo.uri &&
 			state.editorContext.scmInfo.uri.startsWith("codestream-diff://")
 				? state.editorContext.scmInfo.uri
 				: "";
+		const parsedDiffUri = parseCodeStreamDiffUri(matchFile || "");
 
 		return {
 			matchFile,
+			parsedDiffUri,
 			userId,
 			repos: state.repos,
 			currentRepo: getProviderPullRequestRepo(state),
@@ -60,74 +87,133 @@ export const PullRequestFilesChanged = (props: {
 		};
 	});
 
-	const [visitedFiles, setVisitedFiles] = React.useState({ _latest: 0 });
+	const { visitedFiles, visitFile, unVisitFile } = props;
 	const [currentRepoRoot, setCurrentRepoRoot] = React.useState("");
 	const [forkPointSha, setForkPointSha] = React.useState("");
-	const [errorMessage, setErrorMessage] = React.useState("");
+	const [errorMessage, setErrorMessage] = React.useState<string | React.ReactNode>("");
+	const [repoErrorMessage, setRepoErrorMessage] = React.useState<string | React.ReactNode>("");
 	const [loading, setLoading] = React.useState(false);
 	const [isDisabled, setIsDisabled] = React.useState(false);
+	const [isMounted, setIsMounted] = React.useState(false);
 
-	const visitFile = (visitedKey: string, index: number) => {
-		const newVisitedFiles = { ...visitedFiles, [visitedKey]: NOW, _latest: index };
-		saveVisitedFiles(newVisitedFiles, key);
-		setVisitedFiles(newVisitedFiles);
-	};
+	const handleForkPointResponse = forkPointResponse => {
+		if (!forkPointResponse || forkPointResponse.error) {
+			setErrorMessage(
+				forkPointResponse &&
+					forkPointResponse.error &&
+					forkPointResponse.error.type === "COMMIT_NOT_FOUND" ? (
+					"A commit required to perform this review was not found in the local git repository. Fetch all remotes and try again."
+				) : pr && forkPointResponse.error.type === "REPO_NOT_FOUND" ? (
+					<>
+						Repo <span className="monospace highlight">{pr.repository.name}</span> not found in your
+						editor. Open it, or <Link href={pr.repository.url}>clone the repo</Link>.
+					</>
+				) : (
+					<span>Could not get fork point.</span>
+				)
+			);
 
-	let key = "all";
-
-	const saveVisitedFiles = (newVisitedFiles, key) => {
-		HostApi.instance.send(WriteTextFileRequestType, {
-			path: `pr-${pr.id}.json`,
-			contents: JSON.stringify(newVisitedFiles, null, 4)
-		});
+			setIsDisabled(true);
+		} else if (forkPointResponse.sha) {
+			setForkPointSha(forkPointResponse.sha);
+		}
 	};
 
 	useDidMount(() => {
 		if (derivedState.currentRepo) {
 			(async () => {
 				setLoading(true);
+				let forkPointResponse;
 				try {
-					const forkPointResponse = await HostApi.instance.send(FetchForkPointRequestType, {
+					forkPointResponse = await HostApi.instance.send(FetchForkPointRequestType, {
 						repoId: derivedState.currentRepo!.id!,
-						baseSha: props.pr.baseRefOid,
-						headSha: props.pr.headRefOid
+						baseSha: props.baseRef,
+						headSha: props.headRef
 					});
-
-					if (!forkPointResponse || forkPointResponse.error) {
-						setErrorMessage(
-							forkPointResponse &&
-								forkPointResponse.error &&
-								forkPointResponse.error.type === "COMMIT_NOT_FOUND"
-								? "A commit required to perform this review was not found in the local git repository. Fetch all remotes and try again."
-								: "Could not get fork point."
-						);
-
-						setIsDisabled(true);
-					} else if (forkPointResponse.sha) {
-						setForkPointSha(forkPointResponse.sha);
-					}
 				} catch (ex) {
 					console.error(ex);
 				} finally {
+					handleForkPointResponse(forkPointResponse);
 					setLoading(false);
+					setIsMounted(true);
 				}
 			})();
+		} else {
+			setIsMounted(true);
 		}
 	});
 
 	useEffect(() => {
 		(async () => {
-			const response = (await HostApi.instance.send(ReadTextFileRequestType, {
-				path: `pr-${pr.id}.json`
-			})) as any;
-
-			try {
-				setVisitedFiles(JSON.parse(response.contents || "{}"));
-			} catch (ex) {
-				console.warn("Error parsing JSON data: ", response.contents);
+			if (isMounted && derivedState.currentRepo && props.pr && !forkPointSha) {
+				try {
+					setLoading(true);
+					const forkPointResponse = await HostApi.instance.send(FetchForkPointRequestType, {
+						repoId: derivedState.currentRepo!.id!,
+						baseSha: props.pr.baseRefOid,
+						headSha: props.pr.headRefOid
+					});
+					handleForkPointResponse(forkPointResponse);
+				} catch (err) {
+					console.error(err);
+				} finally {
+					setLoading(false);
+				}
 			}
 		})();
-	}, [pr, filesChanged, forkPointSha]);
+	}, [isMounted, derivedState.currentRepo, pr]);
+
+	const goDiff = useCallback(
+		i => {
+			(async index => {
+				setErrorMessage("");
+				if (index < 0) index = derivedState.numFiles - 1;
+				if (index > derivedState.numFiles - 1) index = 0;
+				const f = filesInOrder[index];
+
+				const request = {
+					baseBranch: props.baseRefName,
+					baseSha: pr ? forkPointSha : props.baseRef,
+					headBranch: props.headRefName,
+					headSha: props.headRef,
+					filePath: f.file,
+					repoId: pr ? derivedState.currentRepo!.id! : props.repoId!,
+					context: pr
+						? {
+								pullRequest: {
+									providerId: pr.providerId,
+									id: pr.id
+								}
+						  }
+						: undefined
+				};
+				try {
+					await HostApi.instance.send(CompareLocalFilesRequestType, request);
+				} catch (err) {
+					setErrorMessage(err || "Could not open file diff");
+				}
+
+				visitFile(f.file, index);
+
+				HostApi.instance.track("PR Diff Viewed", {
+					Host: props.pr && props.pr.providerId
+				});
+			})(i);
+		},
+		[derivedState.currentRepo, repoId, visitedFiles, forkPointSha]
+	);
+
+	const nextFile = useCallback(() => {
+		if (!visitedFiles) goDiff(0);
+		else if (visitedFiles._latest == null) goDiff(0);
+		else goDiff(visitedFiles._latest + 1);
+	}, [visitedFiles, goDiff]);
+
+	const prevFile = useCallback(() => {
+		if (!visitedFiles) goDiff(-1);
+		else if (visitedFiles._latest == null) goDiff(-1);
+		else goDiff(visitedFiles._latest - 1);
+	}, [visitedFiles, goDiff]);
 
 	useEffect(() => {
 		const disposables = [
@@ -136,60 +222,7 @@ export const PullRequestFilesChanged = (props: {
 		];
 
 		return () => disposables.forEach(disposable => disposable.dispose());
-	}, [pr, filesChanged, visitedFiles, forkPointSha]);
-
-	const goDiff = useCallback(
-		i => {
-			(async index => {
-				setErrorMessage("");
-				if (index < 0) index = derivedState.numFiles - 1;
-				if (index > derivedState.numFiles - 1) index = 0;
-				const f = filesChanged[index];
-				const visitedKey = [f.file].join(":");
-
-				const request = {
-					baseBranch: props.pr.baseRefName,
-					baseSha: forkPointSha,
-					headBranch: props.pr.headRefName,
-					headSha: props.pr.headRefOid,
-					filePath: f.file,
-					repoId: derivedState.currentRepo!.id!,
-					context: {
-						pullRequest: {
-							providerId: pr.providerId,
-							id: pr.id
-						}
-					}
-				};
-				try {
-					await HostApi.instance.send(CompareLocalFilesRequestType, request);
-				} catch (err) {
-					setErrorMessage(err || "Could not open file diff");
-				}
-
-				visitFile(visitedKey, index);
-
-				if (props.withTelemetry && pr.id) {
-					HostApi.instance.track("Review Diff Viewed", {
-						"PR ID": pr.id
-					});
-				}
-			})(i);
-		},
-		[repoId, visitedFiles, forkPointSha]
-	);
-
-	const nextFile = () => {
-		if (!visitedFiles) goDiff(0);
-		else if (visitedFiles._latest == null) goDiff(0);
-		else goDiff(visitedFiles._latest + 1);
-	};
-
-	const prevFile = () => {
-		if (!visitedFiles) goDiff(-1);
-		else if (visitedFiles._latest == null) goDiff(-1);
-		else goDiff(visitedFiles._latest - 1);
-	};
+	}, [nextFile, prevFile, pr, filesChanged, visitedFiles, forkPointSha]);
 
 	const openFile = async index => {
 		if (index < 0) index = derivedState.numFiles - 1;
@@ -202,112 +235,221 @@ export const PullRequestFilesChanged = (props: {
 				inEditorOnly: false
 			});
 			if (!response.repositories) return;
-			const currentRepoInfo = response.repositories.find(
-				r => r.id === derivedState.currentRepo!.id
-			);
-			if (currentRepoInfo) {
-				setCurrentRepoRoot(currentRepoInfo.path);
-				repoRoot = currentRepoInfo.path;
+			const repoIdToCheck = props.repoId
+				? props.repoId
+				: derivedState.currentRepo
+				? derivedState.currentRepo.id
+				: undefined;
+			if (repoIdToCheck) {
+				const currentRepoInfo = response.repositories.find(r => r.id === repoIdToCheck);
+				if (currentRepoInfo) {
+					setCurrentRepoRoot(currentRepoInfo.path);
+					repoRoot = currentRepoInfo.path;
+				}
 			}
 		}
-
-		const result = await HostApi.instance.send(EditorRevealRangeRequestType, {
-			uri: path.join(repoRoot, f.file),
-			range: Range.create(0, 0, 0, 0)
-		});
-
-		if (!result.success) {
-			setErrorMessage("Could not open file");
-		}
-
-		if (props.withTelemetry && pr.id) {
-			HostApi.instance.track("PR File Viewed", {
-				"PR ID": pr.id
+		if (repoRoot) {
+			const result = await HostApi.instance.send(EditorRevealRangeRequestType, {
+				uri: path.join("file://", repoRoot, f.file),
+				range: Range.create(0, 0, 0, 0)
 			});
+
+			if (!result.success) {
+				setErrorMessage("Could not open file");
+			} else {
+				HostApi.instance.track("PR File Viewed", {
+					Host: props.pr && props.pr.providerId
+				});
+			}
+		} else {
+			setErrorMessage("Could not find a repo");
 		}
 	};
 
-	const latest = visitedFiles[key] ? visitedFiles[key]._latest : 0;
+	const renderFile = (f, index, depth) => {
+		const selected = derivedState.parsedDiffUri && derivedState.parsedDiffUri.path == f.file;
+		const visited = visitedFiles[f.file];
+		if (selected && !visited) {
+			visitFile(f.file, index);
+		}
 
-	const changedFiles = React.useMemo(() => {
-		const files: any[] = [];
+		let icon;
+		// if we're loading, show a spinner
+		if (loading) icon = "sync";
+		// this file is currently selected, and visible in diff view
+		else if (selected) icon = "arrow-right";
+		// this file has been visitied during the review
+		else if (visited) icon = "ok";
+		// not yet visited, but part of the review
+		else icon = "circle";
 
-		let index = 0;
-		const parsed = parseCodeStreamDiffUri(derivedState.matchFile || "");
-		files.push(
-			...props.filesChanged.map(f => {
-				const visitedKey = [f.file].join(":");
+		const iconClass = loading ? "file-icon spin" : "file-icon";
+		// i is a temp variable to create the correct scope binding
+		const i = index;
+		const commentCount = (props.commentMap[f.file] || []).length;
+		return (
+			<>
+				<ChangesetFile
+					selected={selected}
+					viewMode={props.viewMode}
+					icon={
+						isDisabled ? null : (
+							<Icon
+								onClick={
+									visited
+										? async e => {
+												e.preventDefault();
+												e.stopPropagation();
+												unVisitFile(f.file);
+										  }
+										: undefined
+								}
+								name={icon}
+								className={iconClass}
+							/>
+						)
+					}
+					noHover={isDisabled || loading}
+					onClick={
+						isDisabled || loading
+							? undefined
+							: async e => {
+									e.preventDefault();
+									goDiff(i);
+							  }
+					}
+					badge={commentCount > 0 ? <span className="badge">{commentCount}</span> : undefined}
+					actionIcons={
+						!loading &&
+						!isDisabled && (
+							<div className="actions">
+								<Icon
+									name="goto-file"
+									className="clickable action"
+									title="Open File"
+									placement="left"
+									delay={1}
+									onClick={async e => {
+										e.stopPropagation();
+										e.preventDefault();
+										openFile(i);
+									}}
+								/>
+							</div>
+						)
+					}
+					key={i + ":" + f.file}
+					depth={depth}
+					{...f}
+				/>
+			</>
+		);
+	};
 
-				const selected = parsed && parsed.path == f.file;
-				const visited = visitedFiles[visitedKey];
-				if (selected && !visited) {
-					visitFile(visitedKey, index);
+	const renderDirectory = (fullPath, dirPath, depth) => {
+		const hideKey = "hide:" + fullPath.join("/");
+		const hidden = visitedFiles[hideKey];
+		return (
+			<Directory
+				style={{ paddingLeft: `${depth * 12}px` }}
+				onClick={() => props.toggleDirectory(hideKey)}
+			>
+				<Icon name={hidden ? "chevron-right-thin" : "chevron-down-thin"} />
+				{path.join(...dirPath)}
+			</Directory>
+		);
+	};
+
+	const [changedFiles, filesInOrder] = React.useMemo(() => {
+		const lines: any[] = [];
+		let filesInOrder: any[] = [];
+
+		if (props.viewMode === "tree") {
+			const tree: TernarySearchTree<any> = TernarySearchTree.forPaths();
+
+			let filesChanged = [...props.filesChanged];
+			filesChanged = filesChanged
+				.sort((a, b) => {
+					if (b.file < a.file) return 1;
+					if (a.file < b.file) return -1;
+					return 0;
+				})
+				.filter(f => f.file);
+			console.warn("SETTING UP THE TREE: ", tree, filesChanged);
+			filesChanged.forEach(f => tree.set(f.file, f));
+			let index = 0;
+			const render = (
+				node: any,
+				fullPath: string[],
+				dirPath: string[],
+				depth: number,
+				renderSiblings: boolean
+			) => {
+				if (dirPath.length > 0 && (node.right || node.value)) {
+					lines.push(renderDirectory(fullPath, dirPath, depth));
+					dirPath = [];
+					depth++;
+
+					const hideKey = "hide:" + fullPath.join("/");
+					if (visitedFiles[hideKey]) return;
 				}
 
-				let icon;
-				// if we're loading, show a spinner
-				if (loading) icon = "sync";
-				// this file is currently selected, and visible in diff view
-				else if (selected) icon = "arrow-right";
-				// this file has been visitied during the review
-				else if (visited) icon = "ok";
-				// not yet visited, but part of the review
-				else icon = "circle";
+				// we either render siblings, or nodes. if we aren't
+				// rendering siblings, then check to see if this node
+				// has a value or children and render them
+				if (!renderSiblings) {
+					// node.value is a file object, so render the file
+					if (node.value) {
+						lines.push(renderFile(node.value, index++, depth));
+						filesInOrder.push(node.value);
+					}
+					// recurse deeper into file path if the dir isn't collapsed
+					if (node.mid) {
+						render(node.mid, [...fullPath, node.segment], [...dirPath, node.segment], depth, true);
+					}
+				}
+				// render sibling nodes at the same depth w/same dirPath
+				if (renderSiblings) {
+					// grab all the siblings, sort them, and render them.
+					const siblings: any[] = [node];
 
-				const iconClass = loading ? "file-icon spin" : "file-icon";
-				// i is a temp variable to create the correct scope binding
-				const i = index++;
-				return (
-					<ChangesetFile
-						selected={selected}
-						icon={icon && <Icon name={icon} className={iconClass} />}
-						noHover={isDisabled || loading}
-						onClick={
-							isDisabled || loading
-								? undefined
-								: async e => {
-										e.preventDefault();
-										goDiff(i);
-								  }
-						}
-						actionIcons={
-							!loading &&
-							!isDisabled && (
-								<div className="actions">
-									<Icon
-										name="goto-file"
-										className="clickable action"
-										title="Open File"
-										placement="left"
-										delay={1}
-										onClick={async e => {
-											e.stopPropagation();
-											e.preventDefault();
-											openFile(i);
-										}}
-									/>
-								</div>
-							)
-						}
-						key={i + ":" + f.file}
-						{...f}
-					/>
-				);
-			})
-		);
-		return files;
-	}, [pr, loading, derivedState.matchFile, latest, visitedFiles, forkPointSha]);
+					let n = node;
+					// we don't need to check left because we sort the paths
+					// prior to inserting into the tree, so we never end up
+					// with left nodes
+					while (n.right) {
+						siblings.push(n.right);
+						n = n.right;
+					}
+					// sort directories first, then by segment name lexographically
+					siblings.sort(
+						(a, b) => Number(!!a.value) - Number(!!b.value) || a.segment.localeCompare(b.segment)
+					);
+					// render the siblings, but tell render not to re-render siblings
+					siblings.forEach(n => render(n, [...fullPath, n.segment], dirPath, depth, false));
+				}
+			};
+			render((tree as any)._root, [], [], 0, true);
+		} else {
+			lines.push(...props.filesChanged.map((f, index) => renderFile(f, index, 0)));
+			filesInOrder = [...props.filesChanged];
+		}
+		return [lines, filesInOrder];
+	}, [pr, loading, derivedState.matchFile, visitedFiles, forkPointSha, props.viewMode]);
 
-	if (!derivedState.currentRepo) {
-		return (
-			<div style={{ marginTop: "10px" }}>
-				<Icon name="alert" className="margin-right" />
-				Repo <span className="monospace highlight">{pr.repository.name}</span> not found in your
-				editor. Diffs are visible under Diff Hunks button above, or{" "}
-				<Link href={pr.repository.url}>clone the repo</Link>.
-			</div>
-		);
-	}
+	React.useEffect(() => {
+		if (pr && !derivedState.currentRepo) {
+			setRepoErrorMessage(
+				<span>
+					Repo <span className="monospace highlight">{pr.repository.name}</span> not found in your
+					editor. Open it, or <Link href={pr.repository.url}>clone the repo</Link>.
+				</span>
+			);
+			setIsDisabled(true);
+		} else {
+			setRepoErrorMessage("");
+		}
+	}, [pr, derivedState.currentRepo]);
 
 	const isMacintosh = navigator.appVersion.includes("Macintosh");
 	const nextFileKeyboardShortcut = () => (isMacintosh ? `⌥ F6` : "Alt-F6");
@@ -315,10 +457,21 @@ export const PullRequestFilesChanged = (props: {
 
 	return (
 		<>
-			{changedFiles.length > 1 && (
+			{(errorMessage || repoErrorMessage) && (
+				<PRErrorBox>
+					<Icon name="alert" className="alert" />
+					<div className="message">
+						{errorMessage || repoErrorMessage}
+						<p style={{ margin: "5px 0 0 0" }}>
+							Changes can be viewed under <Icon name="diff" /> Diff Hunks view.
+						</p>
+					</div>
+				</PRErrorBox>
+			)}
+			{changedFiles.length > 0 && (
 				<Meta id="changed-files">
 					<MetaLabel>
-						{pr.files.totalCount} Changed Files
+						{props.filesChanged.length} Changed Files
 						{!isDisabled && (
 							<MetaIcons>
 								<Icon
@@ -354,12 +507,6 @@ export const PullRequestFilesChanged = (props: {
 						)}
 					</MetaLabel>
 				</Meta>
-			)}
-			{errorMessage && (
-				<div style={{ margin: "10px 0 10px 0" }}>
-					<Icon name="alert" className="margin-right" />
-					{errorMessage}
-				</div>
 			)}
 			{changedFiles}
 		</>

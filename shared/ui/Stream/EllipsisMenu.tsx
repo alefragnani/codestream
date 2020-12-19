@@ -1,7 +1,7 @@
 import React from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { CodeStreamState } from "../store";
-import { WebviewPanels, WebviewModals } from "../ipc/webview.protocol.common";
+import { WebviewPanels, WebviewModals, WebviewPanelNames } from "../ipc/webview.protocol.common";
 import Icon from "./Icon";
 import { openPanel } from "./actions";
 import Menu from "./Menu";
@@ -9,26 +9,35 @@ import { HostApi } from "../webview-api";
 import { OpenUrlRequestType } from "@codestream/protocols/webview";
 import { sortBy as _sortBy } from "lodash-es";
 import { logout, switchToTeam } from "../store/session/actions";
-import { EMPTY_STATUS } from "./StatusPanel";
+import { EMPTY_STATUS } from "./StartWork";
 import { MarkdownText } from "./MarkdownText";
 import { HeadshotName } from "../src/components/HeadshotName";
 import { setProfileUser, openModal } from "../store/context/actions";
 import { confirmPopup } from "./Confirm";
 import { DeleteUserRequestType, UpdateTeamSettingsRequestType } from "@codestream/protocols/agent";
 import { isFeatureEnabled } from "../store/apiVersioning/reducer";
+import { isOnPrem } from "../store/configs/reducer";
+import { setUserPreference } from "./actions";
+import { AVAILABLE_PANES } from "./Sidebar";
+import { Link } from "../Stream/Link";
 
 interface EllipsisMenuProps {
 	menuTarget: any;
 	closeMenu: any;
 }
 
+const EMPTY_HASH = {};
+
 export function EllipsisMenu(props: EllipsisMenuProps) {
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
 		const team = state.teams[state.context.currentTeamId];
 		const user = state.users[state.session.userId!];
+		const onPrem = isOnPrem(state.configs);
 
 		return {
+			sidebarPanePreferences: state.preferences.sidebarPanes || EMPTY_HASH,
+			sidebarPaneOrder: state.preferences.sidebarPaneOrder || AVAILABLE_PANES,
 			userTeams: _sortBy(
 				Object.values(state.teams).filter(t => !t.deactivated),
 				"name"
@@ -42,7 +51,9 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 			currentUserEmail: user.email,
 			pluginVersion: state.pluginVersion,
 			xraySetting: team.settings ? team.settings.xray : "",
-			multipleReviewersApprove: isFeatureEnabled(state, "multipleReviewersApprove")
+			multipleReviewersApprove: isFeatureEnabled(state, "multipleReviewersApprove"),
+			autoJoinSupported: isFeatureEnabled(state, "autoJoin"),
+			isOnPrem: onPrem
 		};
 	});
 
@@ -117,10 +128,14 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 				label: "Your organization is on CodeStream's free Educational Use Plan."
 			},
 			OPENSOURCE: {
-				label: "Your organization is on CodeStream's free Open Source plan."
+				label: "Your organization is on CodeStream's free Open Source Plan."
 			},
 			FREEPLAN: {
-				label: "Your organization is on CodeStream's free Small Team Plan for 5 users or less.",
+				label: "Your organization is on CodeStream's Free Plan.",
+				upgrade: true
+			},
+			UNEXPIRED: {
+				label: "Your organization is on CodeStream's Free Plan.",
 				upgrade: true
 			},
 			"14DAYTRIAL": {
@@ -146,7 +161,8 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 
 		const details = planDetails[plan];
 		if (!details) return null;
-
+		const upgradeCloud = details.upgrade && !derivedState.isOnPrem;
+		const upgradeOnPrem = details.upgrade && derivedState.isOnPrem;
 		return {
 			label: (
 				<div
@@ -157,11 +173,17 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 					}}
 				>
 					{details.label + " "}
-					{details.upgrade && <a href="">Upgrade.</a>}
+					{upgradeCloud && <a href="">Upgrade.</a>}
+					{upgradeOnPrem && (
+						<>
+							To upgrade, contact{" "}
+							<Link href="mailto:sales@codestream.com">sales@codestream.com</Link>.
+						</>
+					)}
 				</div>
 			),
-			noHover: !details.upgrade,
-			action: details.upgrade ? goUpgrade : () => {}
+			noHover: !upgradeCloud,
+			action: upgradeCloud ? goUpgrade : () => {}
 		};
 	};
 
@@ -189,6 +211,24 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 		if (adminIds && adminIds.includes(currentUserId!)) {
 			const submenu = [
 				{
+					label: "Change Team Name",
+					key: "change-team-name",
+					action: () => dispatch(openModal(WebviewModals.ChangeTeamName))
+				},
+				{ label: "-" },
+				{
+					label: "Onboarding Settings...",
+					key: "onboarding-settings",
+					action: () => dispatch(openModal(WebviewModals.TeamSetup)),
+					disabled: !derivedState.autoJoinSupported
+				},
+				{
+					label: "Feedback Request Settings...",
+					key: "feedback-request-settings",
+					action: () => dispatch(openModal(WebviewModals.ReviewSettings)),
+					disabled: !derivedState.multipleReviewersApprove
+				},
+				{
 					label: "Live View Settings",
 					key: "live-view-settings",
 					submenu: [
@@ -212,28 +252,16 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 							label: "What is Live View?",
 							action: () => {
 								HostApi.instance.send(OpenUrlRequestType, {
-									url: "https://docs.codestream.com/userguide/features/team-live-view/"
+									url: "https://docs.codestream.com/userguide/features/myteam-section/"
 								});
 							}
 						}
 					]
 				},
-				{
-					label: "Code Review Settings...",
-					key: "review-settings",
-					action: () => dispatch(openModal(WebviewModals.ReviewSettings)),
-					disabled: !derivedState.multipleReviewersApprove
-				},
 				{ label: "-" },
-				{
-					label: "Change Team Name",
-					key: "change-team-name",
-					action: () => dispatch(openModal(WebviewModals.ChangeTeamName))
-				},
+				{ label: "Export Data", action: () => go(WebviewPanels.Export) },
 				{ label: "-" },
 				{ label: "Delete Team", action: deleteTeam }
-				// { label: "-" },
-				// { label: "Export Data", action: () => go(WebviewPanels.Export) }
 			];
 			return {
 				label: "Team Admin",
@@ -256,7 +284,7 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 					) : (
 						<Icon name="ticket" />
 					)}
-					<MarkdownText text={currentUserStatus.label} excludeParagraphWrap={true}></MarkdownText>
+					<MarkdownText text={currentUserStatus.label} inline={true}></MarkdownText>
 				</>
 			),
 			key: "status"
@@ -264,6 +292,7 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 	}
 
 	menuItems.push(
+		// { label: "Onboard", key: "onboard", action: () => go(WebviewPanels.Onboard) },
 		{
 			label: "Account",
 			action: "account",
@@ -279,16 +308,30 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 				{ label: "Change Email", action: () => popup(WebviewModals.ChangeEmail) },
 				{ label: "Change Username", action: () => popup(WebviewModals.ChangeUsername) },
 				{ label: "Change Full Name", action: () => popup(WebviewModals.ChangeFullName) },
-				// { label: "Change Password", action: "password" },
 				{ label: "-" },
 				{ label: "Sign Out", action: () => dispatch(logout()) }
-				// { label: "-" },
-				// {
-				// 	label: "Other Actions",
-				// 	action: "other",
-				// 	submenu: [{ label: "Cancel My User Account", action: cancelAccount }]
-				// }
 			]
+		},
+		{
+			label: "View",
+			action: "view",
+			submenu: derivedState.sidebarPaneOrder.map(id => {
+				const settings = derivedState.sidebarPanePreferences[id] || EMPTY_HASH;
+				return {
+					key: id,
+					label: WebviewPanelNames[id],
+					checked: !settings.removed,
+					action: () => {
+						dispatch(setUserPreference(["sidebarPanes", id, "removed"], !settings.removed));
+						if (!settings.removed) {
+							HostApi.instance.track("Sidebar Adjusted", {
+								Section: id,
+								Adjustment: "Hidden"
+							});
+						}
+					}
+				};
+			})
 		},
 		{
 			label: "Notifications",
@@ -306,21 +349,15 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 				disabled: true
 			},
 			buildUpgradeTeamMenuItem(),
-			{
-				label: `Invite people to ${derivedState.team.name}`,
-				action: () => dispatch(openPanel(WebviewPanels.People))
-			},
+			// {
+			// 	label: `Invite people to ${derivedState.team.name}`,
+			// 	action: () => dispatch(openModal(WebviewModals.Invite))
+			// },
 			buildAdminTeamMenuItem(),
 			buildSwitchTeamMenuItem(),
 			{ label: "-" }
 		].filter(Boolean)
 	);
-
-	// FIXME apiCapabilities (this moved to the + menu on global nav)
-	// menuItems.push({
-	// 	label: "Set a Status",
-	// 	action: () => this.setActivePanel(WebviewPanels.Status)
-	// });
 
 	// Feedback:
 	// - Email support
@@ -357,11 +394,11 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 					key: "keybindings",
 					action: () => dispatch(openModal(WebviewModals.Keybindings))
 				},
-				{
-					label: "Getting Started Guide",
-					key: "getting-started",
-					action: () => dispatch(openPanel(WebviewPanels.GettingStarted))
-				},
+				// {
+				// 	label: "Getting Started Guide",
+				// 	key: "getting-started",
+				// 	action: () => dispatch(openPanel(WebviewPanels.GettingStarted))
+				// },
 				{
 					label: "CodeStream Flow",
 					key: "flow",
@@ -382,16 +419,16 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 		{ label: "-" }
 	);
 
-	if (
-		derivedState.currentUserEmail &&
-		derivedState.currentUserEmail.indexOf("@codestream.com") > -1
-	) {
-		menuItems[menuItems.length - 2].submenu.push({
-			label: "Tester",
-			key: "tester",
-			action: () => dispatch(openPanel(WebviewPanels.Tester))
-		});
-	}
+	// if (
+	// 	derivedState.currentUserEmail &&
+	// 	derivedState.currentUserEmail.indexOf("@codestream.com") > -1
+	// ) {
+	// 	menuItems[menuItems.length - 2].submenu.push({
+	// 		label: "Tester",
+	// 		key: "tester",
+	// 		action: () => dispatch(openPanel(WebviewPanels.Tester))
+	// 	});
+	// }
 
 	// menuItems.push({ label: "Sign Out", action: "signout" });
 
@@ -404,13 +441,6 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 	menuItems.push({ label: text, action: "", noHover: true, disabled: true });
 
 	return (
-		<Menu
-			title={<HeadshotName id={derivedState.currentUserId} className="no-padding" />}
-			noCloseIcon
-			items={menuItems}
-			target={props.menuTarget}
-			action={props.closeMenu}
-			align="dropdownRight"
-		/>
+		<Menu items={menuItems} target={props.menuTarget} action={props.closeMenu} align="bottomLeft" />
 	);
 }

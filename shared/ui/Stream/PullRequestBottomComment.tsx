@@ -6,38 +6,39 @@ import styled from "styled-components";
 import { PRComment, PRCommentCard } from "./PullRequestComponents";
 import Tooltip from "./Tooltip";
 import { HostApi } from "../webview-api";
-import {
-	ExecuteThirdPartyTypedType,
-	FetchThirdPartyPullRequestPullRequest,
-	CreatePullRequestCommentRequest,
-	CreatePullRequestCommentAndCloseRequest
-} from "@codestream/protocols/agent";
-import { Headshot, PRHeadshot } from "../src/components/Headshot";
+import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/agent";
+import { PRHeadshot } from "../src/components/Headshot";
 import MessageInput from "./MessageInput";
 import { CSMe } from "@codestream/protocols/api";
-import { ButtonRow } from "./StatusPanel";
+import { ButtonRow } from "../src/components/Dialog";
 import { Button } from "../src/components/Button";
-import { removeFromMyPullRequests } from "../store/providerPullRequests/actions";
+import { api, removeFromMyPullRequests } from "../store/providerPullRequests/actions";
+import { replaceHtml } from "../utils";
 
 interface Props {
 	pr: FetchThirdPartyPullRequestPullRequest;
 	setIsLoadingMessage: Function;
-	fetch: Function;
 	__onDidRender: Function;
 	className?: string;
 }
 
 export const PullRequestBottomComment = styled((props: Props) => {
 	const dispatch = useDispatch();
-	const { pr, fetch, setIsLoadingMessage } = props;
+	const { pr, setIsLoadingMessage } = props;
 	const derivedState = useSelector((state: CodeStreamState) => {
 		const currentUser = state.users[state.session.userId!] as CSMe;
-		return { currentUser, currentPullRequestId: state.context.currentPullRequestId };
+		return {
+			currentUser,
+			currentPullRequestId: state.context.currentPullRequest
+				? state.context.currentPullRequest.id
+				: undefined
+		};
 	});
 
 	const [text, setText] = useState("");
 	const [isLoadingComment, setIsLoadingComment] = useState(false);
 	const [isLoadingCommentAndClose, setIsLoadingCommentAndClose] = useState(false);
+	const [isPreviewing, setIsPreviewing] = useState(false);
 
 	const trackComment = type => {
 		HostApi.instance.track("PR Comment Added", {
@@ -49,60 +50,40 @@ export const PullRequestBottomComment = styled((props: Props) => {
 	const onCommentClick = async (event?: React.SyntheticEvent) => {
 		setIsLoadingComment(true);
 		trackComment("Comment");
-		await HostApi.instance.send(
-			new ExecuteThirdPartyTypedType<CreatePullRequestCommentRequest, any>(),
-			{
-				method: "createPullRequestComment",
-				providerId: pr.providerId,
-				params: {
-					pullRequestId: derivedState.currentPullRequestId!,
-					text: text
-				}
-			}
+		await dispatch(
+			api("createPullRequestComment", {
+				text: replaceHtml(text)
+			})
 		);
 		setText("");
-		fetch().then(() => setIsLoadingComment(false));
+		setIsLoadingComment(false);
 	};
 
 	const onCommentAndCloseClick = async e => {
 		setIsLoadingMessage("Closing...");
 		setIsLoadingCommentAndClose(true);
 		trackComment("Comment and Close");
-		await HostApi.instance.send(
-			new ExecuteThirdPartyTypedType<CreatePullRequestCommentAndCloseRequest, any>(),
-			{
-				method: "createPullRequestCommentAndClose",
-				providerId: pr.providerId,
-				params: {
-					pullRequestId: derivedState.currentPullRequestId!,
-					text: text
-				}
-			}
+		await dispatch(
+			api("createPullRequestCommentAndClose", {
+				text: replaceHtml(text)
+			})
 		);
 		setText("");
-		fetch().then(() => {
-			dispatch(removeFromMyPullRequests(pr.providerId, derivedState.currentPullRequestId!));
-			setIsLoadingCommentAndClose(false);
-		});
+		dispatch(removeFromMyPullRequests(pr.providerId, derivedState.currentPullRequestId!));
+		setIsLoadingCommentAndClose(false);
 	};
 
 	const onCommentAndReopenClick = async e => {
 		setIsLoadingMessage("Reopening...");
 		setIsLoadingCommentAndClose(true);
 		trackComment("Comment and Reopen");
-		await HostApi.instance.send(
-			new ExecuteThirdPartyTypedType<CreatePullRequestCommentAndCloseRequest, any>(),
-			{
-				method: "createPullRequestCommentAndReopen",
-				providerId: pr.providerId,
-				params: {
-					pullRequestId: derivedState.currentPullRequestId!,
-					text: text
-				}
-			}
+		await dispatch(
+			api("createPullRequestCommentAndReopen", {
+				text: replaceHtml(text)
+			})
 		);
 		setText("");
-		fetch().then(() => setIsLoadingCommentAndClose(false));
+		setIsLoadingCommentAndClose(false);
 	};
 
 	const map = {
@@ -130,76 +111,94 @@ export const PullRequestBottomComment = styled((props: Props) => {
 					</>
 				) : (
 					<>
-						<div style={{ margin: "5px 0 0 0", border: "1px solid var(--base-border-color)" }}>
+						<div
+							style={{
+								margin: "5px 0 0 0",
+								border: isPreviewing ? "none" : "1px solid var(--base-border-color)",
+								fontFamily: "var(--font-family)"
+							}}
+						>
 							<MessageInput
 								multiCompose
 								text={text}
 								placeholder="Add Comment..."
 								onChange={setText}
 								onSubmit={onCommentClick}
+								setIsPreviewing={value => setIsPreviewing(value)}
 								__onDidRender={stuff => props.__onDidRender(stuff)}
 							/>
+							<div style={{ clear: "both" }}></div>
 						</div>
-						<ButtonRow>
-							{pr.state === "CLOSED" ? (
-								<div style={{ textAlign: "right", flexGrow: 1 }}>
-									<Button
-										disabled={pr.merged}
-										isLoading={isLoadingCommentAndClose}
-										onClick={onCommentAndReopenClick}
-										variant="secondary"
-									>
-										{text ? "Reopen and comment" : "Reopen pull request"}
-									</Button>
-
-									<Tooltip
-										title={
-											<span>
-												Submit Comment
-												<span className="keybinding extra-pad">
-													{navigator.appVersion.includes("Macintosh") ? "⌘" : "Alt"} ENTER
-												</span>
-											</span>
-										}
-										placement="bottomRight"
-										delay={1}
-									>
-										<Button isLoading={isLoadingComment} onClick={onCommentClick} disabled={!text}>
-											Comment
-										</Button>
-									</Tooltip>
-								</div>
-							) : (
-								<div style={{ textAlign: "right", flexGrow: 1 }}>
-									{!pr.merged && (
+						{!isPreviewing && (
+							<ButtonRow>
+								{pr.state === "CLOSED" ? (
+									<div style={{ textAlign: "right", flexGrow: 1 }}>
 										<Button
+											disabled={pr.merged}
 											isLoading={isLoadingCommentAndClose}
-											onClick={onCommentAndCloseClick}
+											onClick={onCommentAndReopenClick}
 											variant="secondary"
 										>
-											<Icon name="issue-closed" className="red-color margin-right" />
-											{text ? "Close and comment" : "Close pull request"}
+											{text ? "Reopen and comment" : "Reopen pull request"}
 										</Button>
-									)}
-									<Tooltip
-										title={
-											<span>
-												Submit Comment
-												<span className="keybinding extra-pad">
-													{navigator.appVersion.includes("Macintosh") ? "⌘" : "Alt"} ENTER
+
+										<Tooltip
+											title={
+												<span>
+													Submit Comment
+													<span className="keybinding extra-pad">
+														{navigator.appVersion.includes("Macintosh") ? "⌘" : "Ctrl"} ENTER
+													</span>
 												</span>
-											</span>
-										}
-										placement="bottomRight"
-										delay={1}
-									>
-										<Button isLoading={isLoadingComment} onClick={onCommentClick} disabled={!text}>
-											Comment
-										</Button>
-									</Tooltip>
-								</div>
-							)}
-						</ButtonRow>
+											}
+											placement="bottomRight"
+											delay={1}
+										>
+											<Button
+												isLoading={isLoadingComment}
+												onClick={onCommentClick}
+												disabled={!text}
+											>
+												Comment
+											</Button>
+										</Tooltip>
+									</div>
+								) : (
+									<div style={{ textAlign: "right", flexGrow: 1 }}>
+										{!pr.merged && (
+											<Button
+												isLoading={isLoadingCommentAndClose}
+												onClick={onCommentAndCloseClick}
+												variant="secondary"
+											>
+												<Icon name="issue-closed" className="red-color margin-right" />
+												{text ? "Close and comment" : "Close pull request"}
+											</Button>
+										)}
+										<Tooltip
+											title={
+												<span>
+													Submit Comment
+													<span className="keybinding extra-pad">
+														{navigator.appVersion.includes("Macintosh") ? "⌘" : "Ctrl"} ENTER
+													</span>
+												</span>
+											}
+											placement="bottomRight"
+											delay={1}
+										>
+											<Button
+												isLoading={isLoadingComment}
+												onClick={onCommentClick}
+												disabled={!text}
+											>
+												Comment
+											</Button>
+										</Tooltip>
+									</div>
+								)}
+							</ButtonRow>
+						)}
 					</>
 				)}
 			</PRCommentCard>

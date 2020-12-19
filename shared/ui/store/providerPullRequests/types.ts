@@ -2,14 +2,18 @@ import { Index } from "../common";
 import { GetMyPullRequestsResponse } from "@codestream/protocols/agent";
 
 export enum ProviderPullRequestActionsTypes {
-	AddPullRequestConversations = "@providerPullRequests/AddConversations ",
+	AddPullRequestConversations = "@providerPullRequests/AddConversations",
+	AddPullRequestCollaborators = "@providerPullRequests/AddPullRequestCollaborators",
 	AddPullRequestFiles = "@providerPullRequests/AddFiles",
 	AddPullRequestCommits = "@providerPullRequests/AddCommits",
 	AddMyPullRequests = "@providerPullRequests/AddMyPullRequests",
 	RemoveFromMyPullRequests = "@providerPullRequests/RemoveFromMyPullRequests",
 	ClearMyPullRequests = "@providerPullRequests/ClearMyPullRequests",
 	ClearPullRequestFiles = "@providerPullRequests/ClearFiles",
-	ClearPullRequestCommits = "@providerPullRequests/ClearCommits"
+	ClearPullRequestCommits = "@providerPullRequests/ClearCommits",
+	AddPullRequestError = "@providerPullRequests/AddError",
+	ClearPullRequestError = "@providerPullRequests/ClearError",
+	HandleDirectives = "@providerPullRequests/HandleDirectives"
 }
 
 /**
@@ -29,5 +33,20 @@ export enum ProviderPullRequestActionsTypes {
  */
 export type ProviderPullRequestsState = {
 	myPullRequests: Index<{ data?: GetMyPullRequestsResponse[] }>;
-	pullRequests: Index<Index<{ conversations: any; files?: any[]; commits?: any[] }>>;
+	pullRequests: Index<
+		Index<{
+			conversations: any;
+
+			/**
+			 * Client side date tracking of when this was last added to the redux store
+			 *
+			 * @type {(number | undefined)}
+			 */
+			conversationsLastFetch: number | undefined;
+			files?: any[];
+			collaborators?: any[];
+			commits?: any[];
+			error?: { message: string };
+		}>
+	>;
 };

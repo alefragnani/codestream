@@ -322,6 +322,7 @@ export interface CheckPullRequestPreconditionsRequest {
 export interface CheckPullRequestPreconditionsResponse {
 	success: boolean;
 	review?: Pick<CSReview, "title" | "text">;
+	repoId?: string;
 	remoteUrl?: string;
 	remoteBranch?: string;
 	providerId?: string;
@@ -330,6 +331,8 @@ export interface CheckPullRequestPreconditionsResponse {
 	pullRequestProvider?: { defaultBranch?: string; isConnected: boolean };
 	branch?: string;
 	branches?: string[];
+	remoteBranches?: string[];
+	pullRequestTemplate?: string;
 	warning?: {
 		message?: string;
 		type?: "ALREADY_HAS_PULL_REQUEST" | string;
@@ -338,7 +341,13 @@ export interface CheckPullRequestPreconditionsResponse {
 	};
 	error?: {
 		message?: string;
-		type?: "REPO_NOT_FOUND" | "HAS_LOCAL_COMMITS" | "UNKNOWN" | string;
+		type?:
+			| "REPO_NOT_FOUND"
+			| "HAS_LOCAL_COMMITS"
+			| "REQUIRES_PROVIDER"
+			| "REQUIRES_PROVIDER_REPO"
+			| "UNKNOWN"
+			| string;
 		url?: string;
 		id?: string;
 	};
@@ -360,7 +369,8 @@ export interface CreatePullRequestRequest {
 	description?: string;
 	baseRefName: string;
 	headRefName: string;
-	remote: string;
+	providerRepositoryId?: string /* for use across forks */;
+	remote: string /* to look up the repo ID on the provider */;
 	remoteName?: string;
 	addresses?: {
 		title: string;

@@ -109,8 +109,10 @@ export const EmailConfirmation = (connect() as any)((props: Props) => {
 		<div className="onboarding-page">
 			<form className="standard-form" onSubmit={onSubmit}>
 				<fieldset className="form-body">
-					<div className="outline-box">
-						<h3>Check Your Email</h3>
+					<div className="border-bottom-box">
+						<h3>
+							<FormattedMessage id="confirmation.checkEmail" defaultMessage="Check Your Email" />
+						</h3>
 						<FormattedMessage id="confirmation.instructions" tagName="p" />
 						<FormattedMessage id="confirmation.didNotReceive">
 							{text => (
@@ -143,6 +145,7 @@ export const EmailConfirmation = (connect() as any)((props: Props) => {
 								<div className="confirmation-code">
 									{digits.map((digit, index) => (
 										<TextInput
+											autoFocus={index === 0}
 											ref={element => (inputs.current[index] = element)}
 											key={index}
 											value={digit}
@@ -159,6 +162,11 @@ export const EmailConfirmation = (connect() as any)((props: Props) => {
 											onChange={value => {
 												setError(undefined);
 												let newDigit: string;
+												if (value.match(/^\d\d\d\d\d\d$/)) {
+													setValues(value.split(""));
+													onSubmit();
+													return;
+												}
 												// probably a backspace
 												if (value === "") newDigit = value;
 												// don't change the value

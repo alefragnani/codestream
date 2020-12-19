@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { CodeStreamState } from "../store";
-import styled from "styled-components";
+import styled, { ThemeProvider } from "styled-components";
 import { CSMe } from "@codestream/protocols/api";
 import { CreateCodemarkIcons } from "./CreateCodemarkIcons";
 import ScrollBox from "./ScrollBox";
@@ -10,19 +10,20 @@ import { Tabs, Tab } from "../src/components/Tabs";
 import Timestamp from "./Timestamp";
 import copy from "copy-to-clipboard";
 import { Link } from "./Link";
-import { setCurrentPullRequest, setCurrentReview } from "../store/context/actions";
-import CancelButton from "./CancelButton";
+import {
+	clearCurrentPullRequest,
+	setCurrentPullRequest,
+	setCurrentReview
+} from "../store/context/actions";
 import { useDidMount } from "../utilities/hooks";
 import { HostApi } from "../webview-api";
 import {
 	FetchThirdPartyPullRequestPullRequest,
 	GetReposScmRequestType,
 	ReposScm,
-	ExecuteThirdPartyTypedType,
 	SwitchBranchRequestType,
 	DidChangeDataNotificationType,
-	ChangeDataType,
-	FetchThirdPartyPullRequestResponse
+	ChangeDataType
 } from "@codestream/protocols/agent";
 import {
 	PRHeader,
@@ -37,12 +38,10 @@ import {
 	PRPlusMinus,
 	PREditTitle,
 	PRActionButtons,
-	PRCommentCard,
 	PRSubmitReviewButton,
 	PRIAmRequested
 } from "./PullRequestComponents";
 import { LoadingMessage } from "../src/components/LoadingMessage";
-import { Modal } from "./Modal";
 import { bootstrapReviews } from "../store/reviews/actions";
 import { PullRequestConversationTab } from "./PullRequestConversationTab";
 import { PullRequestCommitsTab } from "./PullRequestCommitsTab";
@@ -50,36 +49,29 @@ import * as reviewSelectors from "../store/reviews/reducer";
 import { PullRequestFilesChangedTab } from "./PullRequestFilesChangedTab";
 import { FloatingLoadingMessage } from "../src/components/FloatingLoadingMessage";
 import { Button } from "../src/components/Button";
-import MessageInput from "./MessageInput";
-import { RadioGroup, Radio } from "../src/components/RadioGroup";
 import Tooltip from "./Tooltip";
 import { PullRequestFinishReview } from "./PullRequestFinishReview";
 import {
 	getPullRequestConversationsFromProvider,
 	clearPullRequestFiles,
 	getPullRequestConversations,
-	clearPullRequestCommits
+	clearPullRequestCommits,
+	api
 } from "../store/providerPullRequests/actions";
-import { getProviderPullRequestRepo } from "../store/providerPullRequests/reducer";
+import {
+	getCurrentProviderPullRequest,
+	getCurrentProviderPullRequestLastUpdated,
+	getProviderPullRequestRepo,
+	isAnHourOld
+} from "../store/providerPullRequests/reducer";
 import { confirmPopup } from "./Confirm";
-
-export const WidthBreakpoint = "630px";
+import { PullRequestFileComments } from "./PullRequestFileComments";
+import { InlineMenu } from "../src/components/controls/InlineMenu";
+import { getPreferences } from "../store/users/reducer";
+import { setUserPreference } from "./actions";
 
 const Root = styled.div`
-	${Tabs} {
-		margin: 10px 0;
-	}
-	${Tab} {
-		font-size: 13px;
-		white-space: nowrap;
-		padding: 0 5px 10px 5px;
-		.icon {
-			// vertical-align: -2px;
-			display: inline-block;
-			margin: 0 5px;
-		}
-	}
-	@media only screen and (max-width: ${WidthBreakpoint}) {
+	@media only screen and (max-width: ${props => props.theme.breakpoint}) {
 		.wide-text {
 			display: none;
 		}
@@ -122,12 +114,26 @@ export const PullRequest = () => {
 	const derivedState = useSelector((state: CodeStreamState) => {
 		const currentUser = state.users[state.session.userId!] as CSMe;
 		const team = state.teams[state.context.currentTeamId];
+		const providerPullRequests = state.providerPullRequests.pullRequests;
+		const currentPullRequest = getCurrentProviderPullRequest(state);
+		const providerPullRequestLastUpdated = getCurrentProviderPullRequestLastUpdated(state);
 		return {
-			providerPullRequests: state.providerPullRequests.pullRequests,
+			viewPreference: getPreferences(state).pullRequestView || "auto",
+			providerPullRequests: providerPullRequests,
 			reviewsState: state.reviews,
 			reviews: reviewSelectors.getAllReviews(state),
 			currentUser,
-			currentPullRequestId: state.context.currentPullRequestId,
+			currentPullRequestProviderId: state.context.currentPullRequest
+				? state.context.currentPullRequest.providerId
+				: undefined,
+			currentPullRequestId: state.context.currentPullRequest
+				? state.context.currentPullRequest.id
+				: undefined,
+			currentPullRequestCommentId: state.context.currentPullRequest
+				? state.context.currentPullRequest.commentId
+				: undefined,
+			currentPullRequest: currentPullRequest,
+			currentPullRequestLastUpdated: providerPullRequestLastUpdated,
 			composeCodemarkActive: state.context.composeCodemarkActive,
 			team,
 			textEditorUri: state.editorContext.textEditorUri,
@@ -137,11 +143,22 @@ export const PullRequest = () => {
 		};
 	});
 
-	console.warn("CHECKOUT: ", derivedState.checkoutBranch);
+	useEffect(() => {
+		if (!derivedState.currentPullRequestCommentId) return;
+
+		const dataCommentId = document.querySelector(
+			`[data-comment-id="${derivedState.currentPullRequestCommentId}"]`
+		);
+		if (dataCommentId) {
+			dataCommentId.scrollIntoView({ behavior: "smooth", block: "start", inline: "nearest" });
+		}
+	}, [derivedState.currentPullRequestCommentId]);
+
 	const [activeTab, setActiveTab] = useState(1);
 	const [ghRepo, setGhRepo] = useState<any>(EMPTY_HASH);
 	const [isLoadingPR, setIsLoadingPR] = useState(false);
 	const [isLoadingMessage, setIsLoadingMessage] = useState("");
+	const [generalError, setGeneralError] = useState("");
 	const [isLoadingBranch, setIsLoadingBranch] = useState(false);
 	const [pr, setPr] = useState<FetchThirdPartyPullRequestPullRequest | undefined>();
 	const [openRepos, setOpenRepos] = useState<ReposScmPlusName[]>(EMPTY_ARRAY);
@@ -155,8 +172,42 @@ export const PullRequest = () => {
 	>("UNCHECKED");
 
 	const exit = async () => {
-		await dispatch(setCurrentPullRequest());
+		await dispatch(clearCurrentPullRequest());
 	};
+
+	const PRError = styled.div`
+		padding: 0px 15px 20px 15px;
+		display: flex;
+		align-items: center;
+		> .icon {
+			flex-grow: 0;
+			flex-shrink: 0;
+			display: inline-block;
+			margin-right: 15px;
+			transform: scale(1.5);
+			color: #ff982d;
+		}
+		> div {
+			color: #ff982d;
+			flex-grow: 10;
+			display: flex;
+			align-items: center;
+			button {
+				margin-left: auto;
+			}
+		}
+		strong {
+			font-weight: normal;
+			color: var(--text-color-highlight);
+		}
+		a {
+			text-decoration: none;
+			color: var(--text-color-highlight);
+			&:hover {
+				color: var(--text-color-info) !important;
+			}
+		}
+	`;
 
 	const _assignState = pr => {
 		if (!pr) return;
@@ -169,31 +220,45 @@ export const PullRequest = () => {
 		setIsLoadingMessage("");
 	};
 
-	// FIXME this shouldn't be hard-coded
-	const providerId = "github*com";
-
 	useEffect(() => {
-		const providerPullRequests = derivedState.providerPullRequests[providerId];
+		const providerPullRequests =
+			derivedState.providerPullRequests[derivedState.currentPullRequestProviderId!];
 		if (providerPullRequests) {
 			let data = providerPullRequests[derivedState.currentPullRequestId!];
 			if (data) {
-				_assignState(data.conversations);
+				if (isAnHourOld(data.conversationsLastFetch)) {
+					console.warn(`pr id=${derivedState.currentPullRequestId} is too old, resetting`);
+					// setPR to undefined to trigger loader
+					setPr(undefined);
+				} else {
+					_assignState(data.conversations);
+				}
 			}
 		}
-	}, [derivedState.providerPullRequests]);
+	}, [
+		derivedState.currentPullRequestProviderId,
+		derivedState.currentPullRequestId,
+		derivedState.providerPullRequests
+	]);
 
 	const initialFetch = async (message?: string) => {
 		if (message) setIsLoadingMessage(message);
 		setIsLoadingPR(true);
 
 		const response = (await dispatch(
-			getPullRequestConversations(providerId, derivedState.currentPullRequestId!)
+			getPullRequestConversations(
+				derivedState.currentPullRequestProviderId!,
+				derivedState.currentPullRequestId!
+			)
 		)) as any;
-		_assignState(response);
-		if (response) {
-			HostApi.instance.track("PR Clicked", {
-				Host: providerId
-			});
+		setGeneralError("");
+		if (response.error) {
+			// FIXME do something with it
+			setIsLoadingPR(false);
+			setIsLoadingMessage("");
+			setGeneralError(response.error);
+		} else {
+			_assignState(response);
 		}
 	};
 
@@ -226,8 +291,18 @@ export const PullRequest = () => {
 		_assignState(response);
 
 		// just clear the files and commits data -- it will be fetched if necessary (since it has its own api call)
-		dispatch(clearPullRequestFiles(providerId, derivedState.currentPullRequestId!));
-		dispatch(clearPullRequestCommits(providerId, derivedState.currentPullRequestId!));
+		dispatch(
+			clearPullRequestFiles(
+				derivedState.currentPullRequestProviderId!,
+				derivedState.currentPullRequestId!
+			)
+		);
+		dispatch(
+			clearPullRequestCommits(
+				derivedState.currentPullRequestProviderId!,
+				derivedState.currentPullRequestId!
+			)
+		);
 	};
 
 	const checkout = async () => {
@@ -264,13 +339,9 @@ export const PullRequest = () => {
 		if (pr && pr.headRefName && derivedState.checkoutBranch) {
 			checkout();
 			// clear the branch flag
-			dispatch(setCurrentPullRequest(pr.id));
+			dispatch(setCurrentPullRequest(pr.providerId, pr.id));
 		}
 	}, [pr && pr.headRefName, derivedState.checkoutBranch]);
-
-	const hasRepoOpen = useMemo(() => {
-		return pr && openRepos.find(_ => _.name === pr.repository.name);
-	}, [pr, openRepos]);
 
 	useEffect(() => {
 		if (!pr) return;
@@ -312,16 +383,8 @@ export const PullRequest = () => {
 	const saveTitle = async () => {
 		setIsLoadingMessage("Saving Title...");
 		setSavingTitle(true);
-
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "updatePullRequestTitle",
-			providerId: pr!.providerId,
-			params: {
-				pullRequestId: derivedState.currentPullRequestId!,
-				title
-			}
-		});
-		fetch();
+		await dispatch(api("updatePullRequestTitle", { title }));
+		setSavingTitle(false);
 	};
 
 	const getOpenRepos = async () => {
@@ -339,6 +402,12 @@ export const PullRequest = () => {
 		}
 	};
 
+	const closeFileComments = () => {
+		// note we're passing no value for the 3rd argument, which clears
+		// the commentId
+		if (pr) dispatch(setCurrentPullRequest(pr.providerId, pr.id));
+	};
+
 	const linkHijacker = (e: any) => {
 		if (e && e.target.tagName === "A" && e.target.text === "Changes reviewed on CodeStream") {
 			const review = Object.values(derivedState.reviews).find(
@@ -347,7 +416,7 @@ export const PullRequest = () => {
 			if (review) {
 				e.preventDefault();
 				e.stopPropagation();
-				dispatch(setCurrentPullRequest(""));
+				dispatch(clearCurrentPullRequest());
 				dispatch(setCurrentReview(review.id));
 			}
 		}
@@ -387,30 +456,34 @@ export const PullRequest = () => {
 			dispatch(bootstrapReviews());
 		}
 		getOpenRepos();
-		initialFetch();
+		initialFetch().then(_ => {
+			HostApi.instance.track("PR Details Viewed", {
+				Host: derivedState.currentPullRequestProviderId
+			});
+		});
 	});
 
-	const _getPullRequestLastUpdated = async (providerId: string, pullRequestId: string) => {
-		return HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "getPullRequestLastUpdated",
-			providerId: providerId,
-			params: {
-				pullRequestId: pullRequestId
-			}
-		});
-	};
-
 	const _checkMergeabilityStatus = async () => {
-		if (!pr) return undefined;
+		if (
+			!derivedState.currentPullRequest ||
+			!derivedState.currentPullRequest.conversations ||
+			!derivedState.currentPullRequest.conversations.repository ||
+			!derivedState.currentPullRequest.conversations.repository.pullRequest
+		)
+			return undefined;
 		try {
-			const response = await _getPullRequestLastUpdated(
-				pr.providerId,
-				derivedState.currentPullRequestId!
-			);
-			if (pr && response && response.mergeable !== pr.mergeable) {
+			const response = (await dispatch(
+				api("getPullRequestLastUpdated", {}, { preventClearError: true })
+			)) as any;
+			if (
+				derivedState.currentPullRequest &&
+				response &&
+				response.mergeable !==
+					derivedState.currentPullRequest.conversations.repository.pullRequest.mergeable
+			) {
 				console.log(
 					"getPullRequestLastUpdated is updating (mergeable)",
-					pr.mergeable,
+					derivedState.currentPullRequest.conversations.repository.pullRequest.mergeable,
 					response.mergeable
 				);
 				reload();
@@ -421,78 +494,116 @@ export const PullRequest = () => {
 		}
 		return undefined;
 	};
+
 	const checkMergeabilityStatus = useCallback(() => {
 		_checkMergeabilityStatus();
-	}, [pr, derivedState.currentPullRequestId]);
+	}, [derivedState.currentPullRequest, derivedState.currentPullRequestId]);
 
 	let interval;
 	let intervalCounter = 0;
 	useEffect(() => {
 		interval && clearInterval(interval);
-		if (pr) {
-			if (autoCheckedMergeability === "UNCHECKED" && pr.mergeable === "UNKNOWN") {
-				console.log("PullRequest pr mergeable is UNKNOWN");
-				setTimeout(() => {
-					_checkMergeabilityStatus().then(_ => {
-						setAutoCheckedMergeability(_ ? "CHECKED" : "UNKNOWN");
-					});
-				}, 5000);
-			}
-			interval = setInterval(async () => {
-				if (intervalCounter >= 120) {
-					interval && clearInterval(interval);
-					intervalCounter = 0;
-					console.warn(`stopped getPullRequestLastUpdated interval counter=${intervalCounter}`);
-					return;
-				}
-				try {
-					const response = await _getPullRequestLastUpdated(
-						pr.providerId,
-						derivedState.currentPullRequestId!
-					);
+		if (!derivedState.currentPullRequest) return;
 
-					if (pr && response && response.updatedAt !== pr.updatedAt) {
-						console.log(
-							"getPullRequestLastUpdated is updating",
-							response.updatedAt,
-							pr.updatedAt,
-							intervalCounter
-						);
-						intervalCounter = 0;
-						reload();
-						clearInterval(interval);
-					} else {
-						intervalCounter++;
-					}
-				} catch (ex) {
-					console.error(ex);
-					interval && clearInterval(interval);
-				}
-			}, 60000); //60000 === 1 minute
+		if (
+			autoCheckedMergeability === "UNCHECKED" ||
+			(derivedState.currentPullRequest.conversations &&
+				derivedState.currentPullRequest.conversations.repository &&
+				derivedState.currentPullRequest.conversations.repository.pullRequest &&
+				derivedState.currentPullRequest.conversations.repository.pullRequest.mergeable ===
+					"UNKNOWN")
+		) {
+			console.log("PullRequest pr mergeable is UNKNOWN");
+			setTimeout(() => {
+				_checkMergeabilityStatus().then(_ => {
+					setAutoCheckedMergeability(_ ? "CHECKED" : "UNKNOWN");
+				});
+			}, 5000);
 		}
+		interval = setInterval(async () => {
+			// checks for 1 hour
+			if (intervalCounter >= 60) {
+				interval && clearInterval(interval);
+				intervalCounter = 0;
+				console.warn(`stopped getPullRequestLastUpdated interval counter=${intervalCounter}`);
+				return;
+			}
+			try {
+				const response = (await dispatch(
+					api(
+						"getPullRequestLastUpdated",
+						{},
+						{ preventClearError: true, preventErrorReporting: true }
+					)
+				)) as any;
+				if (
+					derivedState.currentPullRequest &&
+					response &&
+					response.updatedAt !== derivedState.currentPullRequestLastUpdated
+				) {
+					console.warn(
+						"getPullRequestLastUpdated is updating",
+						response.updatedAt,
+						derivedState.currentPullRequestLastUpdated,
+						intervalCounter
+					);
+					intervalCounter = 0;
+					reload();
+					clearInterval(interval);
+				} else {
+					intervalCounter++;
+					console.log("incrementing counter", intervalCounter);
+				}
+			} catch (ex) {
+				console.error(ex);
+				interval && clearInterval(interval);
+			}
+		}, 60000); //60000 === 1 minute interval
 
 		return () => {
 			interval && clearInterval(interval);
 		};
-	}, [pr, autoCheckedMergeability]);
+	}, [
+		derivedState.currentPullRequestLastUpdated,
+		derivedState.currentPullRequest,
+		autoCheckedMergeability
+	]);
 
 	const iAmRequested = useMemo(() => {
 		if (pr) {
 			return pr.reviewRequests.nodes.find(
-				request => request.requestedReviewer.login === pr.viewer.login
+				request => request.requestedReviewer && request.requestedReviewer.login === pr.viewer.login
 			);
 		}
 		return false;
 	}, [pr]);
 
+	const breakpoints = {
+		auto: "630px",
+		"side-by-side": "10px",
+		vertical: "100000px"
+	};
+	const addViewPreferencesToTheme = theme => ({
+		...theme,
+		breakpoint: breakpoints[derivedState.viewPreference]
+	});
+
 	console.warn("PR: ", pr);
 	// console.warn("REPO: ", ghRepo);
 	if (!pr) {
-		return (
-			<Modal verticallyCenter showGlobalNav>
-				<LoadingMessage>Loading Pull Request...</LoadingMessage>
-			</Modal>
-		);
+		if (generalError) {
+			return (
+				<div style={{ display: "flex", height: "100vh", alignItems: "center" }}>
+					<div style={{ textAlign: "center" }}>Error: {generalError}</div>
+				</div>
+			);
+		} else {
+			return (
+				<div style={{ display: "flex", height: "100vh", alignItems: "center" }}>
+					<LoadingMessage>Loading Pull Request...</LoadingMessage>
+				</div>
+			);
+		}
 	} else {
 		const statusIcon = pr.state === "OPEN" || pr.state === "CLOSED" ? "pull-request" : "git-merge";
 		const action = pr.merged ? "merged " : "wants to merge ";
@@ -500,259 +611,316 @@ export const PullRequest = () => {
 		// console.log(pr.files);
 		// console.log(pr.commits);
 		return (
-			<Root className="panel full-height">
-				<CreateCodemarkIcons narrow onebutton />
-				{isLoadingMessage && <FloatingLoadingMessage>{isLoadingMessage}</FloatingLoadingMessage>}
-				<PRHeader>
-					{iAmRequested && activeTab == 1 && (
-						<PRIAmRequested>
-							<div>
-								<b>{pr.author.login}</b> requested your review on this pull request.
-							</div>
-							<Button
-								variant="success"
-								size="compact"
-								onClick={() => {
-									setActiveTab(4);
-								}}
-							>
-								Add your review
-							</Button>
-						</PRIAmRequested>
-					)}
-					<PRTitle className={editingTitle ? "editing" : ""}>
-						{editingTitle ? (
-							<PREditTitle>
-								<input
-									id="title-input"
-									name="title"
-									value={title}
-									className="input-text control"
-									autoFocus
-									type="text"
-									onChange={e => setTitle(e.target.value)}
-									placeholder=""
-								/>
-								<Button onClick={saveTitle} isLoading={savingTitle}>
-									Save
-								</Button>
+			<ThemeProvider theme={addViewPreferencesToTheme}>
+				<Root className="panel full-height">
+					<CreateCodemarkIcons narrow onebutton />
+					{isLoadingMessage && <FloatingLoadingMessage>{isLoadingMessage}</FloatingLoadingMessage>}
+					<PRHeader>
+						{iAmRequested && activeTab == 1 && (
+							<PRIAmRequested>
+								<div>
+									<b>{pr.author.login}</b> requested your review
+									<span className="wide-text"> on this pull request</span>.
+								</div>
 								<Button
-									variant="secondary"
+									variant="success"
+									size="compact"
 									onClick={() => {
-										setTitle("");
-										setSavingTitle(false);
-										setEditingTitle(false);
+										setActiveTab(4);
 									}}
 								>
-									Cancel
+									Add <span className="wide-text">your</span> review
 								</Button>
-							</PREditTitle>
-						) : (
-							<>
-								{title || pr.title}{" "}
-								<Tooltip title="Open on GitHub" placement="top">
-									<span>
-										<Link href={pr.url}>
-											#{pr.number}
-											<Icon name="link-external" className="open-external" />
-										</Link>
-									</span>
-								</Tooltip>
-							</>
+							</PRIAmRequested>
 						)}
-					</PRTitle>
-					<PRStatus>
-						<PRStatusButton
-							disabled
-							fullOpacity
-							variant={
-								pr.isDraft
-									? "neutral"
-									: pr.state === "OPEN"
-									? "success"
-									: pr.state === "MERGED"
-									? "merged"
-									: pr.state === "CLOSED"
-									? "destructive"
-									: "primary"
-							}
-						>
-							<Icon name={statusIcon} />
-							{pr.isDraft ? "Draft" : pr.state ? pr.state.toLowerCase() : ""}
-						</PRStatusButton>
-						<PRStatusMessage>
-							<PRAuthor>{pr.author.login}</PRAuthor>
-							<PRAction>
-								{action} {pr.commits && pr.commits.totalCount} commits into{" "}
-								<Link href={`${pr.repoUrl}/tree/${pr.baseRefName}`}>
-									<PRBranch>
-										{pr.repository.name}:{pr.baseRefName}
-									</PRBranch>
-								</Link>
-								{" from "}
-								<Link href={`${pr.repoUrl}/tree/${pr.headRefName}`}>
-									<PRBranch>{pr.headRefName}</PRBranch>
-								</Link>{" "}
-								<Icon
-									title="Copy"
-									placement="bottom"
-									name="copy"
-									className="clickable"
-									onClick={e => copy(pr.baseRefName)}
-								/>
-							</PRAction>
-							<Timestamp time={pr.createdAt} relative />
-						</PRStatusMessage>
-						<PRActionButtons>
-							{pr.viewerCanUpdate && (
+						<PRTitle className={editingTitle ? "editing" : ""}>
+							{editingTitle ? (
+								<PREditTitle>
+									<input
+										id="title-input"
+										name="title"
+										value={title}
+										className="input-text control"
+										autoFocus
+										type="text"
+										onChange={e => setTitle(e.target.value)}
+										placeholder=""
+									/>
+									<Button onClick={saveTitle} isLoading={savingTitle}>
+										Save
+									</Button>
+									<Button
+										variant="secondary"
+										onClick={() => {
+											setTitle("");
+											setSavingTitle(false);
+											setEditingTitle(false);
+										}}
+									>
+										Cancel
+									</Button>
+								</PREditTitle>
+							) : (
+								<>
+									{title || pr.title}{" "}
+									<Tooltip title="Open on GitHub" placement="top">
+										<span>
+											<Link href={pr.url}>
+												#{pr.number}
+												<Icon name="link-external" className="open-external" />
+											</Link>
+										</span>
+									</Tooltip>
+								</>
+							)}
+						</PRTitle>
+						<PRStatus>
+							<PRStatusButton
+								disabled
+								fullOpacity
+								variant={
+									pr.isDraft
+										? "neutral"
+										: pr.state === "OPEN"
+										? "success"
+										: pr.state === "MERGED"
+										? "merged"
+										: pr.state === "CLOSED"
+										? "destructive"
+										: "primary"
+								}
+							>
+								<Icon name={statusIcon} />
+								{pr.isDraft ? "Draft" : pr.state ? pr.state.toLowerCase() : ""}
+							</PRStatusButton>
+							<PRStatusMessage>
+								<PRAuthor>{pr.author.login}</PRAuthor>
+								<PRAction>
+									{action} {pr.commits && pr.commits.totalCount} commits into{" "}
+									<Link href={`${pr.repoUrl}/tree/${pr.baseRefName}`}>
+										<PRBranch>
+											{pr.repository.name}:{pr.baseRefName}
+										</PRBranch>
+									</Link>
+									{" from "}
+									<Link href={`${pr.repoUrl}/tree/${pr.headRefName}`}>
+										<PRBranch>{pr.headRefName}</PRBranch>
+									</Link>{" "}
+									<Icon
+										title="Copy"
+										placement="bottom"
+										name="copy"
+										className="clickable"
+										onClick={e => copy(pr.baseRefName)}
+									/>
+								</PRAction>
+								<Timestamp time={pr.createdAt} relative />
+							</PRStatusMessage>
+							<PRActionButtons>
+								{pr.viewerCanUpdate && (
+									<span>
+										<Icon
+											title="Edit Title"
+											trigger={["hover"]}
+											delay={1}
+											onClick={() => {
+												setTitle(pr.title);
+												setEditingTitle(true);
+											}}
+											placement="bottom"
+											name="pencil"
+										/>
+									</span>
+								)}
+								{isLoadingBranch ? (
+									<Icon name="sync" className="spin" />
+								) : (
+									<span className={cantCheckoutReason ? "disabled" : ""}>
+										<Icon
+											title={
+												<>
+													Checkout Branch
+													{cantCheckoutReason && (
+														<div className="subtle smaller" style={{ maxWidth: "200px" }}>
+															Disabled: {cantCheckoutReason}
+														</div>
+													)}
+												</>
+											}
+											trigger={["hover"]}
+											delay={1}
+											onClick={checkout}
+											placement="bottom"
+											name="git-branch"
+										/>
+									</span>
+								)}
+								<InlineMenu
+									title="View Settings"
+									noChevronDown
+									noFocusOnSelect
+									items={[
+										{ label: "-" },
+										{
+											key: "auto",
+											label: "Auto",
+											subtle: " (based on width)",
+											checked: derivedState.viewPreference === "auto",
+											action: () => dispatch(setUserPreference(["pullRequestView"], "auto"))
+										},
+										{
+											key: "vertical",
+											label: "Vertical",
+											subtle: " (best for narrow)",
+											checked: derivedState.viewPreference === "vertical",
+											action: () => dispatch(setUserPreference(["pullRequestView"], "vertical"))
+										},
+										{
+											key: "side-by-side",
+											label: "Side-by-side",
+											subtle: " (best for wide)",
+											checked: derivedState.viewPreference === "side-by-side",
+											action: () => dispatch(setUserPreference(["pullRequestView"], "side-by-side"))
+										}
+									]}
+								>
+									<span>
+										<Icon
+											title="View Settings"
+											trigger={["hover"]}
+											delay={1}
+											placement="bottom"
+											className={`${isLoadingPR ? "spin" : ""}`}
+											name="gear"
+										/>
+									</span>
+								</InlineMenu>
 								<span>
 									<Icon
-										title="Edit Title"
+										title="Reload"
 										trigger={["hover"]}
 										delay={1}
-										onClick={() => {
-											setTitle(pr.title);
-											setEditingTitle(true);
-										}}
+										onClick={() => reload("Reloading...")}
 										placement="bottom"
-										name="pencil"
+										className={`${isLoadingPR ? "spin" : ""}`}
+										name="refresh"
 									/>
 								</span>
+							</PRActionButtons>
+						</PRStatus>
+						{derivedState.currentPullRequest &&
+							derivedState.currentPullRequest.error &&
+							derivedState.currentPullRequest.error.message && (
+								<PRError>
+									<Icon name="alert" />
+									<div>{derivedState.currentPullRequest.error.message}</div>
+								</PRError>
 							)}
-							{isLoadingBranch ? (
-								<Icon name="sync" className="spin" />
-							) : (
-								<span className={cantCheckoutReason ? "disabled" : ""}>
-									<Icon
-										title={
-											<>
-												Checkout Branch
-												{cantCheckoutReason && (
-													<div className="subtle smaller" style={{ maxWidth: "200px" }}>
-														Disabled: {cantCheckoutReason}
-													</div>
-												)}
-											</>
-										}
-										trigger={["hover"]}
-										delay={1}
-										onClick={checkout}
-										placement="bottom"
-										name="repo"
-									/>
-								</span>
-							)}
-							<span>
-								<Icon
-									title="Reload"
-									trigger={["hover"]}
-									delay={1}
-									onClick={() => reload("Reloading...")}
-									placement="bottom"
-									className={`${isLoadingPR ? "spin" : ""}`}
-									name="refresh"
-								/>
-							</span>
-							<span>
-								<CancelButton className="button" title="Close" onClick={exit} />
-							</span>
-						</PRActionButtons>
-					</PRStatus>
-					<Tabs style={{ marginTop: 0 }}>
-						<Tab onClick={e => setActiveTab(1)} active={activeTab == 1}>
-							<Icon name="comment" />
-							<span className="wide-text">Conversation</span>
-							<PRBadge>{numComments}</PRBadge>
-						</Tab>
-						<Tab onClick={e => setActiveTab(2)} active={activeTab == 2}>
-							<Icon name="git-commit" />
-							<span className="wide-text">Commits</span>
-							<PRBadge>{pr.commits.totalCount}</PRBadge>
-						</Tab>
-						{/*
+						<Tabs style={{ marginTop: 0 }}>
+							<Tab onClick={e => setActiveTab(1)} active={activeTab == 1}>
+								<Icon name="comment" />
+								<span className="wide-text">Conversation</span>
+								<PRBadge>{numComments}</PRBadge>
+							</Tab>
+							<Tab onClick={e => setActiveTab(2)} active={activeTab == 2}>
+								<Icon name="git-commit" />
+								<span className="wide-text">Commits</span>
+								<PRBadge>{pr.commits.totalCount}</PRBadge>
+							</Tab>
+							{/*
 		<Tab onClick={e => setActiveTab(3)} active={activeTab == 3}>
 			<Icon name="check" />
 			<span className="wide-text">Checks</span>
 			<PRBadge>{pr.numChecks}</PRBadge>
 		</Tab>
 		 */}
-						<Tab onClick={e => setActiveTab(4)} active={activeTab == 4}>
-							<Icon name="plus-minus" />
-							<span className="wide-text">Files Changed</span>
-							<PRBadge>{pr.files.totalCount}</PRBadge>
-						</Tab>
+							<Tab onClick={e => setActiveTab(4)} active={activeTab == 4}>
+								<Icon name="plus-minus" />
+								<span className="wide-text">Files Changed</span>
+								<PRBadge>{pr.files.totalCount}</PRBadge>
+							</Tab>
 
-						{pr.pendingReview ? (
-							<PRSubmitReviewButton>
-								<Button variant="success" onClick={() => setFinishReviewOpen(!finishReviewOpen)}>
-									Finish<span className="wide-text"> review</span>
-									<PRBadge>
-										{pr.pendingReview.comments ? pr.pendingReview.comments.totalCount : 0}
-									</PRBadge>
-									<Icon name="chevron-down" />
-								</Button>
-								{finishReviewOpen && (
-									<PullRequestFinishReview
-										pr={pr}
-										mode="dropdown"
+							{pr.pendingReview ? (
+								<PRSubmitReviewButton>
+									<Button variant="success" onClick={() => setFinishReviewOpen(!finishReviewOpen)}>
+										Finish<span className="wide-text"> review</span>
+										<PRBadge>
+											{pr.pendingReview.comments ? pr.pendingReview.comments.totalCount : 0}
+										</PRBadge>
+										<Icon name="chevron-down" />
+									</Button>
+									{finishReviewOpen && (
+										<PullRequestFinishReview
+											pr={pr}
+											mode="dropdown"
+											fetch={fetch}
+											setIsLoadingMessage={setIsLoadingMessage}
+											setFinishReviewOpen={setFinishReviewOpen}
+										/>
+									)}
+								</PRSubmitReviewButton>
+							) : (
+								<PRPlusMinus>
+									<span className="added">
+										+
+										{!pr.files
+											? 0
+											: pr.files.nodes
+													.map(_ => _.additions)
+													.reduce((acc, val) => acc + val, 0)
+													.toString()
+													.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
+									</span>{" "}
+									<span className="deleted">
+										-
+										{!pr.files
+											? 0
+											: pr.files.nodes
+													.map(_ => _.deletions)
+													.reduce((acc, val) => acc + val, 0)
+													.toString()
+													.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
+									</span>
+								</PRPlusMinus>
+							)}
+						</Tabs>
+					</PRHeader>
+					{!derivedState.composeCodemarkActive && (
+						<ScrollBox>
+							<div className="channel-list vscroll" style={{ paddingTop: "10px" }}>
+								{activeTab === 1 && (
+									<PullRequestConversationTab
+										ghRepo={ghRepo}
 										fetch={fetch}
+										autoCheckedMergeability={autoCheckedMergeability}
+										checkMergeabilityStatus={checkMergeabilityStatus}
 										setIsLoadingMessage={setIsLoadingMessage}
-										setFinishReviewOpen={setFinishReviewOpen}
 									/>
 								)}
-							</PRSubmitReviewButton>
-						) : (
-							<PRPlusMinus>
-								<span className="added">
-									+
-									{!pr.files
-										? 0
-										: pr.files.nodes
-												.map(_ => _.additions)
-												.reduce((acc, val) => acc + val)
-												.toString()
-												.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-								</span>{" "}
-								<span className="deleted">
-									-
-									{!pr.files
-										? 0
-										: pr.files.nodes
-												.map(_ => _.deletions)
-												.reduce((acc, val) => acc + val)
-												.toString()
-												.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-								</span>
-							</PRPlusMinus>
-						)}
-					</Tabs>
-				</PRHeader>
-				{!derivedState.composeCodemarkActive && (
-					<ScrollBox>
-						<div className="channel-list vscroll">
-							{activeTab === 1 && (
-								<PullRequestConversationTab
-									pr={pr}
-									ghRepo={ghRepo}
-									fetch={fetch}
-									autoCheckedMergeability={autoCheckedMergeability}
-									checkMergeabilityStatus={checkMergeabilityStatus}
-									setIsLoadingMessage={setIsLoadingMessage}
-								/>
-							)}
-							{activeTab === 2 && <PullRequestCommitsTab pr={pr} ghRepo={ghRepo} fetch={fetch} />}
-							{activeTab === 4 && (
-								<PullRequestFilesChangedTab
-									key="files-changed"
-									pr={pr}
-									ghRepo={ghRepo}
-									fetch={fetch}
-								/>
-							)}
-						</div>
-					</ScrollBox>
-				)}
-			</Root>
+								{activeTab === 2 && <PullRequestCommitsTab pr={pr} ghRepo={ghRepo} fetch={fetch} />}
+								{activeTab === 4 && (
+									<PullRequestFilesChangedTab
+										key="files-changed"
+										pr={pr}
+										fetch={fetch}
+										setIsLoadingMessage={setIsLoadingMessage}
+									/>
+								)}
+							</div>
+						</ScrollBox>
+					)}
+					{!derivedState.composeCodemarkActive && derivedState.currentPullRequestCommentId && (
+						<PullRequestFileComments
+							pr={pr}
+							fetch={fetch}
+							setIsLoadingMessage={setIsLoadingMessage}
+							commentId={derivedState.currentPullRequestCommentId}
+							quote={() => {}}
+							onClose={closeFileComments}
+						/>
+					)}
+				</Root>
+			</ThemeProvider>
 		);
 	}
 };

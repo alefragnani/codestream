@@ -61,6 +61,9 @@ export const PRCommitCard = styled.div`
 		border-radius: 0 0 5px 5px;
 		border: 1px solid var(--base-border-color);
 	}
+	&:first-child:last-child {
+		border-radius: 5px;
+	}
 `;
 
 export const PRCommitDay = styled.div`
@@ -103,7 +106,9 @@ export const PullRequestCommitsTab = props => {
 	const derivedState = useSelector((state: CodeStreamState) => {
 		return {
 			providerPullRequests: state.providerPullRequests.pullRequests,
-			currentPullRequestId: state.context.currentPullRequestId
+			currentPullRequestId: state.context.currentPullRequest
+				? state.context.currentPullRequest.id
+				: undefined
 		};
 	});
 
@@ -203,9 +208,7 @@ export const PullRequestCommitsTab = props => {
 												className="clickable"
 												onClick={() => copy(commit.abbreviatedOid)}
 											/>
-											<Link
-												href={pr.url.replace(/\/pull\/\d+$/, `/tree/${commit.abbreviatedOid}`)}
-											>
+											<Link href={pr.url.replace(/\/pull\/\d+$/, `/tree/${commit.abbreviatedOid}`)}>
 												<Icon
 													title="Browse the repository at this point in the history on GitHub"
 													className="clickable"

@@ -1,11 +1,14 @@
 "use strict";
-import { pull } from "lodash-es";
+import { differenceWith } from "lodash-es";
 import { CSMe } from "protocol/api.protocol";
+import { URI } from "vscode-uri";
+import { SessionContainer } from "../container";
 import { Logger } from "../logger";
 import {
 	AddEnterpriseProviderRequest,
 	AddEnterpriseProviderRequestType,
 	AddEnterpriseProviderResponse,
+	ChangeDataType,
 	ConfigureThirdPartyProviderRequest,
 	ConfigureThirdPartyProviderRequestType,
 	ConfigureThirdPartyProviderResponse,
@@ -18,6 +21,7 @@ import {
 	CreateThirdPartyPostRequest,
 	CreateThirdPartyPostRequestType,
 	CreateThirdPartyPostResponse,
+	DidChangeDataNotificationType,
 	DisconnectThirdPartyProviderRequest,
 	DisconnectThirdPartyProviderRequestType,
 	DisconnectThirdPartyProviderResponse,
@@ -36,12 +40,18 @@ import {
 	FetchThirdPartyCardWorkflowResponse,
 	FetchThirdPartyChannelsRequest,
 	FetchThirdPartyChannelsRequestType,
-	FetchThirdPartyChannelsResponse, FetchThirdPartyPullRequestCommitsRequest, FetchThirdPartyPullRequestCommitsType,
+	FetchThirdPartyChannelsResponse,
+	FetchThirdPartyPullRequestCommitsRequest,
+	FetchThirdPartyPullRequestCommitsType,
 	FetchThirdPartyPullRequestRequest,
 	FetchThirdPartyPullRequestRequestType,
+	GetMyPullRequestsResponse,
 	MoveThirdPartyCardRequest,
 	MoveThirdPartyCardRequestType,
 	MoveThirdPartyCardResponse,
+	PullRequestsChangedData,
+	QueryThirdPartyRequest,
+	QueryThirdPartyRequestType,
 	RemoveEnterpriseProviderRequest,
 	RemoveEnterpriseProviderRequestType,
 	UpdateThirdPartyStatusRequest,
@@ -76,10 +86,139 @@ export * from "./azuredevops";
 export * from "./slack";
 export * from "./msteams";
 export * from "./okta";
+export * from "./clubhouse";
+
+const PR_QUERIES = [
+	{
+		name: "is waiting on your review",
+		query: `is:pr review-requested:@me -author:@me`
+	},
+	{
+		name: "was assigned to you",
+		query: `is:pr assignee:@me -author:@me`
+	}
+];
+
+interface ProviderPullRequests {
+	providerName: string;
+	queriedPullRequests: GetMyPullRequestsResponse[][];
+}
 
 @lsp
 export class ThirdPartyProviderRegistry {
-	constructor(public readonly session: CodeStreamSession) {}
+	private _lastProvidersPRs: ProviderPullRequests[] | undefined;
+	private _pollingInterval: NodeJS.Timer | undefined;
+
+	constructor(public readonly session: CodeStreamSession) {
+		this._pollingInterval = setInterval(this.pullRequestsStateHandler.bind(this), 60000);
+	}
+
+	private async pullRequestsStateHandler() {
+		// TODO FIXME -- should read from something in the usersManager
+		const user = await SessionContainer.instance().session.api.meUser;
+		if (!user) return;
+
+		const providers = this.getConnectedProviders(user, (p): p is ThirdPartyIssueProvider &
+			ThirdPartyProviderSupportsPullRequests => {
+			const thirdPartyIssueProvider = p as ThirdPartyIssueProvider;
+			const name = thirdPartyIssueProvider.getConfig().name;
+			return name === "github" || name === "github_enterprise";
+		});
+		const providersPullRequests: ProviderPullRequests[] = [];
+
+		for (const provider of providers) {
+			try {
+				const pullRequests = await provider.getMyPullRequests({
+					queries: PR_QUERIES.map(_ => _.query)
+				});
+
+				if (pullRequests) {
+					providersPullRequests.push({
+						providerName: provider.name,
+						queriedPullRequests: pullRequests
+					});
+				}
+			} catch (ex) {
+				const errorString = typeof ex === "string" ? ex : ex.message;
+				if (
+					errorString &&
+					(errorString.indexOf("ENOTFOUND") > -1 ||
+						errorString.indexOf("ETIMEDOUT") > -1 ||
+						errorString.indexOf("EAI_AGAIN") > -1 ||
+						errorString.indexOf("ECONNRESET") > -1 ||
+						errorString.indexOf("ENETDOWN") > -1 ||
+						errorString.indexOf("socket disconnected before secure") > -1)
+				) {
+					// ignore network related errors.
+					return;
+				}
+				throw ex;
+			}
+		}
+
+		const newProvidersPRs = this.getProvidersPRsDiff(providersPullRequests);
+		this._lastProvidersPRs = providersPullRequests;
+
+		this.fireNewPRsNotifications(newProvidersPRs);
+	}
+
+	private getProvidersPRsDiff = (providersPRs: ProviderPullRequests[]): ProviderPullRequests[] => {
+		const newProvidersPRs: ProviderPullRequests[] = [];
+		if (this._lastProvidersPRs === undefined) {
+			return [];
+		}
+
+		providersPRs.map(providerPRs => {
+			const previousProviderPRs = this._lastProvidersPRs?.find(
+				_ => _.providerName === providerPRs.providerName
+			);
+			if (!previousProviderPRs) {
+				return;
+			}
+
+			const queriedPullRequests: GetMyPullRequestsResponse[][] = [];
+			providerPRs.queriedPullRequests.map(
+				(pullRequests: GetMyPullRequestsResponse[], index: number) => {
+					queriedPullRequests.push(
+						differenceWith(
+							pullRequests,
+							previousProviderPRs.queriedPullRequests[index],
+							(value, other) => value.id === other.id
+						)
+					);
+				}
+			);
+
+			newProvidersPRs.push({
+				providerName: providerPRs.providerName,
+				queriedPullRequests
+			});
+		});
+
+		return newProvidersPRs;
+	};
+
+	private fireNewPRsNotifications(providersPRs: ProviderPullRequests[]) {
+		const prNotificationMessages: PullRequestsChangedData[] = [];
+
+		providersPRs.map(_ =>
+			_.queriedPullRequests.map((pullRequests: GetMyPullRequestsResponse[], queryIndex: number) => {
+				prNotificationMessages.push(
+					...pullRequests.map(pullRequest => ({
+						queryName: PR_QUERIES[queryIndex].name,
+						pullRequest
+					}))
+				);
+			})
+		);
+
+		if (prNotificationMessages.length > 0) {
+			SessionContainer.instance().session.agent.sendNotification(DidChangeDataNotificationType, {
+				type: ChangeDataType.PullRequests,
+				data: prNotificationMessages
+			});
+		}
+	}
 
 	@log()
 	@lspHandler(ConnectThirdPartyProviderRequestType)
@@ -404,9 +543,17 @@ export class ThirdPartyProviderRegistry {
 		}
 		let result = undefined;
 		try {
-			const pullRequestProvider = this.getPullRequestProvider(provider);
-			await pullRequestProvider.ensureConnected();
-			const response = (pullRequestProvider as any)[request.method](request.params);
+			try {
+				await provider.ensureConnected();
+			} catch (err) {
+				Logger.error(err, `ensureConnected failed for ${request.providerId}`);
+			}
+			try {
+				await provider.ensureInitialized();
+			} catch (err) {
+				Logger.error(err, `ensureInitialized failed for ${request.providerId}`);
+			}
+			const response = (provider as any)[request.method](request.params);
 			result = await response;
 		} catch (ex) {
 			Logger.error(ex, "executeMethod failed", {
@@ -415,6 +562,64 @@ export class ThirdPartyProviderRegistry {
 			throw ex;
 		}
 		return result;
+	}
+
+	@log({
+		prefix: (context, args) => `${context.prefix}:${args.method}`
+	})
+	@lspHandler(QueryThirdPartyRequestType)
+	async queryThirdParty(request: QueryThirdPartyRequest) {
+		if (!request || !request.url) {
+			Logger.warn(`queryThirdParty: no url found, returning`);
+			return undefined;
+		}
+		try {
+			const uri = URI.parse(request.url);
+			const providers = getRegisteredProviders();
+			for (const provider of providers.filter(_ => {
+				const provider = _ as ThirdPartyIssueProvider & ThirdPartyProviderSupportsPullRequests;
+				try {
+					return provider.supportsPullRequests != undefined && provider.supportsPullRequests();
+				} catch {
+					return false;
+				}
+			})) {
+				try {
+					const thirdPartyIssueProvider = provider as ThirdPartyIssueProvider &
+						ThirdPartyProviderSupportsPullRequests;
+					let isConnected;
+					try {
+						// this can throw -- ignore failures
+						await provider.ensureConnected();
+						isConnected = true;
+					} catch {}
+					if (!isConnected) continue;
+
+					const fn = thirdPartyIssueProvider.getIsMatchingRemotePredicate();
+					if (fn && fn({ domain: uri.authority })) {
+						const id = provider.getConfig().id;
+						Logger.log(
+							`queryThirdParty: found matching provider for ${uri.authority}. providerId=${id}`
+						);
+						return {
+							providerId: id
+						};
+					}
+				} catch (err) {
+					// only warn the log here as `fn` might fail.
+					Logger.warn(err, "queryThirdParty: provider failed", {
+						url: request.url
+					});
+				}
+			}
+		} catch (ex) {
+			Logger.error(ex, "queryThirdParty: generic failure", {
+				url: request.url
+			});
+		}
+
+		Logger.log(`queryThirdParty: no matching provider found for ${request.url}`);
+		return undefined;
 	}
 
 	private getPullRequestProvider(
@@ -452,5 +657,41 @@ export class ThirdPartyProviderRegistry {
 		return this.getProviders(
 			(p): p is T => p.isConnected(user) && (predicate == null || predicate(p))
 		);
+	}
+
+	providerSupportsPullRequests(providerId?: string) {
+		try {
+			if (!providerId) return false;
+			const providers = this.getProviders().filter(
+				(_: ThirdPartyProvider) => _.getConfig().id === providerId
+			);
+			if (!providers || !providers.length) return false;
+			return this.getPullRequestProvider(providers[0]);
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Given a user, return if there are any providers connected
+	 * that support PullRequest creation
+	 *
+	 * @param user
+	 */
+	async getConnectedPullRequestProviders(user: CSMe) {
+		const connectedProviders = this.getConnectedProviders(user, (p): p is ThirdPartyProvider &
+			ThirdPartyProviderSupportsPullRequests => {
+			const thirdPartyProvider = p as ThirdPartyProvider;
+			const name = thirdPartyProvider.getConfig().name;
+			return (
+				name === "github" ||
+				name === "gitlab" ||
+				name === "github_enterprise" ||
+				name === "gitlab_enterprise" ||
+				name === "bitbucket" ||
+				name === "bitbucket_server"
+			);
+		});
+		return connectedProviders;
 	}
 }

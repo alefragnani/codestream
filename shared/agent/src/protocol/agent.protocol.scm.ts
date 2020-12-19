@@ -1,6 +1,6 @@
 "use strict";
 import { Range, RequestType } from "vscode-languageserver-protocol";
-import { ModifiedFile } from "./api.protocol";
+import { CSRepository, CSTeam, CSUser, ModifiedFile } from "./api.protocol";
 
 export interface GetBranchesRequest {
 	uri: string;
@@ -96,6 +96,7 @@ export interface GetRepoScmStatusRequest {
 	includeSaved: boolean;
 	includeStaged: boolean;
 	currentUserEmail: string;
+	skipAuthorsCalculation?: boolean;
 }
 
 export interface CoAuthors {
@@ -168,6 +169,15 @@ export interface ReposScm {
 	 * only returned if includeProviders is set
 	 */
 	providerGuess?: string;
+	/**
+	 * this has a subset of what GitRemote has
+	 */
+	remotes?: { repoPath: string; path: string; domain: string }[];
+	/**
+	 * If this repo has a remote that is managed and connected to a provider,
+	 * return the providerId
+	 */
+	providerId?: string;
 }
 
 export interface GetReposScmRequest {
@@ -181,9 +191,13 @@ export interface GetReposScmRequest {
 	 */
 	includeCurrentBranches?: boolean;
 	/**
-	 * Set this flag to also return the provider for each repo
+	 * Set this flag to also return the remotes for each repo as well as a provider guess
 	 */
 	includeProviders?: boolean;
+	/**
+	 * Set this flag to also return the providerId if a repo is connected to one
+	 */
+	includeConnectedProviders?: boolean;
 }
 
 export interface GetReposScmResponse {
@@ -212,6 +226,10 @@ export interface GetFileScmInfoResponse {
 		branch?: string;
 	};
 	error?: string;
+	/**
+	 * set if the uri is not of a file scheme
+	 */
+	ignored?: boolean;
 }
 export const GetFileScmInfoRequestType = new RequestType<
 	GetFileScmInfoRequest,
@@ -262,6 +280,10 @@ export interface GetRangeScmInfoResponse {
 			pullRequestReviewId?: string;
 		};
 	};
+	/**
+	 * set if the uri is not of a file scheme
+	 */
+	ignored?: boolean;
 }
 export const GetRangeScmInfoRequestType = new RequestType<
 	GetRangeScmInfoRequest,
@@ -284,6 +306,44 @@ export const GetRangeSha1RequestType = new RequestType<
 	void
 >("codestream/scm/range/sha1");
 
+export interface GetShaDiffsRangesRequest {
+	repoId: string;
+	filePath: string;
+	baseSha: string;
+	headSha: string;
+}
+
+interface linesChanged {
+	start: number;
+	end: number;
+}
+
+export interface GetShaDiffsRangesResponse {
+	baseLinesChanged: linesChanged;
+	headLinesChanged: linesChanged;
+}
+
+export const GetShaDiffsRangesRequestType = new RequestType<
+	GetShaDiffsRangesRequest,
+	GetShaDiffsRangesResponse[],
+	void,
+	void
+>("codestream/scm/sha1/ranges");
+
+export interface GetRangeRequest {
+	uri: string;
+	range: Range;
+}
+export interface GetRangeResponse {
+	currentCommitHash?: string;
+	currentBranch?: string;
+	currentContent?: string;
+	diff?: string;
+}
+export const GetRangeRequestType = new RequestType<GetRangeRequest, GetRangeResponse, void, void>(
+	"codestream/scm/range/content"
+);
+
 export interface GetUserInfoRequest {}
 export interface GetUserInfoResponse {
 	email: string;
@@ -296,6 +356,30 @@ export const GetUserInfoRequestType = new RequestType<
 	void,
 	void
 >("codestream/scm/user/info");
+
+export interface GetWorkspaceRepoInfoRequest {}
+export interface GetWorkspaceRepoInfoResponse {
+	repos: { [path: string]: string[] };
+}
+export const GetWorkspaceRepoInfoRequestType = new RequestType<
+	GetWorkspaceRepoInfoRequest,
+	GetWorkspaceRepoInfoResponse,
+	void,
+	void
+>("codestream/scm/workspace/repos");
+
+export interface GetWorkspaceAutoJoinInfoRequest {}
+export interface GetWorkspaceAutoJoinInfoResponse {
+	admins: CSUser[];
+	team: CSTeam;
+	repo: CSRepository;
+}
+export const GetWorkspaceAutoJoinInfoRequestType = new RequestType<
+	GetWorkspaceAutoJoinInfoRequest,
+	GetWorkspaceAutoJoinInfoResponse[],
+	void,
+	void
+>("codestream/scm/workspace/autojoin");
 
 export interface GetLatestCommittersRequest {}
 export interface GetLatestCommittersResponse {
@@ -369,7 +453,7 @@ export interface FetchForkPointResponse {
 	sha: string;
 	error?: {
 		message?: string;
-		type: "COMMIT_NOT_FOUND";
+		type: "COMMIT_NOT_FOUND" | "REPO_NOT_FOUND";
 	};
 }
 
@@ -379,3 +463,59 @@ export const FetchForkPointRequestType = new RequestType<
 	void,
 	void
 >("codestream/scm/forkPoint");
+
+export interface GetLatestCommitScmRequest {
+	repoId: string;
+	branch: string;
+}
+
+export interface GetLatestCommitScmResponse {
+	shortMessage: string;
+}
+
+export const GetLatestCommitScmRequestType = new RequestType<
+	GetLatestCommitScmRequest,
+	GetLatestCommitScmResponse,
+	void,
+	void
+>("codestream/scm/latestCommit");
+
+export interface DiffBranchesRequest {
+	repoId: string;
+	baseRef: string;
+	headRef?: string;
+}
+
+export interface DiffBranchesResponse {
+	filesChanged?: {
+		patches: any[];
+		data: string;
+	};
+	error?: string;
+}
+
+export const DiffBranchesRequestType = new RequestType<
+	DiffBranchesRequest,
+	DiffBranchesResponse,
+	void,
+	void
+>("codestream/scm/branches/diff");
+
+export interface CommitAndPushRequest {
+	repoId: string;
+	message: string;
+	files: string[];
+	pushAfterCommit: boolean;
+}
+
+export interface CommitAndPushResponse {
+	success: boolean;
+	error?: string;
+}
+
+export const CommitAndPushRequestType = new RequestType<
+	CommitAndPushRequest,
+	CommitAndPushResponse,
+	void,
+	void
+>("codestream/scm/commitAndPush");

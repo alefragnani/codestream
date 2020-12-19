@@ -28,6 +28,10 @@ export class DocMarker {
 		return this._entity.codemarkId;
 	}
 
+	get isReviewDescendant() {
+		return this._entity.codemark && !!this._entity.codemark.reviewId;
+	}
+
 	get color(): string {
 		// TODO: -- Use a setting
 		return "blue";
@@ -83,6 +87,10 @@ export class DocMarker {
 
 	get type(): string {
 		return this._entity.type || "comment";
+	}
+
+	get externalContent() {
+		return this._entity.externalContent;
 	}
 
 	private _dateFormatter?: Dates.IDateFormatter;

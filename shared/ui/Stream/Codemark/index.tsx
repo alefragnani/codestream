@@ -76,6 +76,8 @@ type FromBaseCodemarkProps = Pick<
 	| "renderMarkers"
 	| "renderFooter"
 	| "renderActions"
+	| "noCard"
+	| "post"
 >;
 
 interface PropsWithCodemark extends FromBaseCodemarkProps {
@@ -217,14 +219,24 @@ function CodemarkForCodemark(props: PropsWithCodemark) {
 					editingCodemark={codemark}
 					commentType={codemark.type}
 					onSubmit={async (attributes: NewCodemarkAttributes) => {
-						const { text, assignees, title, relatedCodemarkIds, tags } = attributes;
+						const {
+							text,
+							assignees,
+							title,
+							relatedCodemarkIds,
+							tags,
+							codeBlocks,
+							deleteMarkerLocations
+						} = attributes;
 						await dispatch(
-							editCodemark(props.codemark.id, {
+							editCodemark(props.codemark, {
 								text,
 								title,
 								assignees,
 								relatedCodemarkIds,
-								tags
+								tags,
+								codeBlocks,
+								deleteMarkerLocations
 							})
 						);
 						setIsEditing(false);
@@ -245,6 +257,7 @@ function CodemarkForCodemark(props: PropsWithCodemark) {
 			<BaseCodemark
 				{...baseProps}
 				codemark={codemark}
+				post={props.post}
 				author={derivedState.author!}
 				isFollowing={derivedState.userIsFollowingCodemark}
 				tags={derivedState.tags}

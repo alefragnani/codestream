@@ -1,5 +1,256 @@
 # Change Log
 
+## [10.2.0] - 2020-12-17
+
+### Added
+
+- Adds new onboarding settings for team admins that allow people to join teams based on repository access, and allow admins to restrict integration and authentication options
+- Adds a warning if you have local changes when trying to create a pull request
+- Adds new gear menu to header of the My Team section to access team settings and administration
+
+### Fixed
+
+- Fixes an issue where some users would run into GitHub rate limiting issues when working with pull requests
+- Fixes an issue where the markdown preview for commenting in a pull request was always empty
+- Fixes an issue where adding multiple code blocks to a codemark would result in some not getting added
+- Fixes an issue where a GitHub disconnect banner would incorrectly appear due to lack of internet connectivity
+
+## [10.1.2] - 2020-12-4
+
+### Added
+
+- Adds the "Outdated" label to comments on outdated code displayed in a pull request
+- Improved diff creation for feedback requests so that you should rarley see the “a commit required to perform this review was not found in the local repository” message
+
+### Fixed
+
+- Fixes an issue where multiple lines of code displayed in a code fence were collapsed down to a single line
+- Fixes an issue where Start Work would break if selected a CodeStream issue and the branch template used only {id}
+- Fixes an issue where a feedback request couldn't be submitted against a brand new repo with a single commit
+- Fixes an issue with the "show instructions" link at the bottom of a feedback request that has replies
+- Fixes an off-by-1 issue in the display of comments on the Conversation tab in pull requests
+
+## [10.1.1] - 2020-11-25
+
+### Fixed
+
+- Fixes an issue that prevented you from starting a review when commenting in a pull request
+
+## [10.1.0] - 2020-11-24
+
+### Added
+
+- Add an integration with Clubhouse that allows you to create stories and see your backlog
+- Adds the ability to create a GitHub pull request across forks
+
+### Changed
+
+- Improves the UX on the form to submit a review in a pull request by making it clear that the Cancel button is for cancelling the review, and not dismissing the form
+- Clarifies that when commenting on code outside of the changeset in a pull request, while a review is pending, the comment is added at the PR level and not included in the review
+
+
+### Fixed
+
+- Fixes an issue where the icons for pull request comments would be displayed on the wrong line in the gutter of the diff
+- Fixes an issue that would result in an error trying to view a pull request
+- Addresses [#296](https://github.com/TeamCodeStream/CodeStream/issues/296) &mdash; "Error 401: Unauthorized" when opening a PR on GitLab Self Managed
+- Fixes an issue where the viewed status of files in the pull request would get reset after adding a comment
+- Fixes an issue that prevented the creation of single pull request comments with certain GitHub Enterprise instances
+- Fixes an issue where files would not be displayed in tree view of a pull request if the folder name was a superset of another folder name
+
+## [10.0.5] - 2020-11-13
+
+### Added
+
+- Adds the ability to react to a comment, issue or feedback request, whereas you previously could only react to a reply
+
+### Changed
+
+- Changed the default branch name template to just use the issue's title
+- Clicking on an icon in the gutter of a pull-request diff now scrolls you to the corresponding comment
+- Improved logic for naming repositories to prioritize upstream and origin remotes
+
+### Fixed
+
+- Fixes an issue that prevented pull request comments from being displayed immediately as icons in the diff gutter
+- Fixes an issue that would prevent you from viewing a pull request that had a team as a reviewer
+- Fixes an issue that would generate an error if you reloaded while configuring an on-prem issue tracking/code hosting service
+
+## [10.0.4] - 2020-11-13
+
+### Added
+
+- Adds the ability to mention GitHub collaborators when commenting on a pull request
+- Adds typeahead search when selecting branches for a new pull request
+
+### Changed
+
+- After creating a pull request, when you then close it you are brought to the CodeStream sidebar instead of back to the Open a Pull Request page 
+- Provide more guidance for users trying to sign up/in with GitLab regarding the need to have a public primary email on GitLab
+- The "Work in Progress" section is now more performant, with reduced api requests
+
+### Fixed
+
+- Addresses [#322](https://github.com/TeamCodeStream/CodeStream/issues/322) &mdash; When creating a pull request on GitLab or Bitbucket, CodeStream would try to open it in the IDE instead of on the appropriate service
+- Addresses [#315](https://github.com/TeamCodeStream/CodeStream/issues/315) &mdash; Creating a PR on GitLab Self-Managed switches base branch with compare branch
+- Fixes an issue trying to view a pull request in a repo with more than 100 open or merged pull requests
+- Fixes an issue where our polling for updates to a pull request would trigger an error when the user comes back from beign offline
+- Fixes an issue with Open Local File not working from the Files Changed tab in a pull request
+- Fixes an issue that would prevent you from creating a pull request if you had repos from both GitHub and GitHub Entperise open in your IDE
+
+## [10.0.3] - 2020-11-5
+
+### Added
+
+- Adds support for Azure DevOps issue tracking in the Issues section of the CodeStream pane
+
+### Changed
+
+- After creating a pull request on GitHub Enterprise you are now taken right into the newly created pull request on CodeStream
+- Toast notifications for when you're added as a reviewer or assignee to a pull request are now not limited to open pull requests
+- Better messaging when you try to create a pull request with no repositories open
+- Updated Slack app to use Slack's new granular permissions
+
+### Fixed
+
+- Fixes an issue where pull requests from older versions of GitHub Enterprise wouldn't load
+- Fixes an issue where the list of projects and the list of assignees where not list alphabetically when creating an issue on Azure DevOps
+- Fixes an issue where you'd receive a toast notification when assiging a pull request to yourself
+- Fixes an issue where the default notifications settings weren't being reflected on the Notifications page for new users
+- Fixes an issue where the editing of a range in a mult-range codemark caused a change in the ordering of the ranges
+- Fixes an issue with some modals having two "X"s to dismiss
+- Fixes an issue with ESC not properly dismissing modals/pages
+- Fixes an issue where certain actions would inappropriately land you in spatial view
+
+## [10.0.2] - 2020-10-28
+
+### Added
+
+- Adds the ability, in a codemark with multiple code blocks, to intersperse the blocks of code in the codemark text by refencing them with `[#1]`
+
+### Changed
+
+- Changed reference to "requested a review" in activity feed to "requested feedback"
+- Replaces "upgrade" link under headshot menu with sales@codestream.com for on-prem customers
+- Improve performance and reduce memory usage by caching some expensive git operations
+
+### Fixed
+
+- Addresses [#301](https://github.com/TeamCodeStream/CodeStream/issues/301) &mdash; Creating Feedback Request fails
+- Fixes an issue where, after adding a code comment in a pull request, the icon in the diff gutter would not appear immediately
+- Fixes an issue where creating a pull request or feedback request from the WIP section didn't default to the correct repo
+- Fixes an issue with "/dev/null" entries appearing in list of files when creating a pull request
+- Fixes an issue with the Pull Requests section not immediately appearing if you open a GitHub or GitHub Enterprise repository
+
+## [10.0.1] - 2020-10-16
+
+### Fixed
+
+- Fixes an issue where authentication with your code host would seem to fail if you didn't have a repo from that code host open in your IDE
+
+## [10.0.0] - 2020-10-15
+
+### Added
+
+- Adds the ability to submit a review in a pull request without having to first start a review via a code comment
+- Code Reviews have been renamed Feedback Requests to better reflect the fact that they are more informal, and are used more frequently, to get feedback on your work in progress throughout the development process
+- Adds the ability to jump to your local version of a file from any comment in a pull request
+- Adds two new ways to view changes in a pull request. Tree view, which is similar to the current List view, but organizes the files as they’d appear in a source tree. And Diff Hunks view, which is the same view you’re used to seeing on GitHub. List and Tree view provide full-file context, whereas Diff Hunks shows just the lines that changed.
+- In any of the three views, mark any file as not viewed if you want to indicate to yourself that you need to come back to it again
+- Adds a new Data Export tool, for team admins only, that dumps all code comments (including those done in a feedback request) in CSV format
+
+### Changed
+
+- All-new tree based UI persistently exposes everything you need access to, and everything you need to do
+- The interface for commenting on code has been improved so that you’re clear on what code block, if any, has been selected. It’s also easier to add additional ranges.
+- When there’s a diff between the code in a codemark and the version you have locally, the original version, the current version, and a diff are all included in the codemark. No need to open a separate diff.
+- The Pull Requests section of the sidebar now includes a “Recent” section that shows you your five most recently created PRs, regardless of their current state.
+- When reviewing a pull request and commenting on code that isn't part of the changeset, it's now clear that the comment will be added as a PR-level comment and not as part of the review (due to GitHub's limitations)
+- When in spatial view of codemarks, there are now clearer indicators of when there are other codemarks above or below the fold
+
+### Fixed
+
+- Fixes an issue where the Work in Progress section would not update unless you first visited the Team tab
+
+## [9.1.0] - 2020-10-6
+
+### Changed
+
+- Implemented Google's diff-match-patch as a fallback for maintaining the location of all markers and pull-request comments
+
+### Fixed
+
+- Fixes an issue with long delays in opening diffs in a code review
+- Fixes an issue where the status of viewed files in a PR would get reset if you cancelled the submission of a comment
+- Fixes an issue with codemarks being displayed at the top of a file rather than their correct location
+- Fixes an issue preventing users from creating pull request comments on the last line of a file
+- Fixes an issue that prevented you from closing a pull request from CodeStream
+- Fixes an issue where you couldn't open a pull request diff immediately after opening the repo
+- Fixes an issue where the "Rebase & merge" button in a PR wouldn't work without a reload
+
+## [9.0.2] - 2020-9-28
+
+### Fixed
+
+- Fixes an issue with the GitHub Enterprise configuration step being skipped when connecting from the Pull Requests section of the Tasks tab
+- Fixes an issue where you'd get an error about not having the repo open, when you actually did, when trying to comment on a pull request
+
+## [9.0.1] - 2020-9-23
+
+### Added
+
+- Better error handling for the GitHub pull-request integration, particularly around OAuth issues
+- Adds support for Kerberos when creating pull requests from CodeStream
+- Pull requests now reflect require-reviewers status
+
+### Changed
+
+- Removed the 5-person team size limit for companies on CodeStream's Free plan
+
+### Fixed
+
+- Fixes an issue where the icon would not appear in the editor gutter right away for a newly created codemark
+- Fixes an issue with opening a PR from a repo that you no longer have locally
+- Fixes an issue with the caching of GitHub access tokens
+
+## [9.0.0] - 2020-9-17
+
+### Added
+
+- Adds support for GitHub templates when creating a pull request
+- Adds the ability to create custom GitHub queries to control which pull requests are displayed on the Tasks tab
+- Adds the ability to quickly name a code review or pull request based on ticket name, branch name or commit message
+
+### Changed
+
+- Display of pull requests on the Tasks tab is now broken into sections for Waiting on My Review, Assigned to Me, and Created by Me
+- By default, only pull requests associated with repos you have open in your IDE are display, but you also have the ability to show all pull requests
+- Allows for the selection of remote branches when creating a PR
+- On the Search tab you can now use multiple `tag` arguments to create an AND query
+- When the Current File tab is in list view, multi-range codemarks are now only listed once
+- When creating a codemark, we now remember the last state of the checkbox(es) for any non-member notifications
+- Move cloud authentication options to the top of the signup page
+
+### Fixed
+
+- Fixes an issue with creating codemarks in cshtml files
+- Fixes an issue with creating codemarks in a file in a renamed folder on the file system with a new name that varies only by case
+- Fixes an issue where the position of codemarks could not be determined
+
+## [8.3.7] - 2020-9-9
+
+### Added
+
+- Adds support for GitHub Enterprise to the new Pull Request integration (beta)
+- Adds new keyboard shortcuts for creating pull/merge requests
+
+### Fixed
+
+- Fixes an issue with the repo matching strategy when viewing file diffs in a pull request 
+- Fixes an issue with an unexpected error when opening certain PRs
+- Fixes an issue with CodeStream not correctly recognizing that you're already connected to GitHub when creating a PR
+- Fixes an issue where, after opening a new repo, the list of repos didn't updating automatically when starting work on a ticket, creating a PR, or requesting a code review
+
 ## [8.3.6] - 2020-9-2
 
 ### Fixed

@@ -36,6 +36,7 @@ import { DocumentEventHandler } from "./documentEventHandler";
 import { setGitPath } from "./git/git";
 import { Logger } from "./logger";
 import {
+	AgentInitializedNotificationType,
 	ApiRequestType,
 	ApiVersionCompatibility,
 	BaseAgentOptions,
@@ -640,24 +641,43 @@ export class CodeStreamSession {
 	}
 
 	public async getWorkspaceFolders() {
-		if (this.agent.supportsWorkspaces) {
-			return (await this.workspace.getWorkspaceFolders()) || [];
+		if (this._options.workspaceFolders) {
+			Logger.log(
+				`getWorkspaceFolders: ${this._options.workspaceFolders.length} preconfigured folders found`
+			);
+			return this._options.workspaceFolders;
 		}
 
-		return new Promise<WorkspaceFolder[] | null>(resolve => {
-			if (this.agent.rootUri) {
-				const uri =
-					this.agent.rootUri[this.agent.rootUri.length - 1] === "/"
-						? this.agent.rootUri.substring(0, this.agent.rootUri.length - 1)
-						: this.agent.rootUri;
-				resolve([
-					{
-						uri: uri,
-						name: path.basename(this.agent.rootUri)
-					}
-				]);
-			} else {
-				resolve([]);
+		if (this.agent.supportsWorkspaces) {
+			try {
+				Logger.log("getWorkspaceFolders: workspaces supported");
+				return (await this.workspace.getWorkspaceFolders()) || [];
+			} catch (ex) {
+				// if you're here, ensure you've waited for the agent to be ready
+				debugger;
+			}
+		}
+
+		Logger.log("getWorkspaceFolders: workspaces not supported");
+		return new Promise<WorkspaceFolder[] | null>((resolve, reject) => {
+			try {
+				if (this.agent.rootUri) {
+					const uri =
+						this.agent.rootUri[this.agent.rootUri.length - 1] === "/"
+							? this.agent.rootUri.substring(0, this.agent.rootUri.length - 1)
+							: this.agent.rootUri;
+					resolve([
+						{
+							uri: uri,
+							name: path.basename(this.agent.rootUri)
+						}
+					]);
+				} else {
+					resolve([]);
+				}
+			} catch (e) {
+				Logger.error(e);
+				reject(e);
 			}
 		});
 	}
@@ -797,12 +817,16 @@ export class CodeStreamSession {
 
 		const cc = Logger.getCorrelationContext();
 
-		// after initializing, wait for the initial search of git repositories to complete,
-		// otherwise newly matched repos might be returned to the webview before the bootstrap
-		// request can be processed, resulting in bad repo data known by the webview
-		// see https://trello.com/c/1IjQLhzh - Colin
 		SessionContainer.initialize(this);
-		await SessionContainer.instance().git.ensureSearchComplete();
+		try {
+			// after initializing, wait for the initial search of git repositories to complete,
+			// otherwise newly matched repos might be returned to the webview before the bootstrap
+			// request can be processed, resulting in bad repo data known by the webview
+			// see https://trello.com/c/1IjQLhzh - Colin
+			await SessionContainer.instance().git.ensureSearchComplete();
+		} catch (e) {
+			Logger.error(e, cc);
+		}
 
 		// re-register to acknowledge lsp handlers from newly instantiated classes
 		registerDecoratedHandlers(this.agent);
@@ -1030,16 +1054,16 @@ export class CodeStreamSession {
 		};
 
 		if (team != null) {
+			const company = companies.find(c => c.id === team.companyId);
 			props["Company ID"] = team.companyId;
 			props["Team Created Date"] = new Date(team.createdAt!).toISOString();
-			props["Reporting Group"] = team.reportingGroup;
 			props["Team Name"] = team.name;
 			if (team.memberIds != null) {
 				props["Team Size"] = team.memberIds.length;
 			}
-			const company = companies.find(c => c.id === team.companyId);
 			if (company) {
 				props["Plan"] = company.plan;
+				props["Reporting Group"] = company.reportingGroup;
 				props["Company Name"] = company.name;
 				props["company"] = {
 					id: company.id,

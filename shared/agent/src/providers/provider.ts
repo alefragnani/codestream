@@ -1,11 +1,15 @@
 "use strict";
+import { Agent as HttpsAgent } from "https";
 import fetch, { RequestInit, Response } from "node-fetch";
 import { URI } from "vscode-uri";
+import { InternalError, ReportSuppressedMessages } from "../agentError";
 import { MessageType } from "../api/apiProvider";
-import { User } from "../api/extensions";
+import { MarkerLocation, User } from "../api/extensions";
 import { SessionContainer } from "../container";
-import { GitRemote, GitRepository } from "../git/gitService";
+import { GitRemote, GitRemoteLike, GitRepository } from "../git/gitService";
 import { Logger } from "../logger";
+import { Markerish, MarkerLocationManager } from "../managers/markerLocationManager";
+import { findBestMatchingLine, MAX_RANGE_VALUE } from "../markerLocation/calculator";
 import {
 	AddEnterpriseProviderRequest,
 	AddEnterpriseProviderResponse,
@@ -14,6 +18,7 @@ import {
 	CreateThirdPartyPostRequest,
 	CreateThirdPartyPostResponse,
 	DocumentMarker,
+	DocumentMarkerExternalContent,
 	FetchAssignableUsersRequest,
 	FetchAssignableUsersResponse,
 	FetchThirdPartyBoardsRequest,
@@ -28,6 +33,8 @@ import {
 	FetchThirdPartyPullRequestCommitsResponse,
 	FetchThirdPartyPullRequestRequest,
 	FetchThirdPartyPullRequestResponse,
+	GetMyPullRequestsRequest,
+	GetMyPullRequestsResponse,
 	MoveThirdPartyCardRequest,
 	MoveThirdPartyCardResponse,
 	RemoveEnterpriseProviderRequest,
@@ -36,7 +43,7 @@ import {
 	UpdateThirdPartyStatusRequest,
 	UpdateThirdPartyStatusResponse
 } from "../protocol/agent.protocol";
-import { CSMe, CSProviderInfos } from "../protocol/api.protocol";
+import { CodemarkType, CSMe, CSProviderInfos, CSReferenceLocation } from "../protocol/api.protocol";
 import { CodeStreamSession } from "../session";
 import { Functions, Strings } from "../system";
 
@@ -47,7 +54,7 @@ export const providerDisplayNamesByNameKey = new Map<string, string>([
 	["github", "GitHub"],
 	["github_enterprise", "GitHub Enterprise"],
 	["gitlab", "GitLab"],
-	["gitlab_enterprise", "GitLab Enterprise"],
+	["gitlab_enterprise", "GitLab Self-Managed"],
 	["jira", "Jira"],
 	["jiraserver", "Jira Server"],
 	["trello", "Trello"],
@@ -55,7 +62,8 @@ export const providerDisplayNamesByNameKey = new Map<string, string>([
 	["azuredevops", "Azure DevOps"],
 	["slack", "Slack"],
 	["msteams", "Microsoft Teams"],
-	["okta", "Okta"]
+	["okta", "Okta"],
+	["clubhouse", "Clubhouse"]
 ]);
 
 export interface ThirdPartyProviderSupportsIssues {
@@ -90,8 +98,8 @@ export interface ThirdPartyProviderSupportsPullRequests {
 		request: ProviderCreatePullRequestRequest
 	): Promise<ProviderCreatePullRequestResponse | undefined>;
 	getRepoInfo(request: ProviderGetRepoInfoRequest): Promise<ProviderGetRepoInfoResponse>;
-	getIsMatchingRemotePredicate(): any;
-	getRemotePaths(repo: any, _projectsByRemotePath: any): any;
+	getIsMatchingRemotePredicate(): (remoteLike: GitRemoteLike) => boolean;
+	getRemotePaths(repo: GitRepository, _projectsByRemotePath: any): any;
 
 	getPullRequest(
 		request: FetchThirdPartyPullRequestRequest
@@ -100,6 +108,9 @@ export interface ThirdPartyProviderSupportsPullRequests {
 	getPullRequestCommits(
 		request: FetchThirdPartyPullRequestCommitsRequest
 	): Promise<FetchThirdPartyPullRequestCommitsResponse>;
+	getMyPullRequests(
+		request: GetMyPullRequestsRequest
+	): Promise<GetMyPullRequestsResponse[][] | undefined>;
 }
 
 export namespace ThirdPartyIssueProvider {
@@ -115,7 +126,10 @@ export namespace ThirdPartyIssueProvider {
 	export function supportsPullRequests(
 		provider: ThirdPartyProvider
 	): provider is ThirdPartyProvider & ThirdPartyProviderSupportsPullRequests {
-		return (provider as any).getPullRequestDocumentMarkers !== undefined;
+		return (
+			(provider as any).getPullRequestDocumentMarkers !== undefined ||
+			(provider as any).getMyPullRequests !== undefined
+		);
 	}
 }
 
@@ -134,6 +148,8 @@ export namespace ThirdPartyPostProvider {
 
 export interface ThirdPartyProvider {
 	readonly name: string;
+	readonly displayName: string;
+	readonly icon: string;
 	connect(): Promise<void>;
 	configure(data: { [key: string]: any }): Promise<void>;
 	disconnect(request: ThirdPartyDisconnect): Promise<void>;
@@ -142,6 +158,14 @@ export interface ThirdPartyProvider {
 	getConfig(): ThirdPartyProviderConfig;
 	isConnected(me: CSMe): boolean;
 	ensureConnected(request?: { providerTeamId?: string }): Promise<void>;
+
+	/**
+	 * Do any kind of pre-fetching work, like getting an API version number
+	 *
+	 * @return {*}  {Promise<void>}
+	 * @memberof ThirdPartyProvider
+	 */
+	ensureInitialized(): Promise<void>;
 }
 
 export interface ThirdPartyIssueProvider extends ThirdPartyProvider {
@@ -179,15 +203,34 @@ export abstract class ThirdPartyProviderBase<
 	private _readyPromise: Promise<void> | undefined;
 	protected _ensuringConnection: Promise<void> | undefined;
 	protected _providerInfo: TProviderInfo | undefined;
+	protected _httpsAgent: HttpsAgent | undefined;
 
 	constructor(
 		public readonly session: CodeStreamSession,
 		protected readonly providerConfig: ThirdPartyProviderConfig
-	) {}
+	) {
+		// only for on-prem installations ... if strictSSL is disabled for CodeStream,
+		// assume OK to have it disabled for third-party on-prem providers as well ...
+		// kind of insecure, but easier than other options ... so in this case (and
+		// this case only), establish our own HTTPS agent
+		if ((providerConfig.forEnterprise || providerConfig.isEnterprise) && session.disableStrictSSL) {
+			Logger.log(
+				`${providerConfig.name} provider will use a custom HTTPS agent with strictSSL disabled`
+			);
+			this._httpsAgent = new HttpsAgent({
+				rejectUnauthorized: false
+			});
+		}
+	}
+
+	async ensureInitialized() {}
 
 	abstract get displayName(): string;
 	abstract get name(): string;
 	abstract get headers(): { [key: string]: string };
+	get icon() {
+		return this.name;
+	}
 
 	get accessToken() {
 		return this._providerInfo && this._providerInfo.accessToken;
@@ -442,27 +485,25 @@ export abstract class ThirdPartyProviderBase<
 		init: RequestInit,
 		options: { [key: string]: any } = {}
 	): Promise<ApiResponse<R>> {
+		if (this._providerInfo && this._providerInfo.tokenError) {
+			throw new InternalError(ReportSuppressedMessages.AccessTokenInvalid);
+		}
+
 		const start = process.hrtime();
 
 		let traceResult;
+		let method;
+		let absoluteUrl;
 		try {
-			if (init !== undefined) {
-				if (init === undefined) {
-					init = {};
-				}
+			if (init === undefined) {
+				init = {};
+			}
+			if (this._httpsAgent) {
+				init.agent = this._httpsAgent;
 			}
 
-			// TODO: Get this to work with proxies
-			// if (this._proxyAgent !== undefined) {
-			// 	if (init === undefined) {
-			// 		init = {};
-			// 	}
-
-			// 	init.agent = this._proxyAgent;
-			// }
-
-			const method = (init && init.method) || "GET";
-			const absoluteUrl = options.absoluteUrl ? url : `${this.baseUrl}${url}`;
+			method = (init && init.method) || "GET";
+			absoluteUrl = options.absoluteUrl ? url : `${this.baseUrl}${url}`;
 
 			let json: Promise<R> | undefined;
 			let resp: Response | undefined;
@@ -477,14 +518,17 @@ export abstract class ThirdPartyProviderBase<
 			}
 
 			if (resp !== undefined && !resp.ok) {
-				traceResult = `${this.displayName}: FAILED(${retryCount}x) ${method} ${url}`;
-				throw await this.handleErrorResponse(resp);
+				traceResult = `${this.displayName}: FAILED(${retryCount}x) ${method} ${absoluteUrl}`;
+				const error = await this.handleErrorResponse(resp);
+				throw error;
 			}
 
 			return {
 				body: await json!,
 				response: resp!
 			};
+		} catch (ex) {
+			throw ex;
 		} finally {
 			Logger.log(
 				`${traceResult}${
@@ -601,6 +645,174 @@ export abstract class ThirdPartyIssueProviderBase<
 			if (foundOneWithUrl) request.description += addressesText;
 		}
 		return request.description;
+	}
+
+	protected async isPRApiCompatible(): Promise<boolean> {
+		return true;
+	}
+
+	protected async getCommentsForPath(
+		filePath: string,
+		repo: GitRepository
+	): Promise<PullRequestComment[] | undefined> {
+		return undefined;
+	}
+
+	protected getPRExternalContent(
+		comment: PullRequestComment
+	): DocumentMarkerExternalContent | undefined {
+		return undefined;
+	}
+
+	protected async getPullRequestDocumentMarkersCore({
+		uri,
+		repoId,
+		streamId
+	}: {
+		uri: URI;
+		repoId: string | undefined;
+		streamId: string;
+	}): Promise<DocumentMarker[]> {
+		void (await this.ensureConnected());
+
+		const documentMarkers: DocumentMarker[] = [];
+
+		if (!(await this.isPRApiCompatible())) return documentMarkers;
+
+		const { git, session } = SessionContainer.instance();
+
+		const repo = await git.getRepositoryByFilePath(uri.fsPath);
+		if (repo === undefined) return documentMarkers;
+
+		const comments = await this.getCommentsForPath(uri.fsPath, repo);
+		if (comments === undefined) return documentMarkers;
+
+		const commentsById: { [id: string]: PullRequestComment } = Object.create(null);
+		const markersByCommit = new Map<string, Markerish[]>();
+		const trackingBranch = await git.getTrackingBranch(uri);
+
+		for (const c of comments) {
+			Logger.log(`${this.displayName}.getPullRequestDocumentMarkers: processing comment ${c.id}`);
+
+			if (
+				c.pullRequest.isOpen &&
+				c.pullRequest.targetBranch !== trackingBranch?.shortName &&
+				c.pullRequest.sourceBranch !== trackingBranch?.shortName
+			) {
+				continue;
+			}
+
+			let rev;
+			let line;
+			if (c.line !== -1 && (await git.isValidReference(repo.path, c.commit))) {
+				rev = c.commit;
+				line = c.line;
+			} else if (
+				c.originalLine !== -1 &&
+				c.originalCommit &&
+				(await git.isValidReference(repo.path, c.originalCommit))
+			) {
+				rev = c.originalCommit!;
+				line = c.originalLine;
+			}
+
+			if (rev == undefined || line === undefined || line === -1) {
+				Logger.log(
+					`${this.displayName}.getPullRequestDocumentMarkers: could not get position information comment ${c.id} from PR`
+				);
+				Logger.log(
+					`${this.displayName}.getPullRequestDocumentMarkers: attempting to determine current revision for content-based calculation`
+				);
+				rev = await git.getFileCurrentRevision(uri);
+				if (!rev) {
+					Logger.log(
+						`${this.displayName}.getPullRequestDocumentMarkers: could not determine current revision for file ${uri.fsPath}`
+					);
+					continue;
+				}
+
+				Logger.log(
+					`${this.displayName}.getPullRequestDocumentMarkers: attempting to determine current revision for content-based calculation`
+				);
+				const contents = await git.getFileContentForRevision(uri, rev);
+				if (!contents) {
+					Logger.log(
+						`${this.displayName}.getPullRequestDocumentMarkers: could not read contents of ${uri.fsPath}@${rev} from git`
+					);
+					continue;
+				}
+
+				Logger.log(
+					`${this.displayName}.getPullRequestDocumentMarkers: calculating comment line via content analysis`
+				);
+				line = await findBestMatchingLine(contents, c.code, c.line);
+			}
+
+			Logger.log(
+				`${this.displayName}.getPullRequestDocumentMarkers: comment ${c.id} located at line ${line}, commit ${rev}`
+			);
+
+			let markers = markersByCommit.get(rev);
+			if (markers === undefined) {
+				markers = [];
+				markersByCommit.set(rev, markers);
+			}
+
+			commentsById[c.id] = c;
+			if (line !== -1) {
+				const referenceLocation: CSReferenceLocation = {
+					commitHash: rev,
+					location: [line, 1, line, MAX_RANGE_VALUE, undefined],
+					flags: {
+						canonical: true
+					}
+				};
+				markers.push({
+					id: c.id,
+					referenceLocations: [referenceLocation]
+				});
+			} else {
+				Logger.log(
+					`${this.displayName}.getPullRequestDocumentMarkers: could not find current location for comment ${c.url}`
+				);
+			}
+		}
+
+		const locations = await MarkerLocationManager.computeCurrentLocations(uri, markersByCommit);
+
+		const teamId = session.teamId;
+
+		for (const [id, location] of Object.entries(locations.locations)) {
+			const comment = commentsById[id];
+
+			documentMarkers.push({
+				id: id,
+				codemarkId: undefined,
+				fileUri: uri.toString(),
+				fileStreamId: streamId,
+				// postId: undefined!,
+				// postStreamId: undefined!,
+				repoId: repoId!,
+				teamId: teamId,
+				file: uri.fsPath,
+				// commitHashWhenCreated: revision!,
+				// locationWhenCreated: MarkerLocation.toArray(location),
+				modifiedAt: new Date(comment.createdAt).getTime(),
+				code: "",
+
+				createdAt: new Date(comment.createdAt).getTime(),
+				creatorId: comment.author.id,
+				creatorName: comment.author.nickname,
+				externalContent: this.getPRExternalContent(comment)!,
+				range: MarkerLocation.toRange(location),
+				location: location,
+				summary: comment.text,
+				summaryMarkdown: `\n\n${Strings.escapeMarkdown(comment.text)}`,
+				type: CodemarkType.Comment
+			});
+		}
+
+		return documentMarkers;
 	}
 }
 
@@ -732,9 +944,16 @@ export interface ProviderGetRepoInfoResponse {
 	error?: { message?: string; type: string };
 }
 
+export interface ProviderGetForkedReposResponse {
+	parent?: any;
+	forks?: any[];
+	error?: { message?: string; type: string };
+}
+
 export interface ProviderCreatePullRequestRequest {
 	providerId: string;
-	remote: string;
+	providerRepositoryId?: string /* for use across forks */;
+	remote: string /* to look up the repo ID on the provider */;
 	title: string;
 	description?: string;
 	baseRefName: string;

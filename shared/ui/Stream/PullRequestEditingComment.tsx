@@ -1,22 +1,18 @@
 import React, { useState } from "react";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { CodeStreamState } from "../store";
 import styled from "styled-components";
 import { PRButtonRow } from "./PullRequestComponents";
-import { HostApi } from "../webview-api";
-import {
-	ExecuteThirdPartyTypedType,
-	FetchThirdPartyPullRequestPullRequest
-} from "@codestream/protocols/agent";
+import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/agent";
 import MessageInput from "./MessageInput";
 import { CSMe } from "@codestream/protocols/api";
 import { Button } from "../src/components/Button";
 import { confirmPopup } from "./Confirm";
+import { api } from "../store/providerPullRequests/actions";
 
 interface Props {
 	pr: FetchThirdPartyPullRequestPullRequest;
 	setIsLoadingMessage: Function;
-	fetch: Function;
 	className?: string;
 	id: string;
 	type: "PR" | "ISSUE" | "REVIEW" | "REVIEW_COMMENT";
@@ -25,21 +21,18 @@ interface Props {
 }
 
 export const PullRequestEditingComment = styled((props: Props) => {
-	const { pr, fetch, setIsLoadingMessage, type, id, done } = props;
-	const derivedState = useSelector((state: CodeStreamState) => {
-		const currentUser = state.users[state.session.userId!] as CSMe;
-		return { currentUser, currentPullRequestId: state.context.currentPullRequestId };
-	});
-
+	const dispatch = useDispatch();
+	const { pr, setIsLoadingMessage, type, id, done } = props;
 	const [text, setText] = useState(props.text);
+	const [isPreviewing, setIsPreviewing] = useState(false);
 
 	const handleEdit = async () => {
 		setIsLoadingMessage("Updating Comment...");
 		try {
 			if (text == "" || text == props.text) return;
 
-			await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-				method:
+			await dispatch(
+				api(
 					type === "REVIEW_COMMENT"
 						? "updateReviewComment"
 						: type === "ISSUE"
@@ -47,18 +40,16 @@ export const PullRequestEditingComment = styled((props: Props) => {
 						: type === "PR"
 						? "updatePullRequestBody"
 						: "updateReview",
-				providerId: pr.providerId,
-				params: {
-					pullRequestId: pr.id,
-					id,
-					body: text
-				}
-			});
+					{
+						pullRequestId: pr.id,
+						id,
+						body: text
+					}
+				)
+			);
 
-			fetch().then(() => {
-				setText("");
-				done();
-			});
+			setText("");
+			done();
 		} catch (ex) {
 			console.warn(ex);
 		} finally {
@@ -101,23 +92,26 @@ export const PullRequestEditingComment = styled((props: Props) => {
 
 	return (
 		<>
-			<div style={{ border: "1px solid var(--base-border-color)" }}>
+			<div style={{ border: isPreviewing ? "none" : "1px solid var(--base-border-color)" }}>
 				<MessageInput
 					autoFocus
 					multiCompose
 					text={text}
 					onChange={value => setText(value)}
 					onSubmit={handleEdit}
+					setIsPreviewing={value => setIsPreviewing(value)}
 				/>
 			</div>
-			<PRButtonRow>
-				<Button variant="secondary" onClick={handleCancelEdit}>
-					Cancel
-				</Button>
-				<Button variant="primary" onClick={handleEdit}>
-					Update comment
-				</Button>
-			</PRButtonRow>
+			{!isPreviewing && (
+				<PRButtonRow>
+					<Button variant="secondary" onClick={handleCancelEdit}>
+						Cancel
+					</Button>
+					<Button variant="primary" onClick={handleEdit}>
+						Update comment
+					</Button>
+				</PRButtonRow>
+			)}
 		</>
 	);
 })``;

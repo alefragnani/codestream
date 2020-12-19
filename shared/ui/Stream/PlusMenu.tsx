@@ -12,7 +12,7 @@ import { HostApi } from "../webview-api";
 import { StartWorkNotificationType } from "@codestream/protocols/webview";
 import {
 	setCurrentReview,
-	setCurrentPullRequest,
+	clearCurrentPullRequest,
 	setCreatePullRequest
 } from "../store/context/actions";
 import { ComposeKeybindings } from "./ComposeTitles";
@@ -43,9 +43,9 @@ export function PlusMenu(props: PlusMenuProps) {
 	});
 
 	const handleStartWorkRequest = () => {
-		dispatch(setCurrentPullRequest());
+		dispatch(clearCurrentPullRequest());
 		dispatch(setCurrentReview());
-		if (derivedState.activePanel === WebviewPanels.Status) {
+		if (derivedState.activePanel === WebviewPanels.Sidebar) {
 			const div = document.getElementById("start-work-div");
 			if (div) {
 				div.classList.add("show-instructions");
@@ -56,18 +56,18 @@ export function PlusMenu(props: PlusMenuProps) {
 				}, 1000);
 			}
 		}
-		dispatch(openPanel(WebviewPanels.Status));
+		dispatch(openPanel(WebviewPanels.Sidebar));
 	};
 
 	const go = panel => {
 		dispatch(setCreatePullRequest());
-		dispatch(setCurrentPullRequest());
+		dispatch(clearCurrentPullRequest());
 		dispatch(setCurrentReview());
 		dispatch(openPanel(panel));
 	};
 
 	const menuItems = [] as any;
-	if (derivedState.kickstartEnabled) {
+	if (false && derivedState.kickstartEnabled) {
 		menuItems.push(
 			{
 				icon: <Icon name="ticket" />,
@@ -108,7 +108,7 @@ export function PlusMenu(props: PlusMenuProps) {
 		if (menuItems.length > 0) menuItems.push({ label: "-" });
 		menuItems.push({
 			icon: <Icon name="review" />,
-			label: "Request a Code Review",
+			label: "Request Feedback",
 			subtextWide: "Get quick feedback on your WIP",
 			action: () => go(WebviewPanels.NewReview),
 			shortcut: ComposeKeybindings.review,
@@ -127,6 +127,11 @@ export function PlusMenu(props: PlusMenuProps) {
 	});
 
 	return (
-		<Menu items={menuItems} target={props.menuTarget} action={props.closeMenu} align="popupRight" />
+		<Menu
+			items={menuItems}
+			target={props.menuTarget}
+			action={props.closeMenu}
+			align="bottomRight"
+		/>
 	);
 }

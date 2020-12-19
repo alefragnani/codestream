@@ -9,7 +9,10 @@ import {
 	ThirdPartyProviderConfig,
 	CrossPostIssueValues,
 	GetReviewRequestType,
-	BlameAuthor
+	BlameAuthor,
+	GetShaDiffsRangesRequestType,
+	GetShaDiffsRangesResponse,
+	GetReposScmRequestType
 } from "@codestream/protocols/agent";
 import {
 	CodemarkType,
@@ -29,16 +32,13 @@ import Select from "react-select";
 import {
 	getStreamForId,
 	getStreamForTeam,
-	getChannelStreamsForTeam,
-	getDirectMessageStreamsForTeam,
-	getDMName
+	getChannelStreamsForTeam
 } from "../store/streams/reducer";
 import {
 	mapFilter,
 	arrayToRange,
 	forceAsLine,
 	isRangeEmpty,
-	toMapBy,
 	replaceHtml,
 	keyFilter,
 	safe
@@ -55,7 +55,8 @@ import {
 	EditorSelectRangeRequestType,
 	EditorSelection,
 	EditorHighlightRangeRequestType,
-	WebviewPanels
+	WebviewPanels,
+	WebviewModals
 } from "@codestream/protocols/webview";
 import { getCurrentSelection } from "../store/editorContext/reducer";
 import Headshot from "./Headshot";
@@ -81,10 +82,14 @@ import { isFeatureEnabled } from "../store/apiVersioning/reducer";
 import { FormattedMessage } from "react-intl";
 import { Link } from "./Link";
 import { confirmPopup } from "./Confirm";
-import { openPanel, setUserPreference } from "./actions";
+import { openPanel, openModal, setUserPreference } from "./actions";
 import CancelButton from "./CancelButton";
 import { VideoLink } from "./Flow";
 import { PanelHeader } from "../src/components/PanelHeader";
+import { ReposState } from "../store/repos/types";
+import * as path from "path-browserify";
+import { isOnPrem } from "../store/configs/reducer";
+import { getDocumentFromMarker } from "./api-functions";
 
 export interface ICrossPostIssueContext {
 	setSelectedAssignees(any: any): void;
@@ -119,6 +124,7 @@ interface Props extends ConnectedProps {
 	dontAutoSelectLine?: boolean;
 	error?: string;
 	openPanel: Function;
+	openModal: Function;
 	setUserPreference: Function;
 }
 
@@ -127,14 +133,14 @@ interface ConnectedProps {
 	teamMembers: CSUser[];
 	removedMemberIds: string[];
 	channelStreams: CSChannelStream[];
-	directMessageStreams: CSDirectStream[];
 	channel: CSStream;
 	issueProvider?: ThirdPartyProviderConfig;
 	providerInfo: {
 		[service: string]: {};
 	};
 	currentUser: CSUser;
-	skipPostCreationModal: boolean;
+	skipPostCreationModal?: boolean;
+	skipEmailingAuthors?: boolean;
 	selectedStreams: {};
 	showChannels: string;
 	textEditorUri?: string;
@@ -153,10 +159,12 @@ interface ConnectedProps {
 	currentPullRequestId?: string;
 	textEditorUriContext: any;
 	textEditorUriHasPullRequestContext: boolean;
+	repos: ReposState;
 }
 
 interface State {
 	text: string;
+	touchedText: boolean;
 	formatCode: boolean;
 	type: string;
 	codeBlocks: GetRangeScmInfoResponse[];
@@ -192,6 +200,9 @@ interface State {
 	linkURI?: string;
 	copied: boolean;
 	selectedTags?: any;
+	deleteMarkerLocations: {
+		[index: number]: boolean;
+	};
 	relatedCodemarkIds?: any;
 	addingLocation?: boolean;
 	editingLocation: number;
@@ -201,6 +212,9 @@ interface State {
 	emailAuthors: { [email: string]: boolean };
 	currentPullRequestId?: string;
 	isProviderReview?: boolean;
+	isInsidePrChangeSet: boolean;
+	changedPrLines: GetShaDiffsRangesResponse[];
+	isPreviewing?: boolean;
 }
 
 function merge(defaults: Partial<State>, codemark: CSCodemark): State {
@@ -220,8 +234,10 @@ class CodemarkForm extends React.Component<Props, State> {
 	insertTextAtCursor?: Function;
 	focusOnMessageInput?: Function;
 	permalinkRef = React.createRef<HTMLTextAreaElement>();
+	permalinkWithCodeRef = React.createRef<HTMLTextAreaElement>();
 	private _assigneesContainerRef = React.createRef<HTMLDivElement>();
 	private _sharingAttributes?: SharingAttributes;
+	private renderedCodeBlocks = {};
 
 	constructor(props: Props) {
 		super(props);
@@ -230,6 +246,7 @@ class CodemarkForm extends React.Component<Props, State> {
 			crossPostIssueValues: {},
 			title: "",
 			text: "",
+			touchedText: false,
 			formatCode: false,
 			type: defaultType,
 			codeBlocks: props.codeBlock ? [props.codeBlock] : [],
@@ -252,7 +269,10 @@ class CodemarkForm extends React.Component<Props, State> {
 			scmError: "",
 			unregisteredAuthors: [],
 			emailAuthors: {},
-			isReviewLoading: false
+			isReviewLoading: false,
+			isInsidePrChangeSet: false,
+			changedPrLines: [],
+			deleteMarkerLocations: {}
 		};
 
 		const state = props.editingCodemark
@@ -320,8 +340,14 @@ class CodemarkForm extends React.Component<Props, State> {
 		return null;
 	}
 
-	componentDidMount() {
-		const { multiLocation, dontAutoSelectLine } = this.props;
+	async componentDidMount() {
+		const {
+			multiLocation,
+			dontAutoSelectLine,
+			textEditorUriHasPullRequestContext,
+			textEditorUriContext,
+			isEditing
+		} = this.props;
 		const { codeBlocks } = this.state;
 
 		if (codeBlocks.length === 1) {
@@ -329,7 +355,7 @@ class CodemarkForm extends React.Component<Props, State> {
 				this.selectRangeInEditor(codeBlocks[0].uri, forceAsLine(codeBlocks[0].range));
 			}
 			this.handleScmChange();
-		} else {
+		} else if (!isEditing) {
 			const { textEditorSelection, textEditorUri } = this.props;
 			if (textEditorSelection && textEditorUri) {
 				// In case there isn't already a range selection by user, change the selection to be the line the cursor is on
@@ -341,13 +367,24 @@ class CodemarkForm extends React.Component<Props, State> {
 					const range = isEmpty ? forceAsLine(textEditorSelection) : textEditorSelection;
 					if (isEmpty) this.selectRangeInEditor(textEditorUri, range);
 					this.getScmInfoForSelection(textEditorUri, range, () => {
-						if (multiLocation) this.setState({ addingLocation: true, liveLocation: 1 });
-						else this.focus();
+						// if (multiLocation) this.setState({ addingLocation: true, liveLocation: 1 });
+						this.focus();
 					});
 				}
 			}
 		}
 		// if (!multiLocation) this.focus();
+
+		if (textEditorUriHasPullRequestContext) {
+			const changedPrLines = await HostApi.instance.send(GetShaDiffsRangesRequestType, {
+				repoId: textEditorUriContext.repoId,
+				filePath: textEditorUriContext.path,
+				baseSha: textEditorUriContext.leftSha,
+				headSha: textEditorUriContext.rightSha
+			});
+
+			this.setState({ changedPrLines });
+		}
 	}
 
 	rangesAreEqual(range1?: Range, range2?: Range) {
@@ -386,7 +423,7 @@ class CodemarkForm extends React.Component<Props, State> {
 			// make sure the range didn't change because we switched editors(files)
 			prevProps.textEditorUri == textEditorUri &&
 			// if we're editing, do nothing
-			!isEditing &&
+			// !isEditing &&
 			// if we are doing a permalink, do nothing
 			!this.state.linkURI &&
 			commentType !== "link" &&
@@ -443,6 +480,7 @@ class CodemarkForm extends React.Component<Props, State> {
 		} else {
 			this.setState({ codeBlocks: newCodeBlocks, addingLocation: false }, () => {
 				this.handleScmChange();
+				this.handlePrIntersection();
 				if (callback) callback();
 			});
 		}
@@ -492,6 +530,48 @@ class CodemarkForm extends React.Component<Props, State> {
 		}
 	};
 
+	handlePrIntersection = () => {
+		const { changedPrLines, codeBlocks } = this.state;
+		const { textEditorUriHasPullRequestContext, textEditorUriContext } = this.props;
+
+		if (textEditorUriHasPullRequestContext) {
+			const isInsidePrChangeSet = changedPrLines.some(changedPrLine => {
+				return codeBlocks.some(codeBlock => {
+					const codeBlockStart = codeBlock.range.start.line + 1;
+					const codeBlockEnd = codeBlock.range.end.line + 1;
+
+					if (!codeBlock.scm) {
+						return false;
+					}
+
+					let prRange;
+					switch (codeBlock.scm.branch) {
+						case textEditorUriContext.baseBranch:
+							prRange = changedPrLine.baseLinesChanged;
+							break;
+						case textEditorUriContext.headBranch:
+							prRange = changedPrLine.headLinesChanged;
+							break;
+						default:
+							return false;
+					}
+
+					if (prRange.start > prRange.end) {
+						return false;
+					}
+
+					return (
+						(prRange.start <= codeBlockStart && codeBlockStart <= prRange.end) ||
+						(prRange.start <= codeBlockEnd && codeBlockEnd <= prRange.end) ||
+						(codeBlockStart <= prRange.start && prRange.end <= codeBlockEnd)
+					);
+				});
+			});
+
+			this.setState({ isInsidePrChangeSet });
+		}
+	};
+
 	handleScmChange = () => {
 		const { codeBlocks } = this.state;
 		const { blameMap = {}, inviteUsersOnTheFly, removedMemberIds } = this.props;
@@ -532,7 +612,7 @@ class CodemarkForm extends React.Component<Props, State> {
 					// else offer to send the person an email
 					unregisteredAuthors.push(author);
 					// @ts-ignore
-					emailAuthors[author.email] = true;
+					emailAuthors[author.email] = !this.props.skipEmailingAuthors;
 				}
 			});
 		}
@@ -630,6 +710,7 @@ class CodemarkForm extends React.Component<Props, State> {
 
 		const {
 			codeBlocks,
+			deleteMarkerLocations,
 			isPermalinkPublic,
 			type,
 			title,
@@ -731,6 +812,7 @@ class CodemarkForm extends React.Component<Props, State> {
 		try {
 			const baseAttributes = {
 				codeBlocks,
+				deleteMarkerLocations,
 				text: replaceHtml(text)!,
 				type: type as CodemarkType,
 				assignees: csAssignees,
@@ -775,6 +857,8 @@ class CodemarkForm extends React.Component<Props, State> {
 	};
 
 	showConfirmationForCodemarkLocation = (type, numCodeblocks: number) => {
+		// we're going to turn this off since we have a consistent place to see comments
+		return;
 		if (this.props.skipPostCreationModal) return;
 
 		confirmPopup({
@@ -963,22 +1047,35 @@ class CodemarkForm extends React.Component<Props, State> {
 	};
 
 	deleteLocation = (index: number, event?: React.SyntheticEvent) => {
+		const { editingCodemark } = this.props;
 		if (event) event.stopPropagation();
 		let newCodeBlocks = [...this.state.codeBlocks];
 		newCodeBlocks.splice(index, 1);
-		this.setState({
-			locationMenuOpen: "closed",
-			codeBlocks: newCodeBlocks
-		});
+		this.setState(
+			{
+				locationMenuOpen: "closed",
+				codeBlocks: newCodeBlocks
+			},
+			() => {
+				this.handlePrIntersection();
+			}
+		);
+		if (editingCodemark) {
+			this.setState({
+				deleteMarkerLocations: { ...this.state.deleteMarkerLocations, [index]: true }
+			});
+		}
 		this.addLocation();
 		this.focus();
 	};
 
 	addLocation = () => {
+		const { editingCodemark } = this.props;
+		const markersLength = editingCodemark ? (editingCodemark.markers || []).length : 0;
 		this.setState(state => ({
 			locationMenuOpen: "closed",
 			addingLocation: true,
-			liveLocation: state.codeBlocks.length
+			liveLocation: Math.max(state.codeBlocks.length, markersLength)
 		}));
 		if (this.props.setMultiLocation && !this.props.multiLocation) this.props.setMultiLocation(true);
 	};
@@ -995,13 +1092,22 @@ class CodemarkForm extends React.Component<Props, State> {
 			else if (file !== newFile) location = "Different File";
 		} catch (e) {}
 
-		this.addLocation();
+		this.setState(state => ({
+			locationMenuOpen: "closed",
+			addingLocation: false,
+			liveLocation: -1
+		}));
+		// this.addLocation();
 		this.focus();
 	};
 
 	jumpToLocation = (index: number, event?: React.SyntheticEvent) => {
 		if (event) event.stopPropagation();
 		this.toggleCodeHighlightInTextEditor(true, index);
+	};
+
+	pinLocation = (index: number, event?: React.SyntheticEvent) => {
+		this.insertTextAtCursor && this.insertTextAtCursor(`[#${index + 1}]`);
 	};
 
 	selectLocation = (action: "add" | "edit" | "delete") => {
@@ -1112,6 +1218,7 @@ class CodemarkForm extends React.Component<Props, State> {
 	};
 
 	renderSharingControls = () => {
+		if (this.state.isPreviewing) return null;
 		if (this.props.isEditing) return null;
 		if (this.props.currentReviewId) return null;
 		// don't show the sharing controls for these types of diffs
@@ -1186,162 +1293,6 @@ class CodemarkForm extends React.Component<Props, State> {
 		if (event.key == "Enter") return this.switchChannel(event);
 	};
 
-	renderCrossPostMessage = commentType => {
-		const { selectedStreams, showChannels } = this.props;
-		const { showAllChannels, selectedChannelId } = this.state;
-		// if (this.props.slackInfo || this.props.providerInfo.slack) {
-		const items: {
-			label?: string;
-			searchLabel?: string;
-			action?: CSStream | "show-all" | "search";
-			key?: string;
-			type?: string;
-			placeholder?: string;
-		}[] = [];
-
-		// let labelMenuItems: any = [{ label: "None", action: "" }, { label: "-" }];
-
-		// labelMenuItems = labelMenuItems.concat(
-		// 	COLOR_OPTIONS.map(color => {
-		// 		return {
-		// 			label: (
-		// 				<span className={`${color}-color`}>
-		// 					<Icon name={commentType} /> {color}
-		// 				</span>
-		// 			),
-		// 			action: color
-		// 		};
-		// 	})
-		// );
-		// labelMenuItems.push({ label: "-" });
-		// labelMenuItems.push({ label: "Edit Labels", action: "edit" });
-
-		let firstChannel;
-		let selectedChannelName = "";
-		const filterSelected = showChannels === "selected" && !showAllChannels;
-		this.props.channelStreams.forEach(channel => {
-			if (channel.isArchived || (filterSelected && !selectedStreams[channel.id])) return;
-
-			if (channel.id === selectedChannelId) {
-				selectedChannelName = "#" + channel.name!;
-			}
-			if (!firstChannel) {
-				firstChannel = channel;
-			}
-
-			items.push({
-				label: `#${channel.name}`,
-				action: channel,
-				key: channel.id,
-				searchLabel: `#${channel.name}`
-			});
-		});
-
-		if (this.props.directMessageStreams.length > 0) {
-			items.push({ label: "-" });
-
-			let firstDM = items.length;
-
-			const currentUserId = this.props.currentUser.id;
-			_sortBy(this.props.directMessageStreams, (stream: CSDirectStream) =>
-				(stream.name || "").toLowerCase()
-			).forEach((channel: CSDirectStream) => {
-				if (
-					channel.isArchived ||
-					(channel.isClosed && items.length - firstDM > 10) ||
-					(filterSelected && !selectedStreams[channel.id])
-				) {
-					return;
-				}
-
-				if (channel.id === selectedChannelId) {
-					selectedChannelName = "@" + channel.name!;
-				}
-				if (!firstChannel) {
-					firstChannel = channel;
-				}
-
-				const item = {
-					label: channel.name!,
-					action: channel,
-					key: channel.id,
-					searchLabel: channel.name!
-				};
-				// Ensure Slackbot is first (if there), then your own DM
-				if (channel.memberIds.length === 2 && channel.memberIds.includes("USLACKBOT")) {
-					items.splice(firstDM, 0, item);
-					firstDM++;
-				} else if (channel.memberIds.length === 1 && channel.memberIds[0] === currentUserId) {
-					items.splice(firstDM, 0, item);
-				} else {
-					items.push(item);
-				}
-			});
-		}
-
-		// if we don't have a name set here, that means you've filtered to a set
-		// of streams that doesn't include your currently selected stream. so
-		// we need to select it
-		if (selectedChannelName.length === 0 && firstChannel) this.selectChannel(firstChannel);
-
-		// if there is only 1 item, say #general,
-		// in that case, the user hasn't added channels yet, or
-		// invited users, so it's not helpful/useful to give them an option
-		// they can't use.
-		if (items.length === 1 && showChannels !== "selected") return null;
-
-		if (filterSelected) {
-			items.push({ label: "-" });
-			items.push({ label: "Show All Channels & DMs", action: "show-all" });
-		}
-
-		if (items.length >= 1) {
-			items.unshift({ label: "-" });
-			items.unshift({ type: "search", placeholder: "Search...", action: "search" });
-		}
-
-		return (
-			<div key="crosspost" className="checkbox-row" style={{ float: "left" }}>
-				{/*<input type="checkbox" checked={this.state.crossPostMessage} /> */} Post to{" "}
-				<span
-					className="channel-label"
-					onClick={this.switchChannel}
-					onKeyPress={this.handleKeyPress}
-					tabIndex={this.tabIndex()}
-				>
-					{selectedChannelName}
-					<Icon name="chevron-down" />
-					{this.state.channelMenuOpen && (
-						<Menu
-							title="Post to..."
-							align="center"
-							target={this.state.channelMenuTarget}
-							items={items}
-							action={this.selectChannel}
-						/>
-					)}
-				</span>
-			</div>
-		);
-		// }
-		// else {
-		// 	return (
-		// 		<div className="checkbox-row connect-messaging" onClick={this.toggleCrossPostMessage}>
-		// 			Post to
-		// 			<span className="service" onClick={this.handleClickConnectSlack}>
-		// 				<Icon className="slack" name="slack" />
-		// 				Slack
-		// 			</span>
-		// 			{this.state.isLoading && (
-		// 				<span>
-		// 					<Icon className="spin" name="sync" /> Syncing channels...
-		// 				</span>
-		// 			)}
-		// 		</div>
-		// 	);
-		// }
-	};
-
 	handleChange = (text, formatCode) => {
 		// track newPostText as the user types
 		this.setState({ text, formatCode });
@@ -1384,53 +1335,53 @@ class CodemarkForm extends React.Component<Props, State> {
 		this.setState({ relatedCodemarkIds: codemarkIds });
 	};
 
-	renderCodeblock(marker) {
-		if (marker === undefined) return;
+	// renderCodeblock(marker) {
+	// 	if (marker === undefined) return;
 
-		const path = marker.file || "";
-		let extension = paths.extname(path).toLowerCase();
-		if (extension.startsWith(".")) {
-			extension = extension.substring(1);
-		}
+	// 	const path = marker.file || "";
+	// 	let extension = paths.extname(path).toLowerCase();
+	// 	if (extension.startsWith(".")) {
+	// 		extension = extension.substring(1);
+	// 	}
 
-		let startLine = 1;
-		// `range` is not a property of CSMarker
-		/* if (marker.range) {
-			startLine = marker.range.start.line;
-		} else if (marker.location) {
-			startLine = marker.location[0];
-		} else */ if (
-			marker.locationWhenCreated
-		) {
-			startLine = marker.locationWhenCreated[0];
-		}
+	// 	let startLine = 1;
+	// 	// `range` is not a property of CSMarker
+	// 	/* if (marker.range) {
+	// 		startLine = marker.range.start.line;
+	// 	} else if (marker.location) {
+	// 		startLine = marker.location[0];
+	// 	} else */ if (
+	// 		marker.locationWhenCreated
+	// 	) {
+	// 		startLine = marker.locationWhenCreated[0];
+	// 	}
 
-		const codeHTML = prettyPrintOne(escapeHtml(marker.code), extension, startLine);
-		return [
-			<div className="related" style={{ padding: "0 10px", marginBottom: 0, position: "relative" }}>
-				<div className="file-info">
-					<span className="monospace" style={{ paddingRight: "20px" }}>
-						<Icon name="file"></Icon> {marker.file}
-					</span>{" "}
-					{marker.branchWhenCreated && (
-						<>
-							<span className="monospace" style={{ paddingRight: "20px" }}>
-								<Icon name="git-branch"></Icon> {marker.branchWhenCreated}
-							</span>{" "}
-						</>
-					)}
-					<span className="monospace">
-						<Icon name="git-commit"></Icon> {marker.commitHashWhenCreated.substring(0, 7)}
-					</span>
-				</div>
-				<pre
-					className="code prettyprint"
-					data-scrollable="true"
-					dangerouslySetInnerHTML={{ __html: codeHTML }}
-				/>
-			</div>
-		];
-	}
+	// 	const codeHTML = prettyPrintOne(escapeHtml(marker.code), extension, startLine);
+	// 	return [
+	// 		<div className="related" style={{ padding: "0 10px", marginBottom: 0, position: "relative" }}>
+	// 			<div className="file-info">
+	// 				<span className="monospace" style={{ paddingRight: "20px" }}>
+	// 					<Icon name="file"></Icon> {marker.file}
+	// 				</span>{" "}
+	// 				{marker.branchWhenCreated && (
+	// 					<>
+	// 						<span className="monospace" style={{ paddingRight: "20px" }}>
+	// 							<Icon name="git-branch"></Icon> {marker.branchWhenCreated}
+	// 						</span>{" "}
+	// 					</>
+	// 				)}
+	// 				<span className="monospace">
+	// 					<Icon name="git-commit"></Icon> {marker.commitHashWhenCreated.substring(0, 7)}
+	// 				</span>
+	// 			</div>
+	// 			<pre
+	// 				className="code prettyprint"
+	// 				data-scrollable="true"
+	// 				dangerouslySetInnerHTML={{ __html: codeHTML }}
+	// 			/>
+	// 		</div>
+	// 	];
+	// }
 
 	getTitleLabel() {
 		const commentType = this.getCommentType();
@@ -1518,6 +1469,8 @@ class CodemarkForm extends React.Component<Props, State> {
 	}
 
 	renderAddLocation() {
+		return null;
+
 		if (
 			!this.props.multipleMarkersEnabled ||
 			this.props.currentPullRequestId ||
@@ -1543,14 +1496,26 @@ class CodemarkForm extends React.Component<Props, State> {
 	}
 
 	async toggleCodeHighlightInTextEditor(highlight: boolean, index: number) {
+		const { editingCodemark } = this.props;
 		const codeBlock = this.state.codeBlocks[index];
-		if (!codeBlock || !codeBlock.range || !codeBlock.uri) return;
 
-		HostApi.instance.send(EditorHighlightRangeRequestType, {
-			uri: codeBlock.uri,
-			range: codeBlock.range,
-			highlight: highlight
-		});
+		let uri;
+		let range;
+		if (codeBlock) {
+			if (!codeBlock.range || !codeBlock.uri) return;
+			uri = codeBlock.uri;
+			range = codeBlock.range;
+		} else if (editingCodemark && editingCodemark.markers) {
+			const marker = editingCodemark.markers[index];
+			if (!marker) return;
+			const response = await getDocumentFromMarker(marker.id);
+			if (!response) return;
+			uri = response.textDocument.uri;
+			range = response.range;
+		} else {
+			return;
+		}
+		HostApi.instance.send(EditorHighlightRangeRequestType, { uri, range, highlight });
 	}
 
 	renderMessageInput = () => {
@@ -1582,6 +1547,7 @@ class CodemarkForm extends React.Component<Props, State> {
 
 		return (
 			<MessageInput
+				onKeypress={() => this.setState({ touchedText: true })}
 				teamProvider={this.props.teamProvider}
 				isDirectMessage={this.props.channel.type === StreamType.Direct}
 				text={text}
@@ -1596,7 +1562,12 @@ class CodemarkForm extends React.Component<Props, State> {
 				}
 				onSubmit={this.props.currentPullRequestId ? undefined : this.handleClickSubmit}
 				selectedTags={this.state.selectedTags}
-				relatedCodemarkIds={this.props.textEditorUriHasPullRequestContext ? undefined : this.state.relatedCodemarkIds}
+				relatedCodemarkIds={
+					this.props.textEditorUriHasPullRequestContext ? undefined : this.state.relatedCodemarkIds
+				}
+				setIsPreviewing={isPreviewing => this.setState({ isPreviewing })}
+				renderCodeBlock={this.renderCodeBlock}
+				renderCodeBlocks={this.renderCodeBlocks}
 				__onDidRender={__onDidRender}
 			/>
 		);
@@ -1611,125 +1582,284 @@ class CodemarkForm extends React.Component<Props, State> {
 		}
 	};
 
+	copyPermalinkWithCode = (event: React.SyntheticEvent) => {
+		event.preventDefault();
+		if (this.permalinkWithCodeRef.current) {
+			this.permalinkWithCodeRef.current.select();
+			document.execCommand("copy");
+			this.setState({ copied: true });
+		}
+	};
+
+	renderEditingMarker = (marker, index, force) => {
+		const { liveLocation, text, isPreviewing } = this.state;
+		const { editingCodemark } = this.props;
+
+		if (!marker) return null;
+		// if (liveLocation == index && !codeBlock.range)
+		// return <span className="add-range">Select a range to add a code location</span>;
+
+		const blockInjected = text.includes(`[#${index + 1}]`);
+		if (isPreviewing && blockInjected && !force) return null;
+
+		let range: any = undefined;
+		if (marker.locationWhenCreated) {
+			range = arrayToRange(marker.locationWhenCreated as any);
+		} else {
+			range = arrayToRange(marker.referenceLocations[0].location);
+		}
+		const file = marker.file || "";
+		let extension = paths.extname(file).toLowerCase();
+		if (extension.startsWith(".")) extension = extension.substring(1);
+
+		const codeHTML = prettyPrintOne(escapeHtml(marker.code), extension, range.start.line + 1);
+		return (
+			<div
+				key={index}
+				className={cx("related", { live: liveLocation == index })}
+				style={{ padding: "0", marginBottom: 0, position: "relative" }}
+			>
+				<div className="file-info">
+					{file && (
+						<>
+							<span className="monospace" style={{ paddingRight: "20px" }}>
+								<Icon name="file" /> {file}
+							</span>{" "}
+						</>
+					)}
+					{marker.branch && (
+						<>
+							<span className="monospace" style={{ paddingRight: "20px" }}>
+								<Icon name="git-branch" /> {marker.branch}
+							</span>{" "}
+						</>
+					)}
+					{/* scm && scm.revision && (
+						<span className="monospace">
+							<Icon name="git-commit" /> {scm.revision.substring(0, 7)}
+						</span>
+					) */}
+				</div>
+				<pre
+					className="code prettyprint"
+					data-scrollable="true"
+					dangerouslySetInnerHTML={{ __html: codeHTML }}
+				/>
+				{liveLocation == index && (
+					<div className="code-buttons live">
+						<div className="codemark-actions-button ok" onClick={this.cementLocation}>
+							OK
+						</div>
+						<div className="codemark-actions-button" onClick={e => this.deleteLocation(index, e)}>
+							Cancel
+						</div>
+					</div>
+				)}
+				{liveLocation != index && !isPreviewing && (
+					<div className="code-buttons">
+						<Icon
+							title={
+								blockInjected
+									? `This code block [#${index + 1}] is in the markdown above`
+									: `Insert code block #${index + 1} in markdown`
+							}
+							placement="bottomRight"
+							name="pin"
+							className={blockInjected ? "clickable selected" : "clickable"}
+							onMouseDown={e => this.pinLocation(index, e)}
+						/>
+						<Icon
+							title={"Jump to this range in " + file}
+							placement="bottomRight"
+							name="link-external"
+							className="clickable"
+							onClick={e => this.jumpToLocation(index, e)}
+						/>
+						<Icon
+							title="Select new range"
+							placement="bottomRight"
+							name="select"
+							className="clickable"
+							onClick={e => this.editLocation(index, e)}
+						/>
+						<Icon
+							title="Remove Range"
+							placement="bottomRight"
+							name="x"
+							className="clickable"
+							onClick={e => this.deleteLocation(index, e)}
+						/>
+					</div>
+				)}
+				<div style={{ clear: "both" }}></div>
+			</div>
+		);
+	};
+
+	renderCodeBlock = (index, force) => {
+		const { codeBlocks, liveLocation, text, isPreviewing } = this.state;
+		const { editingCodemark } = this.props;
+
+		const codeBlock = codeBlocks[index];
+		if (!codeBlock) return null;
+		if (liveLocation == index && !codeBlock.range)
+			return <span className="add-range">Select a range to add a code location</span>;
+
+		if (!codeBlock.range) return null;
+
+		const blockInjected = text.includes(`[#${index + 1}]`);
+		if (isPreviewing && blockInjected && !force) return null;
+
+		const scm = codeBlock.scm;
+
+		let file = scm && scm.file ? paths.basename(scm.file) : "";
+
+		let range: any = codeBlock.range;
+		// if (editingCodemark) {
+		// 	if (editingCodemark.markers) {
+		// 		const marker = editingCodemark.markers[0];
+		// 		if (marker.locationWhenCreated) {
+		// 			// TODO: location is likely invalid
+		// 			range = arrayToRange(marker.locationWhenCreated as any);
+		// 		} else {
+		// 			range = undefined;
+		// 		}
+		// 		file = marker.file || "";
+		// 	}
+		// }
+		let extension = paths.extname(file).toLowerCase();
+		if (extension.startsWith(".")) extension = extension.substring(1);
+
+		const codeHTML = prettyPrintOne(
+			escapeHtml(codeBlock.contents),
+			extension,
+			range.start.line + 1
+		);
+		return (
+			<div
+				key={index}
+				className={cx("related", { live: liveLocation == index })}
+				style={{ padding: "0", marginBottom: 0, position: "relative" }}
+			>
+				<div className="file-info">
+					{file && (
+						<>
+							<span className="monospace" style={{ paddingRight: "20px" }}>
+								<Icon name="file" /> {file}
+							</span>{" "}
+						</>
+					)}
+					{scm && scm.branch && (
+						<>
+							<span className="monospace" style={{ paddingRight: "20px" }}>
+								<Icon name="git-branch" /> {scm.branch}
+							</span>{" "}
+						</>
+					)}
+					{scm && scm.revision && (
+						<span className="monospace">
+							<Icon name="git-commit" /> {scm.revision.substring(0, 7)}
+						</span>
+					)}
+				</div>
+				<pre
+					className="code prettyprint"
+					data-scrollable="true"
+					dangerouslySetInnerHTML={{ __html: codeHTML }}
+				/>
+				{liveLocation == index && (
+					<div className="code-buttons live">
+						<div className="codemark-actions-button ok" onClick={this.cementLocation}>
+							OK
+						</div>
+						<div className="codemark-actions-button" onClick={e => this.deleteLocation(index, e)}>
+							Cancel
+						</div>
+					</div>
+				)}
+				{liveLocation != index && !isPreviewing && (
+					<div className="code-buttons">
+						<Icon
+							title={
+								blockInjected
+									? `This code block [#${index + 1}] is in the markdown above`
+									: `Insert code block #${index + 1} in markdown`
+							}
+							placement="bottomRight"
+							name="pin"
+							className={blockInjected ? "clickable selected" : "clickable"}
+							onMouseDown={e => this.pinLocation(index, e)}
+						/>
+						<Icon
+							title={"Jump to this range in " + file}
+							placement="bottomRight"
+							name="link-external"
+							className="clickable"
+							onClick={e => this.jumpToLocation(index, e)}
+						/>
+						<Icon
+							title="Select new range"
+							placement="bottomRight"
+							name="select"
+							className="clickable"
+							onClick={e => this.editLocation(index, e)}
+						/>
+						<Icon
+							title="Remove Range"
+							placement="bottomRight"
+							name="x"
+							className="clickable"
+							onClick={e => this.deleteLocation(index, e)}
+						/>
+					</div>
+				)}
+				<div style={{ clear: "both" }}></div>
+			</div>
+		);
+	};
+
 	renderCodeBlocks = () => {
-		const { codeBlocks, liveLocation } = this.state;
-		const { editingCodemark, multiLocation } = this.props;
+		const { codeBlocks, liveLocation, isPreviewing } = this.state;
+		const { editingCodemark, multiLocation, commentType } = this.props;
 
-		const numCodeBlocks = codeBlocks.length;
+		const addLocationDiv = (
+			<Tooltip
+				placement="topLeft"
+				title="Comments can refer to multiple blocks of code, even across files."
+				delay={1}
+			>
+				<div
+					className="clickable"
+					style={{ margin: "15px 0 5px 3px", cursor: "pointer" }}
+					onClick={this.addLocation}
+				>
+					<Icon name="plus" className="clickable margin-right" />
+					Add Code Block
+				</div>
+			</Tooltip>
+		);
 
-		if (multiLocation) {
+		if (editingCodemark) {
+			const { deleteMarkerLocations } = this.state;
+			const { markers = [] } = editingCodemark;
+			const numMarkers = markers.length;
+
 			return (
 				<>
-					{codeBlocks.map((codeBlock, index) => {
-						if (!codeBlock) return null;
-						if (liveLocation == index && !codeBlock.range)
-							return <span className="add-range">Select a range to add a code location</span>;
-
-						if (!codeBlock.range) return null;
-
-						const scm = codeBlock.scm;
-
-						let file = scm && scm.file ? paths.basename(scm.file) : "";
-
-						let range: any = codeBlock.range;
-						if (editingCodemark) {
-							if (editingCodemark.markers) {
-								const marker = editingCodemark.markers[0];
-								if (marker.locationWhenCreated) {
-									// TODO: location is likely invalid
-									range = arrayToRange(marker.locationWhenCreated as any);
-								} else {
-									range = undefined;
-								}
-								file = marker.file || "";
-							}
-						}
-						let extension = paths.extname(file).toLowerCase();
-						if (extension.startsWith(".")) extension = extension.substring(1);
-
-						const codeHTML = prettyPrintOne(
-							escapeHtml(codeBlock.contents),
-							extension,
-							range.start.line + 1
-						);
-						return (
-							<div
-								className={cx("related", { live: liveLocation == index })}
-								style={{ padding: "0", marginBottom: 0, position: "relative" }}
-							>
-								<div className="file-info">
-									{file && (
-										<>
-											<span className="monospace" style={{ paddingRight: "20px" }}>
-												<Icon name="file"></Icon> {file}
-											</span>{" "}
-										</>
-									)}
-									{scm && scm.branch && (
-										<>
-											<span className="monospace" style={{ paddingRight: "20px" }}>
-												<Icon name="git-branch"></Icon> {scm.branch}
-											</span>{" "}
-										</>
-									)}
-									{scm && scm.revision && (
-										<span className="monospace">
-											<Icon name="git-commit"></Icon> {scm.revision.substring(0, 7)}
-										</span>
-									)}
-								</div>
-								<pre
-									className="code prettyprint"
-									data-scrollable="true"
-									dangerouslySetInnerHTML={{ __html: codeHTML }}
-								/>
-								{liveLocation == index && (
-									<div className="code-buttons live">
-										<div className="codemark-actions-button ok" onClick={this.cementLocation}>
-											OK
-										</div>
-										<div
-											className="codemark-actions-button"
-											onClick={e => this.deleteLocation(index, e)}
-										>
-											Cancel
-										</div>
-									</div>
-								)}
-								{liveLocation != index && (
-									<div className="code-buttons">
-										<Icon
-											title={"Jump to this range in " + file}
-											placement="bottomRight"
-											name="link-external"
-											className="clickable"
-											onClick={e => this.jumpToLocation(index, e)}
-										/>
-										<Icon
-											title="Select new range"
-											placement="bottomRight"
-											name="select"
-											className="clickable"
-											onClick={e => this.editLocation(index, e)}
-										/>
-										{numCodeBlocks > 0 && (
-											<Icon
-												title="Remove Range"
-												placement="bottomRight"
-												name="x"
-												className="clickable"
-												onClick={e => this.deleteLocation(index, e)}
-											/>
-										)}
-									</div>
-								)}
-								<div style={{ clear: "both" }}></div>
-							</div>
-						);
+					{markers.map((marker, index) => {
+						if (deleteMarkerLocations[index]) return null;
+						if (codeBlocks[index]) return this.renderCodeBlock(index, false);
+						else return this.renderEditingMarker(marker, index, false);
 					})}
-					{this.state.addingLocation && (
+					{codeBlocks.map((codeBlock, index) => {
+						if (deleteMarkerLocations[index]) return null;
+						if (codeBlock && index >= numMarkers) return this.renderCodeBlock(index, false);
+						else return null;
+					})}
+
+					{isPreviewing || commentType === "link" ? null : this.state.addingLocation ? (
 						<div className="add-range" style={{ clear: "both", position: "relative" }}>
-							Select code in your editor to add a range
+							Select code from any file to add a range
 							<div className="code-buttons live">
 								<div
 									className="codemark-actions-button"
@@ -1743,25 +1873,37 @@ class CodemarkForm extends React.Component<Props, State> {
 								</div>
 							</div>
 						</div>
+					) : (
+						addLocationDiv
 					)}
 				</>
 			);
-		} else if (liveLocation == 0) {
-			return (
-				<div className="add-range" style={{ clear: "both", position: "relative" }}>
-					Select a new range
-					<div className="code-buttons live">
-						<div
-							className="codemark-actions-button"
-							style={{ margin: "2px 0" }}
-							onClick={e => this.setState({ liveLocation: -1 })}
-						>
-							OK
+		}
+		return (
+			<>
+				{codeBlocks.map((codeBlock, index) => this.renderCodeBlock(index, false))}
+
+				{isPreviewing || commentType === "link" ? null : this.state.addingLocation ? (
+					<div className="add-range" style={{ clear: "both", position: "relative" }}>
+						Select code from any file to add a range
+						<div className="code-buttons live">
+							<div
+								className="codemark-actions-button"
+								style={{ margin: "2px 0" }}
+								onClick={e => {
+									this.setState({ addingLocation: false, liveLocation: -1 });
+									this.focus();
+								}}
+							>
+								Done
+							</div>
 						</div>
 					</div>
-				</div>
-			);
-		} else return null;
+				) : (
+					addLocationDiv
+				)}
+			</>
+		);
 	};
 
 	private _getCrossPostIssueContext(): ICrossPostIssueContext {
@@ -1791,11 +1933,13 @@ class CodemarkForm extends React.Component<Props, State> {
 
 		const commentType = this.getCommentType();
 
+		this.renderedCodeBlocks = {};
+
 		// if you are conducting a review, and somehow are able to try to
 		// create an issue or a permalink, stop the user from doing that
 		if (commentType !== "comment" && currentReviewId) {
 			return (
-				<Modal onClose={this.cancelCompose} verticallyCenter>
+				<Modal translucent onClose={this.cancelCompose} verticallyCenter>
 					<div style={{ width: "20em", fontSize: "larger", margin: "0 auto" }}>
 						Sorry, you can't add an issue while doing a review. Mark your a comment as a "change
 						request" instead.
@@ -1810,7 +1954,7 @@ class CodemarkForm extends React.Component<Props, State> {
 		}
 		if (scmError) {
 			return (
-				<Modal onClose={this.cancelCompose} verticallyCenter>
+				<Modal translucent onClose={this.cancelCompose} verticallyCenter>
 					<div style={{ width: "20em", fontSize: "larger", margin: "0 auto" }}>
 						Sorry, we encountered a git error: {scmError}
 						<br />
@@ -1828,21 +1972,26 @@ class CodemarkForm extends React.Component<Props, State> {
 			);
 		}
 
-		if (this.props.multiLocation) {
+		if (this.props.multiLocation || !editingCodemark) {
 			return (
 				<div className="full-height-codemark-form">
 					<CancelButton onClick={this.cancelCompose} />
-					<PanelHeader title={commentType === "comment" ? "Add a Comment" : "Open an Issue"}>
-						{this.state.liveLocation > -1 && (
-							<div className="filters" style={{ padding: 0 }}>
-								Select code in your editor to add it to this{" "}
-								{commentType === "comment" ? "comment" : "issue"}.
-							</div>
-						)}
-					</PanelHeader>
+					<PanelHeader
+						title={
+							this.props.currentReviewId
+								? "Add Comment to Review"
+								: this.props.textEditorUriHasPullRequestContext
+								? "Add Comment to Pull Request"
+								: commentType === "comment"
+								? "Add a Comment"
+								: commentType === "link"
+								? "Grab a Permalink"
+								: "Open an Issue"
+						}
+					></PanelHeader>
 					<span className="plane-container">
 						<div className="codemark-form-container">{this.renderCodemarkForm()}</div>
-						{commentType === "comment" && !codeBlocks[0] && (
+						{false && commentType === "comment" && !codeBlocks[0] && (
 							<VideoLink href={"https://youtu.be/RPaIIZgaFK8"}>
 								<img src="https://i.imgur.com/9IKqpzf.png" />
 								<span>Discussing Code with CodeStream</span>
@@ -1892,10 +2041,10 @@ class CodemarkForm extends React.Component<Props, State> {
 	};
 
 	cancelCodemarkCompose = (e?) => {
-		const { text, type } = this.state;
+		const { touchedText, type } = this.state;
 		if (!this.props.onClickClose) return;
 		// if there is codemark text, confirm the user actually wants to cancel
-		if (text && (type === "comment" || type === "issue")) {
+		if (touchedText && (type === "comment" || type === "issue")) {
 			confirmPopup({
 				title: "Are you sure?",
 				message: "Changes will not be saved.",
@@ -1918,53 +2067,42 @@ class CodemarkForm extends React.Component<Props, State> {
 	toggleEmail = (email: string) => {
 		const { emailAuthors } = this.state;
 
+		this.props.setUserPreference(["skipEmailingAuthors"], emailAuthors[email]);
 		this.setState({ emailAuthors: { ...emailAuthors, [email]: !emailAuthors[email] } });
 	};
 
 	renderEmailAuthors = () => {
-		const { unregisteredAuthors, emailAuthors } = this.state;
+		const { unregisteredAuthors, emailAuthors, isPreviewing } = this.state;
 		const { isCurrentUserAdmin } = this.props;
 
+		if (isPreviewing) return null;
 		if (unregisteredAuthors.length === 0) return null;
 
-		return (
-			<div className="checkbox-row">
-				{unregisteredAuthors.map(author => {
-					return (
-						<Checkbox
-							name={"email-" + author.email}
-							checked={emailAuthors[author.email]}
-							onChange={() => this.toggleEmail(author.email)}
-						>
-							Send to {author.username || author.email}&nbsp;&nbsp;
-							<Icon
-								name="info"
-								title={
-									<>
-										Retrieved from git blame.
-										{isCurrentUserAdmin && (
-											<a
-												style={{ display: "block", margin: "10px 0 0 0" }}
-												onClick={e => {
-													this.cancelCodemarkCompose(e);
-													this.props.openPanel(WebviewPanels.People);
-												}}
-											>
-												Configure Blame Map
-											</a>
-										)}
-									</>
-								}
-								placement="top"
-								delay={1}
-								align={{ offset: [0, 5] }}
-							/>
-						</Checkbox>
-					);
-				})}
-			</div>
-		);
-		return;
+		return unregisteredAuthors.map(author => {
+			return (
+				<div className="checkbox-row">
+					<Checkbox
+						name={"email-" + author.email}
+						checked={emailAuthors[author.email]}
+						onChange={() => this.toggleEmail(author.email)}
+					>
+						Send to {author.username || author.email}&nbsp;&nbsp;
+						<Icon
+							name="info"
+							title={
+								<>
+									Retrieved from git blame.
+									{isCurrentUserAdmin && <p>Configure Blame Map under MY TEAM.</p>}
+								</>
+							}
+							placement="top"
+							delay={1}
+							align={{ offset: [0, 5] }}
+						/>
+					</Checkbox>
+				</div>
+			);
+		});
 	};
 
 	renderCodemarkForm() {
@@ -1980,7 +2118,7 @@ class CodemarkForm extends React.Component<Props, State> {
 				? "Bookmark Name (optional)"
 				: "Title (optional)";
 
-		const modifier = navigator.appVersion.includes("Macintosh") ? "⌘" : "Alt";
+		const modifier = navigator.appVersion.includes("Macintosh") ? "⌘" : "Ctrl";
 
 		const submitTip =
 			commentType === "link" ? (
@@ -2021,11 +2159,26 @@ class CodemarkForm extends React.Component<Props, State> {
 
 		const hasExistingPullRequestReview = !!(
 			this.state.codeBlocks &&
-			this.state.codeBlocks.length &&
+			this.state.codeBlocks[0] &&
 			this.state.codeBlocks[0].context &&
 			this.state.codeBlocks[0].context.pullRequest &&
 			!!this.state.codeBlocks[0].context.pullRequest.pullRequestReviewId
 		);
+
+		let linkWithCodeBlock = "";
+		if (this.state.linkURI) {
+			const codeBlock = this.state.codeBlocks[0];
+			linkWithCodeBlock += this.state.linkURI + "\n\n*";
+			const { scm, uri } = codeBlock;
+			if (scm && scm.repoId) {
+				const repo = this.props.repos[scm.repoId];
+				if (repo) linkWithCodeBlock += "[" + repo.name + "] ";
+			}
+			if (scm && scm.file) {
+				linkWithCodeBlock += scm.file;
+			}
+			linkWithCodeBlock += "*\n```\n" + codeBlock.contents + "\n```\n";
+		}
 
 		return [
 			<form
@@ -2126,7 +2279,13 @@ class CodemarkForm extends React.Component<Props, State> {
 									value={this.state.linkURI}
 									style={{ position: "absolute", left: "-9999px" }}
 								/>,
-								<input type="text" className="permalink" value={this.state.linkURI} />
+								<input type="text" className="permalink" value={this.state.linkURI} />,
+								<textarea
+									key="link-offscreen-2"
+									ref={this.permalinkWithCodeRef}
+									value={linkWithCodeBlock}
+									style={{ position: "absolute", left: "-9999px" }}
+								/>
 							]}
 						{commentType === "link" && !this.state.linkURI && (
 							<div id="privacy-controls" className="control-group" key="1">
@@ -2143,7 +2302,7 @@ class CodemarkForm extends React.Component<Props, State> {
 									onLabel="Public"
 									onChange={this.togglePermalinkPrivacy}
 									height={28}
-									width={80}
+									width={90}
 								/>
 							</div>
 						)}
@@ -2163,29 +2322,36 @@ class CodemarkForm extends React.Component<Props, State> {
 					{/* this.renderPrivacyControls() */}
 					{this.renderRelatedCodemarks()}
 					{this.renderTags()}
-					{this.renderCodeBlocks()}
+					{!this.state.isPreviewing && this.renderCodeBlocks()}
 					{this.props.multiLocation && <div style={{ height: "10px" }} />}
 					{commentType !== "link" && this.renderEmailAuthors()}
 					{commentType !== "link" && this.renderSharingControls()}
 					{this.props.currentReviewId && this.renderRequireChange()}
-					{true && (
-						<div
-							key="buttons"
-							className="button-group"
-							style={{
-								marginLeft: "10px",
-								marginTop: "10px",
-								float: "right",
-								width: "auto",
-								marginRight: 0
-							}}
-						>
+					{!this.state.isPreviewing && (
+						<div key="buttons" className="button-group float-wrap">
 							<CancelButton
 								toolTip={cancelTip}
 								onClick={this.cancelCodemarkCompose}
 								title={this.state.copied ? "Close" : "Cancel"}
 								mode="button"
 							/>
+							{commentType === "link" && this.state.linkURI && !this.state.copied && (
+								<Tooltip title={"Copy Link and Code Block (Markdown)"} placement="bottom" delay={1}>
+									<Button
+										key="copy-with-block"
+										style={{
+											paddingLeft: "10px",
+											paddingRight: "10px",
+											marginRight: 0
+										}}
+										className="control-button"
+										type="submit"
+										onClick={this.copyPermalinkWithCode}
+									>
+										Copy Link w/ Code Block
+									</Button>
+								</Tooltip>
+							)}
 							<Tooltip title={submitTip} placement="bottom" delay={1}>
 								<Button
 									key="submit"
@@ -2207,7 +2373,9 @@ class CodemarkForm extends React.Component<Props, State> {
 											? this.copyPermalink
 											: this.handleClickSubmit
 									}
-									disabled={hasError || !!hasExistingPullRequestReview}
+									disabled={
+										hasError || (this.state.isInsidePrChangeSet && !!hasExistingPullRequestReview)
+									}
 								>
 									{commentType === "link"
 										? this.state.copied
@@ -2221,10 +2389,12 @@ class CodemarkForm extends React.Component<Props, State> {
 										? "Add Comment to Review"
 										: this.props.textEditorUriHasPullRequestContext
 										? "Add single comment"
+										: this.props.editingCodemark
+										? "Save"
 										: "Submit"}
 								</Button>
 							</Tooltip>
-							{this.props.textEditorUriHasPullRequestContext && (
+							{this.props.textEditorUriHasPullRequestContext && this.state.isInsidePrChangeSet && (
 								<Button
 									key="submit-review"
 									loading={this.state.isReviewLoading}
@@ -2280,6 +2450,7 @@ class CodemarkForm extends React.Component<Props, State> {
 }
 
 const EMPTY_OBJECT = {};
+const EMPTY_ARRAY = [];
 
 const mapStateToProps = (state: CodeStreamState): ConnectedProps => {
 	const {
@@ -2290,7 +2461,8 @@ const mapStateToProps = (state: CodeStreamState): ConnectedProps => {
 		session,
 		preferences,
 		providers,
-		codemarks
+		codemarks,
+		repos
 	} = state;
 	const user = users[session.userId!] as CSMe;
 	const channel = context.currentStreamId
@@ -2304,43 +2476,40 @@ const mapStateToProps = (state: CodeStreamState): ConnectedProps => {
 
 	const channelStreams = getChannelStreamsForTeam(state, context.currentTeamId);
 
-	const directMessageStreams: CSDirectStream[] = (
-		getDirectMessageStreamsForTeam(state.streams, context.currentTeamId) || []
-	).map(stream => ({
-		...(stream as CSDirectStream),
-		name: getDMName(stream, toMapBy("id", teamMates), session.userId)
-	}));
-
 	const skipPostCreationModal = preferences ? preferences.skipPostCreationModal : false;
+	const skipEmailingAuthors = preferences ? preferences.skipEmailingAuthors : false;
 
 	const team = teams[context.currentTeamId];
-	const adminIds = team.adminIds || [];
-	const removedMemberIds = team.removedMemberIds || [];
+	const adminIds = team.adminIds || EMPTY_ARRAY;
+	const removedMemberIds = team.removedMemberIds || EMPTY_ARRAY;
 	const isCurrentUserAdmin = adminIds.includes(session.userId || "");
-	const blameMap = team.settings ? team.settings.blameMap : {};
+	const blameMap = team.settings ? team.settings.blameMap : EMPTY_OBJECT;
 	const inviteUsersOnTheFly =
 		isFeatureEnabled(state, "emailSupport") && isFeatureEnabled(state, "inviteUsersOnTheFly");
 	const textEditorUriContext = parseCodeStreamDiffUri(editorContext.textEditorUri!);
 
 	return {
+		repos,
 		channel,
 		teamMates,
 		teamMembers,
 		removedMemberIds,
 		currentTeamId: state.context.currentTeamId,
-		blameMap: blameMap || {},
+		blameMap: blameMap || EMPTY_OBJECT,
 		isCurrentUserAdmin,
 		activePanel: context.panelStack[0] as WebviewPanels,
 		shouldShare:
 			safe(() => state.preferences[state.context.currentTeamId].shareCodemarkEnabled) || false,
 		channelStreams: channelStreams,
-		directMessageStreams: directMessageStreams,
 		issueProvider: providers[context.issueProvider!],
-		currentPullRequestId: state.context.currentPullRequestId,
+		currentPullRequestId: state.context.currentPullRequest
+			? state.context.currentPullRequest.id
+			: undefined,
 		providerInfo: (user.providerInfo && user.providerInfo[context.currentTeamId]) || EMPTY_OBJECT,
 		teamProvider: getCurrentTeamProvider(state),
 		currentUser: user,
 		skipPostCreationModal,
+		skipEmailingAuthors,
 		selectedStreams: preferences.selectedStreams || EMPTY_OBJECT,
 		showChannels: context.channelFilter,
 		textEditorUri: editorContext.textEditorUri,
@@ -2362,6 +2531,7 @@ const mapStateToProps = (state: CodeStreamState): ConnectedProps => {
 
 const ConnectedCodemarkForm = connect(mapStateToProps, {
 	openPanel,
+	openModal,
 	setUserPreference
 })(CodemarkForm);
 

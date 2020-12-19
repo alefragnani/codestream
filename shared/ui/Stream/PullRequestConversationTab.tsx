@@ -1,10 +1,11 @@
-import React, { useState, useReducer } from "react";
+import React, { useState, useReducer, useCallback, useMemo } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { OpenUrlRequestType } from "@codestream/protocols/webview";
 import { CodeStreamState } from "../store";
 import { Button } from "../src/components/Button";
 import { CSMe } from "@codestream/protocols/api";
 import { isFeatureEnabled } from "../store/apiVersioning/reducer";
+import { getCurrentProviderPullRequest } from "../store/providerPullRequests/reducer";
 import Icon from "./Icon";
 import Timestamp from "./Timestamp";
 import Tooltip from "./Tooltip";
@@ -24,6 +25,7 @@ import {
 	PRComment,
 	PRCommentCard,
 	PRCommentHeader,
+	PRError,
 	PRStatusHeadshot,
 	PRIconButton,
 	PRFoot,
@@ -39,7 +41,8 @@ import {
 	PRCopyableTerminal,
 	PRCloneURLWrapper,
 	PRResolveConflictsRow,
-	PRHeadshots
+	PRHeadshots,
+	PRResolveConflicts
 } from "./PullRequestComponents";
 import { PullRequestTimelineItems, GHOST } from "./PullRequestTimelineItems";
 import { DropdownButton } from "./Review/DropdownButton";
@@ -53,7 +56,7 @@ import { setUserPreference } from "./actions";
 import copy from "copy-to-clipboard";
 import { PullRequestBottomComment } from "./PullRequestBottomComment";
 import { reduce as _reduce, groupBy as _groupBy, map as _map } from "lodash-es";
-import { removeFromMyPullRequests } from "../store/providerPullRequests/actions";
+import { api, removeFromMyPullRequests } from "../store/providerPullRequests/actions";
 import { PullRequestReviewStatus } from "./PullRequestReviewStatus";
 import { autoCheckedMergeabilityStatus } from "./PullRequest";
 
@@ -140,14 +143,13 @@ let insertNewline;
 let focusOnMessageInput;
 
 export const PullRequestConversationTab = (props: {
-	pr: FetchThirdPartyPullRequestPullRequest;
 	setIsLoadingMessage: Function;
 	fetch: Function;
 	ghRepo: any;
 	checkMergeabilityStatus: Function;
 	autoCheckedMergeability: autoCheckedMergeabilityStatus;
 }) => {
-	const { pr, ghRepo, fetch, setIsLoadingMessage } = props;
+	const { ghRepo, fetch, setIsLoadingMessage } = props;
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
 		const currentUser = state.users[state.session.userId!] as CSMe;
@@ -155,25 +157,31 @@ export const PullRequestConversationTab = (props: {
 		const blameMap = team.settings ? team.settings.blameMap : EMPTY_HASH;
 		const skipGitEmailCheck = state.preferences.skipGitEmailCheck;
 		const addBlameMapEnabled = isFeatureEnabled(state, "addBlameMap");
+		const currentPullRequest = getCurrentProviderPullRequest(state);
 		const { preferences } = state;
 
 		return {
 			defaultMergeMethod: preferences.lastPRMergeMethod || "SQUASH",
 			currentUser,
-			currentPullRequestId: state.context.currentPullRequestId,
+			currentPullRequestId: state.context.currentPullRequest
+				? state.context.currentPullRequest.id
+				: undefined,
 			blameMap,
+			currentPullRequest: currentPullRequest,
+			pr: currentPullRequest.conversations.repository.pullRequest,
 			team,
 			skipGitEmailCheck,
 			addBlameMapEnabled
 		};
 	});
+	const { pr } = derivedState;
 
 	const [availableLabels, setAvailableLabels] = useState(EMPTY_ARRAY);
 	const [availableReviewers, setAvailableReviewers] = useState(EMPTY_ARRAY);
 	const [availableAssignees, setAvailableAssignees] = useState(EMPTY_ARRAY);
 	const [availableProjects, setAvailableProjects] = useState<[] | undefined>();
 	const [availableMilestones, setAvailableMilestones] = useState<[] | undefined>();
-	const [availableIssues, setAvailableIssues] = useState(EMPTY_ARRAY);
+	// const [availableIssues, setAvailableIssues] = useState(EMPTY_ARRAY);
 	const [isLocking, setIsLocking] = useState(false);
 	const [isLockingReason, setIsLockingReason] = useState("");
 	const [isLoadingLocking, setIsLoadingLocking] = useState(false);
@@ -197,37 +205,36 @@ export const PullRequestConversationTab = (props: {
 			});
 	};
 
-	const setIsDraftPullRequest = async (onOff: boolean) => {
+	const markPullRequestReadyForReview = async (onOff: boolean) => {
 		setIsLoadingMessage("Updating...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, boolean>(), {
-			method: "setIsDraftPullRequest",
-			providerId: pr.providerId,
-			params: {
-				pullRequestId: derivedState.currentPullRequestId!,
-				onOff
-			}
-		});
-		fetch();
+		await dispatch(
+			api("markPullRequestReadyForReview", {
+				isReady: onOff
+			})
+		);
 	};
 
-	const mergePullRequest = async (options: { mergeMethod: MergeMethod }) => {
-		setIsLoadingMessage("Merging...");
-		dispatch(setUserPreference(["lastPRMergeMethod"], options.mergeMethod));
-		await HostApi.instance.send(
-			new ExecuteThirdPartyTypedType<MergePullRequestRequest, boolean>(),
-			{
-				method: "mergePullRequest",
-				providerId: pr.providerId,
-				params: {
-					pullRequestId: derivedState.currentPullRequestId!,
+	const mergePullRequest = useCallback(
+		async (options: { mergeMethod: MergeMethod }) => {
+			setIsLoadingMessage("Merging...");
+			dispatch(setUserPreference(["lastPRMergeMethod"], options.mergeMethod));
+
+			const response = (await dispatch(
+				api("mergePullRequest", {
 					mergeMethod: options.mergeMethod
-				}
+				})
+			)) as any;
+			if (response) {
+				dispatch(removeFromMyPullRequests(pr.providerId, derivedState.currentPullRequestId!));
 			}
-		);
-		fetch().then(_ => {
-			dispatch(removeFromMyPullRequests(pr.providerId, derivedState.currentPullRequestId!));
-		});
-	};
+		},
+		[
+			pr.providerId,
+			derivedState.currentPullRequestId!,
+			derivedState.defaultMergeMethod,
+			mergeMethod
+		]
+	);
 
 	const lockPullRequest = async () => {
 		setIsLoadingLocking(true);
@@ -247,33 +254,18 @@ export const PullRequestConversationTab = (props: {
 				break;
 		}
 
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "lockPullRequest",
-			providerId: pr.providerId,
-			params: {
-				pullRequestId: derivedState.currentPullRequestId!,
-				lockReason: reason
-			}
-		});
-		fetch().then(() => {
-			setIsLocking(false);
-			setIsLoadingLocking(false);
-		});
+		await dispatch(api("lockPullRequest", { lockReason: reason }));
+
+		setIsLocking(false);
+		setIsLoadingLocking(false);
 	};
 
 	const unlockPullRequest = async () => {
 		setIsLoadingLocking(true);
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "unlockPullRequest",
-			providerId: pr.providerId,
-			params: {
-				pullRequestId: derivedState.currentPullRequestId!
-			}
-		});
-		fetch().then(() => {
-			setIsLocking(false);
-			setIsLoadingLocking(false);
-		});
+		await dispatch(api("unlockPullRequest", {}));
+
+		setIsLocking(false);
+		setIsLoadingLocking(false);
 	};
 
 	const numParticpants = ((pr.participants && pr.participants.nodes) || []).length;
@@ -334,10 +326,12 @@ export const PullRequestConversationTab = (props: {
 	// these are reviews that have been requested (though not started)
 	pr.reviewRequests &&
 		pr.reviewRequests.nodes.reduce((map, obj) => {
-			map[obj.requestedReviewer.id] = {
-				...obj.requestedReviewer,
-				isPending: true
-			};
+			if (obj && obj.requestedReviewer) {
+				map[obj.requestedReviewer.id] = {
+					...obj.requestedReviewer,
+					isPending: true
+				};
+			}
 			return map;
 		}, reviewsHash);
 
@@ -347,18 +341,37 @@ export const PullRequestConversationTab = (props: {
 	}) as { id: string; login: string; avatarUrl: string; isPending: boolean; state: string }[];
 
 	const fetchAvailableReviewers = async (e?) => {
-		const reviewers = await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "getReviewers",
-			providerId: pr.providerId,
-			params: {
+		if (availableReviewers === undefined) {
+			setAvailableReviewers(EMPTY_ARRAY);
+		}
+		const reviewers = (await dispatch(
+			api("getReviewers", {
 				owner: ghRepo.repoOwner,
 				repo: ghRepo.repoName
-			}
-		});
+			})
+		)) as any;
 		setAvailableReviewers(reviewers);
 	};
 
 	const reviewerMenuItems = React.useMemo(() => {
+		if (
+			availableReviewers === undefined &&
+			derivedState.currentPullRequest &&
+			derivedState.currentPullRequest.error &&
+			derivedState.currentPullRequest.error.message
+		) {
+			return [
+				{
+					label: (
+						<PRError>
+							<Icon name="alert" />
+							<div>{derivedState.currentPullRequest.error.message}</div>
+						</PRError>
+					),
+					noHover: true
+				}
+			];
+		}
 		const reviewerIds = reviewers.map(_ => _.id);
 		if (availableReviewers && availableReviewers.length) {
 			const menuItems = availableReviewers.map((_: any) => ({
@@ -381,46 +394,58 @@ export const PullRequestConversationTab = (props: {
 		} else {
 			return [{ label: <LoadingMessage>Loading Reviewers...</LoadingMessage>, noHover: true }];
 		}
-	}, [availableReviewers, pr]);
+	}, [derivedState.currentPullRequest, availableReviewers, pr]);
 
 	const removeReviewer = async id => {
 		setIsLoadingMessage("Removing Reviewer...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "removeReviewerFromPullRequest",
-			providerId: pr.providerId,
-			params: {
-				pullRequestId: pr.id,
+		await dispatch(
+			api("removeReviewerFromPullRequest", {
 				userId: id
-			}
-		});
-		fetch();
+			})
+		);
 	};
 	const addReviewer = async id => {
 		setIsLoadingMessage("Requesting Review...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "addReviewerToPullRequest",
-			providerId: pr.providerId,
-			params: {
+		await dispatch(
+			api("addReviewerToPullRequest", {
 				pullRequestId: pr.id,
 				userId: id
-			}
-		});
-		fetch();
+			})
+		);
 	};
 
 	const fetchAvailableAssignees = async (e?) => {
-		const assignees = await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "getReviewers",
-			providerId: pr.providerId,
-			params: {
+		if (availableAssignees === undefined) {
+			setAvailableAssignees(EMPTY_ARRAY);
+		}
+		const assignees = (await dispatch(
+			api("getReviewers", {
 				owner: ghRepo.repoOwner,
 				repo: ghRepo.repoName
-			}
-		});
+			})
+		)) as any;
 		setAvailableAssignees(assignees);
 	};
 
 	const assigneeMenuItems = React.useMemo(() => {
+		if (
+			availableAssignees === undefined &&
+			derivedState.currentPullRequest &&
+			derivedState.currentPullRequest.error &&
+			derivedState.currentPullRequest.error.message
+		) {
+			return [
+				{
+					label: (
+						<PRError>
+							<Icon name="alert" />
+							<div>{derivedState.currentPullRequest.error.message}</div>
+						</PRError>
+					),
+					noHover: true
+				}
+			];
+		}
 		const assigneeIds = pr.assignees.nodes.map(_ => _.login);
 		if (availableAssignees && availableAssignees.length) {
 			const menuItems = (availableAssignees || []).map((_: any) => ({
@@ -436,31 +461,25 @@ export const PullRequestConversationTab = (props: {
 		} else {
 			return [{ label: <LoadingMessage>Loading Assignees...</LoadingMessage>, noHover: true }];
 		}
-	}, [availableAssignees, pr]);
+	}, [derivedState.currentPullRequest, availableAssignees, pr]);
 
 	const toggleAssignee = async (id: string, onOff: boolean) => {
 		setIsLoadingMessage(onOff ? "Adding Assignee..." : "Removing Assignee...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "setAssigneeOnPullRequest",
-			providerId: pr.providerId,
-			params: {
-				pullRequestId: derivedState.currentPullRequestId,
+		await dispatch(
+			api("setAssigneeOnPullRequest", {
 				assigneeId: id,
 				onOff
-			}
-		});
-		fetch();
+			})
+		);
 	};
 
 	const fetchAvailableLabels = async (e?) => {
-		const labels = await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "getLabels",
-			providerId: pr.providerId,
-			params: {
+		const labels = (await dispatch(
+			api("getLabels", {
 				owner: ghRepo.repoOwner,
 				repo: ghRepo.repoName
-			}
-		});
+			})
+		)) as any;
 		setAvailableLabels(labels);
 	};
 
@@ -488,31 +507,25 @@ export const PullRequestConversationTab = (props: {
 		} else {
 			return [{ label: <LoadingMessage>Loading Labels...</LoadingMessage>, noHover: true }];
 		}
-	}, [availableLabels, pr]);
+	}, [derivedState.currentPullRequest, availableLabels, pr]);
 
 	const setLabel = async (id: string, onOff: boolean) => {
 		setIsLoadingMessage(onOff ? "Adding Label..." : "Removing Label...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "setLabelOnPullRequest",
-			providerId: pr.providerId,
-			params: {
-				pullRequestId: derivedState.currentPullRequestId,
+		await dispatch(
+			api("setLabelOnPullRequest", {
 				labelId: id,
 				onOff
-			}
-		});
-		fetch();
+			})
+		);
 	};
 
 	const fetchAvailableProjects = async (e?) => {
-		const projects = await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "getProjects",
-			providerId: pr.providerId,
-			params: {
+		const projects = (await dispatch(
+			api("getProjects", {
 				owner: ghRepo.repoOwner,
 				repo: ghRepo.repoName
-			}
-		});
+			})
+		)) as any;
 		setAvailableProjects(projects);
 	};
 
@@ -539,31 +552,25 @@ export const PullRequestConversationTab = (props: {
 		} else {
 			return [{ label: <LoadingMessage>Loading Projects...</LoadingMessage>, noHover: true }];
 		}
-	}, [availableProjects, pr]);
+	}, [derivedState.currentPullRequest, availableProjects, pr]);
 
 	const setProject = async (id: string, onOff: boolean) => {
 		setIsLoadingMessage(onOff ? "Adding to Project..." : "Removing from Project...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "toggleProjectOnPullRequest",
-			providerId: pr.providerId,
-			params: {
-				pullRequestId: derivedState.currentPullRequestId,
+		dispatch(
+			api("toggleProjectOnPullRequest", {
 				projectId: id,
 				onOff
-			}
-		});
-		fetch();
+			})
+		);
 	};
 
 	const fetchAvailableMilestones = async (e?) => {
-		const milestones = await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "getMilestones",
-			providerId: pr.providerId,
-			params: {
+		const milestones = (await dispatch(
+			api("getMilestones", {
 				owner: ghRepo.repoOwner,
 				repo: ghRepo.repoName
-			}
-		});
+			})
+		)) as any;
 		setAvailableMilestones(milestones);
 	};
 
@@ -595,33 +602,27 @@ export const PullRequestConversationTab = (props: {
 		} else {
 			return [{ label: <LoadingMessage>Loading Milestones...</LoadingMessage>, noHover: true }];
 		}
-	}, [availableMilestones, pr]);
+	}, [derivedState.currentPullRequest, availableMilestones, pr]);
 
 	const setMilestone = async (id: string, onOff: boolean) => {
 		setIsLoadingMessage(onOff ? "Adding Milestone..." : "Clearing Milestone...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "toggleMilestoneOnPullRequest",
-			providerId: pr.providerId,
-			params: {
-				pullRequestId: derivedState.currentPullRequestId,
+		dispatch(
+			api("toggleMilestoneOnPullRequest", {
 				milestoneId: id,
 				onOff
-			}
-		});
-		fetch();
+			})
+		);
 	};
 
-	const fetchAvailableIssues = async (e?) => {
-		const issues = await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "getIssues",
-			providerId: pr.providerId,
-			params: {
-				owner: ghRepo.repoOwner,
-				repo: ghRepo.repoName
-			}
-		});
-		setAvailableIssues(issues);
-	};
+	// const fetchAvailableIssues = async (e?) => {
+	// 	const issues = (await dispatch(
+	// 		api("getIssues", {
+	// 			owner: ghRepo.repoOwner,
+	// 			repo: ghRepo.repoName
+	// 		})
+	// 	)) as any;
+	// 	setAvailableIssues(issues);
+	// };
 
 	// const issueMenuItems = React.useMemo(() => {
 	// 	if (availableIssues && availableIssues.length) {
@@ -644,37 +645,39 @@ export const PullRequestConversationTab = (props: {
 	// 	}
 	// }, [availableIssues, pr]);
 
-	const setIssue = async (id: string, onOff: boolean) => {
-		setIsLoadingMessage(onOff ? "Adding Issue..." : "Removing Issue...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "setIssueOnPullRequest",
-			providerId: pr.providerId,
-			params: {
-				owner: ghRepo.repoOwner,
-				repo: ghRepo.repoName,
-				pullRequestId: pr.number,
-				issueId: id,
-				onOff
-			}
-		});
-		fetch();
-	};
+	// const setIssue = async (id: string, onOff: boolean) => {
+	// 	setIsLoadingMessage(onOff ? "Adding Issue..." : "Removing Issue...");
+	// 	await dispatch(
+	// 		api("setIssueOnPullRequest", {
+	// 			owner: ghRepo.repoOwner,
+	// 			repo: ghRepo.repoName,
+	// 			issueId: id,
+	// 			onOff
+	// 		})
+	// 	);
+	// 	fetch();
+	// };
 
 	const toggleSubscription = async () => {
 		const onOff = pr.viewerSubscription === "SUBSCRIBED" ? false : true;
 		setIsLoadingMessage(onOff ? "Subscribing..." : "Unsubscribing...");
-		await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-			method: "updatePullRequestSubscription",
-			providerId: pr.providerId,
-			params: {
+		await dispatch(
+			api("updatePullRequestSubscription", {
 				owner: ghRepo.repoOwner,
 				repo: ghRepo.repoName,
-				pullRequestId: derivedState.currentPullRequestId,
 				onOff
-			}
-		});
-		fetch();
+			})
+		);
 	};
+
+	const requiredApprovingReviewCount = useMemo(() => {
+		if (ghRepo.branchProtectionRules) {
+			const rules = ghRepo.branchProtectionRules.nodes.find(rule =>
+				rule.matchingRefs.nodes.find(matchingRef => matchingRef.name === pr.baseRefName)
+			);
+			return rules ? rules.requiredApprovingReviewCount : undefined;
+		}
+	}, [ghRepo, pr]);
 
 	// console.warn("ASSI: ", assigneeMenuItems);
 	return (
@@ -803,28 +806,94 @@ export const PullRequestConversationTab = (props: {
 								<Button
 									className="no-wrap"
 									variant="secondary"
-									onClick={() => setIsDraftPullRequest(true)}
+									onClick={() => markPullRequestReadyForReview(true)}
 								>
 									Ready for review
 								</Button>
 							</PRResolveConflictsRow>
 						</PRCommentCard>
-					) : pr.reviewDecision === "REVIEW_REQUIRED" ? (
+					) : pr.mergeStateStatus === "BLOCKED" ? (
 						<PRCommentCard>
 							<PRStatusHeadshot className="gray-background">
 								<Icon name="git-merge" />
 							</PRStatusHeadshot>
-							<div style={{ padding: "5px 0" }}>
-								<PRResolveConflictsRow>
-									<PRIconButton className="red-background">
-										<Icon name="x" />
-									</PRIconButton>
-									<div className="middle">
-										<h1>Review Required</h1>
-										Reviews are required by reviewers with write access.
-									</div>
-								</PRResolveConflictsRow>
-							</div>
+							{pr.reviewDecision === "REVIEW_REQUIRED" ? (
+								<PRResolveConflicts>
+									<PRResolveConflictsRow>
+										<PRIconButton className="red-background">
+											<Icon name="x" />
+										</PRIconButton>
+										<div className="middle">
+											<h1>Review Required</h1>
+											{requiredApprovingReviewCount ? (
+												<>
+													At least {requiredApprovingReviewCount} approving review
+													{requiredApprovingReviewCount > 1 ? "s" : ""} are required by reviewers
+													with write access.{" "}
+													<Link href="https://docs.github.com/en/github/collaborating-with-issues-and-pull-requests/about-pull-request-reviews">
+														Learn more.
+													</Link>
+												</>
+											) : (
+												<>Reviews are required by reviewers with write access.</>
+											)}
+										</div>
+									</PRResolveConflictsRow>
+									<PullRequestReviewStatus
+										pr={pr}
+										opinionatedReviews={Object.values(opinionatedReviewsHash)}
+									/>
+									<PRResolveConflictsRow>
+										<PRIconButton className="red-background">
+											<Icon name="x" />
+										</PRIconButton>
+										<div className="middle">
+											<h1>Merging is blocked</h1>
+											{requiredApprovingReviewCount && (
+												<>
+													Merging can be performed automatically with {requiredApprovingReviewCount}{" "}
+													approving review{requiredApprovingReviewCount > 1 ? "s" : ""}.
+												</>
+											)}
+										</div>
+									</PRResolveConflictsRow>
+									{ghRepo.viewerPermission === "ADMIN" && (
+										<Merge
+											ghRepo={ghRepo}
+											action={mergePullRequest}
+											onSelect={setMergeMethod}
+											defaultMergeMethod={derivedState.defaultMergeMethod}
+											mergeText="As an administrator, you may still merge this pull request."
+										/>
+									)}
+								</PRResolveConflicts>
+							) : ghRepo.viewerPermission === "READ" ? (
+								<PRResolveConflicts>
+									<PRResolveConflictsRow>
+										<PRIconButton className="red-background">
+											<Icon name="x" />
+										</PRIconButton>
+										<div className="middle">
+											<h1>Merging is blocked</h1>
+											The base branch restricts merging to authorized users.{" "}
+											<Link href="https://docs.github.com/en/github/administering-a-repository/about-protected-branches">
+												Learn more about protected branches.
+											</Link>
+										</div>
+									</PRResolveConflictsRow>
+								</PRResolveConflicts>
+							) : (
+								<PRResolveConflicts>
+									<PRResolveConflictsRow>
+										<PRIconButton className="red-background">
+											<Icon name="x" />
+										</PRIconButton>
+										<div className="middle">
+											<h1>Merging is blocked</h1>
+										</div>
+									</PRResolveConflictsRow>
+								</PRResolveConflicts>
+							)}
 						</PRCommentCard>
 					) : !pr.merged && pr.mergeable === "MERGEABLE" && pr.state !== "CLOSED" ? (
 						<PRCommentCard className="green-border dark-header">
@@ -868,65 +937,12 @@ export const PullRequestConversationTab = (props: {
 								</div>
 							</PRCommentHeader>
 							{ghRepo.viewerPermission !== "READ" && (
-								<div style={{ padding: "5px 0" }}>
-									<PRButtonRow className="align-left">
-										<DropdownButton
-											items={[
-												{
-													key: "MERGE",
-													label: "Create a merge commit",
-													subtext: (
-														<span>
-															All commits from this branch will be added to
-															<br />
-															the base branch via a merge commit.
-															{!ghRepo.mergeCommitAllowed && (
-																<>
-																	<br />
-																	<small>Not enabled for this repository</small>
-																</>
-															)}
-														</span>
-													),
-													disabled: !ghRepo.mergeCommitAllowed,
-													onSelect: () => setMergeMethod("MERGE"),
-													action: () => mergePullRequest({ mergeMethod: "MERGE" })
-												},
-												{
-													key: "SQUASH",
-													label: "Squash and merge",
-													subtext: (
-														<span>
-															The commits from this branch will be combined
-															<br />
-															into one commit in the base branch.
-														</span>
-													),
-													disabled: !ghRepo.squashMergeAllowed,
-													onSelect: () => setMergeMethod("SQUASH"),
-													action: () => mergePullRequest({ mergeMethod: "SQUASH" })
-												},
-												{
-													key: "REBASE",
-													label: "Rebase and merge",
-													subtext: (
-														<span>
-															The commits from this branch will be rebased
-															<br />
-															and added to the base branch.
-														</span>
-													),
-													disabled: !ghRepo.rebaseMergeAllowed,
-													onSelect: () => setMergeMethod("REBASE"),
-													action: () => mergePullRequest({ mergeMethod: "REBASE" })
-												}
-											]}
-											selectedKey={derivedState.defaultMergeMethod}
-											variant="success"
-											splitDropdown
-										/>
-									</PRButtonRow>
-								</div>
+								<Merge
+									ghRepo={ghRepo}
+									action={mergePullRequest}
+									onSelect={setMergeMethod}
+									defaultMergeMethod={derivedState.defaultMergeMethod}
+								/>
 							)}
 						</PRCommentCard>
 					) : !pr.merged && pr.mergeable === "UNKNOWN" ? (
@@ -934,7 +950,7 @@ export const PullRequestConversationTab = (props: {
 							<PRStatusHeadshot className="gray-background">
 								<Icon name="git-merge" />
 							</PRStatusHeadshot>
-							<div style={{ padding: "5px 0" }}>
+							<PRResolveConflicts>
 								<PRResolveConflictsRow>
 									<PRIconButton className="gray-background">
 										<Icon name="alert" />
@@ -961,7 +977,7 @@ export const PullRequestConversationTab = (props: {
 										</Button>
 									)}
 								</PRResolveConflictsRow>
-							</div>
+							</PRResolveConflicts>
 						</PRCommentCard>
 					) : !pr.merged && pr.mergeable === "CONFLICTING" ? (
 						<PRCommentCard>
@@ -972,7 +988,7 @@ export const PullRequestConversationTab = (props: {
 								pr={pr}
 								opinionatedReviews={Object.values(opinionatedReviewsHash)}
 							/>
-							<div style={{ padding: "5px 0" }}>
+							<PRResolveConflicts>
 								<PRResolveConflictsRow>
 									<PRIconButton className="gray-background">
 										<Icon name="alert" />
@@ -1066,7 +1082,7 @@ export const PullRequestConversationTab = (props: {
 										/>
 									</div>
 								)}
-							</div>
+							</PRResolveConflicts>
 						</PRCommentCard>
 					) : !pr.merged && pr.mergeable !== "CONFLICTING" && pr.state === "CLOSED" ? (
 						<PRCommentCard>
@@ -1094,7 +1110,6 @@ export const PullRequestConversationTab = (props: {
 				</PRComment>
 				<PullRequestBottomComment
 					pr={pr}
-					fetch={fetch}
 					setIsLoadingMessage={setIsLoadingMessage}
 					__onDidRender={__onDidRender}
 				/>
@@ -1322,6 +1337,78 @@ export const PullRequestConversationTab = (props: {
 				</PRSection>
 			</PRSidebar>
 		</PRContent>
+	);
+};
+
+const Merge = (props: {
+	ghRepo: any;
+	onSelect: Function;
+	action: Function;
+	defaultMergeMethod: string;
+	mergeText?: string;
+}) => {
+	const { ghRepo, onSelect, action, defaultMergeMethod, mergeText } = props;
+	return (
+		<div style={{ padding: "5px 0" }}>
+			{mergeText}
+			<PRButtonRow className="align-left">
+				<DropdownButton
+					items={[
+						{
+							key: "MERGE",
+							label: "Create a merge commit",
+							subtext: (
+								<span>
+									All commits from this branch will be added to
+									<br />
+									the base branch via a merge commit.
+									{!ghRepo.mergeCommitAllowed && (
+										<>
+											<br />
+											<small>Not enabled for this repository</small>
+										</>
+									)}
+								</span>
+							),
+							disabled: !ghRepo.mergeCommitAllowed,
+							onSelect: () => onSelect("MERGE"),
+							action: () => action({ mergeMethod: "MERGE" })
+						},
+						{
+							key: "SQUASH",
+							label: "Squash and merge",
+							subtext: (
+								<span>
+									The commits from this branch will be combined
+									<br />
+									into one commit in the base branch.
+								</span>
+							),
+							disabled: !ghRepo.squashMergeAllowed,
+							onSelect: () => onSelect("SQUASH"),
+							action: () => action({ mergeMethod: "SQUASH" })
+						},
+						{
+							key: "REBASE",
+							label: "Rebase and merge",
+							subtext: (
+								<span>
+									The commits from this branch will be rebased
+									<br />
+									and added to the base branch.
+								</span>
+							),
+							disabled: !ghRepo.rebaseMergeAllowed,
+							onSelect: () => onSelect("REBASE"),
+							action: () => action({ mergeMethod: "REBASE" })
+						}
+					]}
+					selectedKey={defaultMergeMethod}
+					variant="success"
+					splitDropdown
+				/>
+			</PRButtonRow>
+		</div>
 	);
 };
 

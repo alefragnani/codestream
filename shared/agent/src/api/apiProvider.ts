@@ -4,6 +4,7 @@ import {
 	AccessToken,
 	AddEnterpriseProviderHostRequest,
 	AddEnterpriseProviderHostResponse,
+	AddMarkersResponse,
 	AddReferenceLocationRequest,
 	AddReferenceLocationResponse,
 	ArchiveStreamRequest,
@@ -30,6 +31,8 @@ import {
 	CreateRepoResponse,
 	DeleteCodemarkRequest,
 	DeleteCodemarkResponse,
+	DeleteMarkerRequest,
+	DeleteMarkerResponse,
 	DeletePostRequest,
 	DeletePostResponse,
 	DeleteReviewRequest,
@@ -127,7 +130,6 @@ import {
 	SetCodemarkStatusRequest,
 	SetCodemarkStatusResponse,
 	SetModifiedReposRequest,
-	SetModifiedReposResponse,
 	SetStreamPurposeRequest,
 	SetStreamPurposeResponse,
 	ThirdPartyProviderSetTokenRequest,
@@ -310,6 +312,7 @@ export interface ApiProvider {
 
 	readonly teamId: string;
 	readonly userId: string;
+	readonly meUser: CSMe | undefined;
 	readonly capabilities: Capabilities;
 	readonly features: CSApiFeatures | undefined;
 	readonly runTimeEnvironment: string | undefined;
@@ -330,7 +333,7 @@ export interface ApiProvider {
 	updatePreferences(request: UpdatePreferencesRequest): Promise<UpdatePreferencesResponse>;
 	updateInvisible(request: UpdateInvisibleRequest): Promise<UpdateInvisibleResponse>;
 	updateStatus(request: UpdateStatusRequest): Promise<UpdateStatusResponse>;
-	setModifiedRepos(request: SetModifiedReposRequest): Promise<SetModifiedReposResponse>;
+	setModifiedRepos(request: SetModifiedReposRequest): Promise<void>;
 	getPreferences(): Promise<GetPreferencesResponse>;
 	updatePresence(request: UpdatePresenceRequest): Promise<UpdatePresenceResponse>;
 	getTelemetryKey(): Promise<string>;
@@ -365,6 +368,11 @@ export interface ApiProvider {
 		oldMarkerId: string;
 		newMarker: CreateMarkerRequest;
 	}): Promise<MoveMarkerResponse>;
+	addMarkers(request: {
+		codemarkId: string;
+		newMarkers: CreateMarkerRequest[];
+	}): Promise<AddMarkersResponse>;
+	deleteMarker(request: DeleteMarkerRequest): Promise<DeleteMarkerResponse>;
 
 	createExternalPost(request: CreateExternalPostRequest): Promise<CreatePostResponse>;
 	createPost(request: CreatePostRequest): Promise<CreatePostResponse>;
@@ -395,7 +403,9 @@ export interface ApiProvider {
 	deleteReview(request: DeleteReviewRequest): Promise<DeleteReviewResponse>;
 
 	fetchReviewDiffs(request: FetchReviewDiffsRequest): Promise<FetchReviewDiffsResponse>;
-	fetchReviewCheckpointDiffs(request: FetchReviewCheckpointDiffsRequest): Promise<FetchReviewCheckpointDiffsResponse>;
+	fetchReviewCheckpointDiffs(
+		request: FetchReviewCheckpointDiffsRequest
+	): Promise<FetchReviewCheckpointDiffsResponse>;
 
 	createChannelStream(request: CreateChannelStreamRequest): Promise<CreateChannelStreamResponse>;
 	createDirectStream(request: CreateDirectStreamRequest): Promise<CreateDirectStreamResponse>;
@@ -422,7 +432,6 @@ export interface ApiProvider {
 	fetchCompanies(request: FetchCompaniesRequest): Promise<FetchCompaniesResponse>;
 	getCompany(request: GetCompanyRequest): Promise<GetCompanyResponse>;
 
-	convertUserIdToCodeStreamUserId(id: string): string;
 	fetchUsers(request: FetchUsersRequest): Promise<FetchUsersResponse>;
 	getUser(request: GetUserRequest): Promise<GetUserResponse>;
 	inviteUser(request: InviteUserRequest): Promise<InviteUserResponse>;
@@ -457,8 +466,12 @@ export interface ApiProvider {
 
 	verifyConnectivity(): Promise<VerifyConnectivityResponse>;
 	setServerUrl(url: string): void;
-}
 
+	get<R extends object>(url: string, token?: string): Promise<R>;
+	post<RQ extends object, R extends object>(url: string, body: any, token?: string): Promise<R>;
+	put<RQ extends object, R extends object>(url: string, body: RQ, token?: string): Promise<R>;
+	delete<R extends object>(url: string, token?: string): Promise<R>;
+}
 export interface CodeStreamApiMiddlewareContext {
 	url: string;
 	method: string;

@@ -8,6 +8,7 @@ import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationNamesInfo
 import org.eclipse.lsp4j.Range
 import org.eclipse.lsp4j.TextDocumentIdentifier
+import org.eclipse.lsp4j.WorkspaceFolder
 
 class ProxySettings(val url: String, val strictSSL: Boolean)
 
@@ -21,6 +22,7 @@ class InitializationOptions(
     val disableStrictSSL: Boolean,
     val traceLevel: String,
     val gitPath: String?,
+    val workspaceFolders: Set<WorkspaceFolder>,
     val recordRequests: Boolean = RECORD_REQUESTS
 )
 
@@ -132,11 +134,22 @@ class DocumentMarkersResult(val markers: List<DocumentMarker>, val markersNotLoc
 class DocumentMarker(
     val id: String,
     val codemark: Codemark?,
+    val creatorName: String,
+    val createdAt: Long,
     val type: String?,
-//    creatorName: string;
     val range: Range,
-    val summary: String
-//    summaryMarkdown: string;
+    val summary: String,
+    val externalContent: DocumentMarkerExternalContent?
+)
+
+class DocumentMarkerExternalContent(
+    val provider: DocumentMarkerExternalContentProvider?,
+    val externalId: String,
+    val externalChildId: String?
+)
+
+class DocumentMarkerExternalContentProvider(
+    val id: String
 )
 
 class CreatePermalinkParams(
@@ -233,7 +246,8 @@ class Codemark(
     val postId: String?,
     val status: String?,
     val pinned: Boolean?,
-    val followerIds: List<String>?
+    val followerIds: List<String>?,
+    val reviewId: String?
 )
 
 class TextDocument(val uri: String)
@@ -268,6 +282,17 @@ class Review(
     val title: String,
     val followerIds: List<String>?,
     val reviewChangesets: List<ReviewChangeset>
+)
+
+class PullRequest(
+    val title: String,
+    val providerId: String,
+    val id: String
+)
+
+class PullRequestNotification(
+    val queryName: String,
+    val pullRequest: PullRequest
 )
 
 class ReviewChangeset(
@@ -311,6 +336,24 @@ class GetPostParams(
 )
 
 class GetReviewParams(val reviewId: String)
+
+class getPullRequestFilesChangedParams(val pullRequestId: String)
+
+class getPullRequestFilesParams(
+    val method: String,
+    val providerId: String,
+    val params: getPullRequestFilesChangedParams
+)
+
+class PullRequestFile (
+    val sha: String,
+    val filename: String,
+    val status: String,
+    val additions: Int,
+    val changes: Int,
+    val deletions: Int,
+    val patch: String?
+)
 
 class Marker(
     val id: String,

@@ -1,7 +1,7 @@
 "use strict";
 
 import { ParsedDiff } from "diff";
-import { RepoScmStatus, ThirdPartyProviders } from "./agent.protocol";
+import { CompactModifiedRepo, RepoScmStatus, ThirdPartyProviders } from "./agent.protocol";
 import { CSReviewCheckpoint } from "./api.protocol";
 
 export interface CSEntity {
@@ -27,7 +27,8 @@ export enum CodemarkType {
 	Trap = "trap",
 	Link = "link",
 	Review = "review",
-	Reaction = "reaction"
+	Reaction = "reaction",
+	PRComment = "prcomment"
 }
 
 export enum CodemarkStatus {
@@ -119,7 +120,7 @@ export type CSLocationArray = [number, number, number, number, CSLocationMeta | 
 export interface CSReferenceLocation {
 	commitHash?: string;
 	location: CSLocationArray;
-	flags: {
+	flags?: {
 		canonical?: boolean;
 		uncommitted?: boolean;
 		backtracked?: boolean;
@@ -379,6 +380,7 @@ export interface CSCompany extends CSEntity {
 	trialStartDate?: number;
 	trialEndDate?: number;
 	plan?: string;
+	reportingGroup?: string;
 }
 
 export interface CSTeam extends CSEntity {
@@ -406,9 +408,30 @@ export interface CSTeam extends CSEntity {
 	// only used for analytics and reporting. differentiates between teams created by us employees
 	reportingGroup?: string;
 
-	settings?: {
-		[setting: string]: any;
+	settings?: CSTeamSettings;
+}
+
+export interface CSTeamSettings {
+	limitAuthentication?: boolean;
+	limitCodeHost?: boolean;
+	limitMessage?: boolean;
+	limitIssues?: boolean;
+	authenticationProviders?: {
+		[providerId: string]: boolean;
 	};
+	codeHostProviders?: {
+		[providerId: string]: boolean;
+	};
+	messagingProviders?: {
+		[providerId: string]: boolean;
+	};
+	issuesProviders?: {
+		[providerId: string]: boolean;
+	};
+	autoJoinRepos?: {
+		[repoId: string]: boolean;
+	};
+	[setting: string]: any;
 }
 
 export interface CSTag {
@@ -422,6 +445,7 @@ export interface CSTag {
 export interface CSAsanaProviderInfo {
 	refreshToken: string;
 	accessToken: string;
+	tokenError?: any;
 	expiresAt: number;
 	userId: string;
 	hosts: { [host: string]: CSAsanaProviderInfo };
@@ -430,6 +454,7 @@ export interface CSAsanaProviderInfo {
 export interface CSBitbucketProviderInfo {
 	refreshToken: string;
 	accessToken: string;
+	tokenError?: any;
 	expiresAt: number;
 	userId: string;
 	hosts: { [host: string]: CSBitbucketProviderInfo };
@@ -441,15 +466,18 @@ export interface CSBitbucketProviderInfo {
 
 export interface CSGitHubProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	userId: string;
 	hosts: { [host: string]: CSGitHubProviderInfo };
 	data?: {
 		baseUrl?: string;
+		[key: string]: any;
 	};
 }
 
 export interface CSGitLabProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	userId: string;
 	hosts: { [host: string]: CSGitLabProviderInfo };
 	data?: {
@@ -459,6 +487,7 @@ export interface CSGitLabProviderInfo {
 
 export interface CSJiraProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	refreshToken: string;
 	expiresAt: number;
 	hosts: { [hosts: string]: CSJiraProviderInfo };
@@ -466,6 +495,7 @@ export interface CSJiraProviderInfo {
 
 export interface CSMSTeamsProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	data: {
 		expires_in: number;
 		scope: string;
@@ -485,12 +515,14 @@ export interface CSMSTeamsProviderInfo {
 
 export interface CSJiraServerProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	oauthTokenSecret: string;
 	hosts: { [hosts: string]: CSJiraServerProviderInfo };
 }
 
 export interface CSSlackProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	teamId: string;
 	userId: string;
 	hosts?: { [host: string]: CSSlackProviderInfo };
@@ -503,6 +535,7 @@ export interface CSSlackProviderInfo {
 
 export interface MSTeamsProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	refreshToken: string;
 	expiresAt: number;
 	teamId: string;
@@ -517,6 +550,7 @@ export interface MSTeamsProviderInfo {
 
 export interface CSTrelloProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	apiKey: string;
 	userId: string;
 	hosts: { [host: string]: CSTrelloProviderInfo };
@@ -524,6 +558,7 @@ export interface CSTrelloProviderInfo {
 
 export interface CSYouTrackProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	userId: string;
 	hosts: { [host: string]: CSYouTrackProviderInfo };
 	data?: {
@@ -533,12 +568,20 @@ export interface CSYouTrackProviderInfo {
 
 export interface CSAzureDevOpsProviderInfo {
 	accessToken: string;
+	tokenError?: any;
 	organization?: string;
 	hosts: { [host: string]: CSAzureDevOpsProviderInfo };
 }
 
 export interface CSOktaProviderInfo {
 	accessToken: string;
+	tokenError?: any;
+	hosts: { [host: string]: CSAzureDevOpsProviderInfo };
+}
+
+export interface CSClubhouseProviderInfo {
+	accessToken: string;
+	tokenError?: any;
 	hosts: { [host: string]: CSAzureDevOpsProviderInfo };
 }
 
@@ -554,7 +597,8 @@ export type CSProviderInfos =
 	| CSTrelloProviderInfo
 	| CSYouTrackProviderInfo
 	| CSAzureDevOpsProviderInfo
-	| CSOktaProviderInfo;
+	| CSOktaProviderInfo
+	| CSClubhouseProviderInfo;
 
 type Filter<T, U> = T extends U ? T : never;
 export type CSRefreshableProviderInfos = Filter<CSProviderInfos, { refreshToken: string }>;
@@ -586,6 +630,7 @@ export interface CSUser extends CSEntity {
 	// all of the local changes on disk (i.e. not pushed)
 	modifiedRepos?: { [teamId: string]: RepoScmStatus[] };
 	modifiedReposModifiedAt?: number;
+	compactModifiedRepos?: { [teamId: string]: CompactModifiedRepo[] };
 	status?: CSMeStatus;
 
 	avatar?: {
@@ -630,6 +675,13 @@ export enum CSReviewAssignmentSetting {
 	Random = "random"
 }
 
+export interface PullRequestQuery {
+	providerId: string;
+	name: string;
+	query: string;
+	hidden: boolean;
+}
+
 export interface CSMePreferences {
 	telemetryConsent?: boolean; // legacy
 	telemetryOptOut?: boolean;
@@ -637,7 +689,16 @@ export interface CSMePreferences {
 	notificationDelivery?: CSNotificationDeliveryPreference;
 	skipWallToWallBanner?: boolean;
 	skipGitEmailCheck?: boolean;
-	pullRequestFilesChangedMode?: "files" | "hunks";
+	skipEmailingAuthors?: boolean;
+	skipPostCreationModal?: boolean;
+	pullRequestFilesChangedMode?: "files" | "tree" | "hunks";
+	pullRequestQueries?: PullRequestQuery[];
+	pullRequestQueryShowAllRepos?: boolean;
+	pullRequestQueryHideLabels?: boolean;
+	pullRequestView?: "auto" | "vertical" | "side-by-side";
+	hiddenPaneNodes?: {
+		[nodeId: string]: boolean;
+	};
 	[key: string]: any;
 }
 

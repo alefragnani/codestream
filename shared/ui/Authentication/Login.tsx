@@ -3,7 +3,7 @@ import { FormattedMessage } from "react-intl";
 import { connect } from "react-redux";
 import Icon from "../Stream/Icon";
 import Button from "../Stream/Button";
-import { authenticate, startSSOSignin } from "./actions";
+import { authenticate, startSSOSignin, startIDESignin } from "./actions";
 import { CodeStreamState } from "../store";
 import { goToNewUserEntry, goToForgotPassword, goToOktaConfig } from "../store/context/actions";
 import { isOnPrem, supportsIntegrations } from "../store/configs/reducer";
@@ -20,6 +20,8 @@ interface ConnectedProps {
 	initialEmail?: string;
 	supportsIntegrations?: boolean;
 	oktaEnabled?: boolean;
+	isInVSCode?: boolean;
+	supportsVSCodeGithubSignin?: boolean;
 }
 
 interface DispatchProps {
@@ -32,6 +34,7 @@ interface DispatchProps {
 	) => ReturnType<ReturnType<typeof startSSOSignin>>;
 	goToForgotPassword: typeof goToForgotPassword;
 	goToOktaConfig: typeof goToOktaConfig;
+	startIDESignin: typeof startIDESignin;
 }
 
 interface Props extends ConnectedProps, DispatchProps {}
@@ -167,7 +170,11 @@ class Login extends React.Component<Props, State> {
 
 	handleClickGithubLogin = event => {
 		event.preventDefault();
-		this.props.startSSOSignin("github");
+		if (this.props.isInVSCode && this.props.supportsVSCodeGithubSignin) {
+			this.props.startIDESignin("github");
+		} else {
+			this.props.startSSOSignin("github");
+		}
 	};
 
 	handleClickGitlabLogin = event => {
@@ -193,116 +200,116 @@ class Login extends React.Component<Props, State> {
 	render() {
 		return (
 			<div id="login-page" className="onboarding-page">
-				<div className="standard-form-wrapper">
-					<form className="standard-form">
-						<fieldset className="form-body">
-							<div id="controls">
-								<div className="outline-box">
-									<div className="small-spacer" />
-									{this.renderError()}
-									<div id="email-controls" className="control-group">
-										<label>
-											<FormattedMessage id="login.email.label" />
-										</label>
-										<input
-											id="login-input-email"
-											className="input-text control"
-											type="text"
-											name="email"
-											value={this.state.email}
-											onChange={e => this.setState({ email: e.target.value })}
-											onBlur={this.onBlurEmail}
-											required={this.state.emailTouched}
-										/>
-										{this.renderEmailError()}
-									</div>
-									<div id="password-controls" className="control-group">
-										<label>
-											<FormattedMessage id="login.password.label" />
-										</label>
-										<input
-											id="login-input-password"
-											className="input-text"
-											type="password"
-											name="password"
-											value={this.state.password}
-											onChange={e => this.setState({ password: e.target.value })}
-											onBlur={this.onBlurPassword}
-											required={this.state.passwordTouched}
-										/>
-										{this.renderPasswordHelp()}
-										{
-											<div className="help-link">
-												<a onClick={this.onClickForgotPassword}>
-													<FormattedMessage id="login.forgotPassword" />
-												</a>
-											</div>
-										}
-									</div>
+				<form className="standard-form">
+					<fieldset className="form-body">
+						{/* this.renderAccountMessage() */}
+						<div id="controls">
+							{this.props.supportsIntegrations && (
+								<div className="border-bottom-box">
 									<Button
-										className="row-button"
-										onClick={this.submitCredentials}
-										loading={this.state.loading}
+										className="row-button zero-top-margin"
+										onClick={this.handleClickGithubLogin}
 									>
-										<Icon name="codestream" />
-										<div className="copy">Sign In with CodeStream</div>
+										<Icon name="mark-github" />
+										<div className="copy">Sign In with GitHub</div>
 										<Icon name="chevron-right" />
 									</Button>
-								</div>
-							</div>
-						</fieldset>
-					</form>
-					<form className="standard-form">
-						<fieldset className="form-body">
-							{/* this.renderAccountMessage() */}
-							<div id="controls">
-								{this.props.supportsIntegrations && (
-									<div className="outline-box">
+									<Button
+										className="row-button no-top-margin"
+										onClick={this.handleClickGitlabLogin}
+									>
+										<Icon name="gitlab" />
+										<div className="copy">Sign In with GitLab</div>
+										<Icon name="chevron-right" />
+									</Button>
+									<Button
+										className="row-button no-top-margin"
+										onClick={this.handleClickBitbucketLogin}
+									>
+										<Icon name="bitbucket" />
+										<div className="copy">Sign In with Bitbucket</div>
+										<Icon name="chevron-right" />
+									</Button>
+									{this.props.oktaEnabled && (
 										<Button
 											className="row-button no-top-margin"
-											onClick={this.handleClickGithubLogin}
+											onClick={this.handleClickOktaLogin}
 										>
-											<Icon name="mark-github" />
-											<div className="copy">Sign In with GitHub</div>
+											<Icon name="okta" />
+											<div className="copy">Sign In with Okta</div>
 											<Icon name="chevron-right" />
 										</Button>
-										<Button
-											className="row-button no-top-margin"
-											onClick={this.handleClickGitlabLogin}
-										>
-											<Icon name="gitlab" />
-											<div className="copy">Sign In with GitLab</div>
-											<Icon name="chevron-right" />
-										</Button>
-										<Button
-											className="row-button no-top-margin"
-											onClick={this.handleClickBitbucketLogin}
-										>
-											<Icon name="bitbucket" />
-											<div className="copy">Sign In with Bitbucket</div>
-											<Icon name="chevron-right" />
-										</Button>
-										{this.props.oktaEnabled && (
-											<Button
-												className="row-button no-top-margin"
-												onClick={this.handleClickOktaLogin}
-											>
-												<Icon name="okta" />
-												<div className="copy">Sign In with Okta</div>
-												<Icon name="chevron-right" />
-											</Button>
-										)}
+									)}
+									<div className="separator-label">
+										<span className="or">or</span>
 									</div>
-								)}
-								<div className="footer">
-									<p>
-										Don't have an account? <a onClick={this.handleClickSignup}>Sign Up</a>
-									</p>
 								</div>
+							)}
+						</div>
+					</fieldset>
+				</form>
+				<form className="standard-form">
+					<fieldset className="form-body">
+						<div id="controls">
+							<div className="border-bottom-box">
+								{this.renderError()}
+								<div id="email-controls" className="control-group">
+									<label>
+										<FormattedMessage id="login.email.label" />
+									</label>
+									<input
+										id="login-input-email"
+										className="input-text control"
+										type="text"
+										name="email"
+										value={this.state.email}
+										onChange={e => this.setState({ email: e.target.value })}
+										onBlur={this.onBlurEmail}
+										required={this.state.emailTouched}
+									/>
+									{this.renderEmailError()}
+								</div>
+								<div id="password-controls" className="control-group">
+									<label>
+										<FormattedMessage id="login.password.label" />
+									</label>
+									<input
+										id="login-input-password"
+										className="input-text"
+										type="password"
+										name="password"
+										value={this.state.password}
+										onChange={e => this.setState({ password: e.target.value })}
+										onBlur={this.onBlurPassword}
+										required={this.state.passwordTouched}
+									/>
+									{this.renderPasswordHelp()}
+									{
+										<div className="help-link">
+											<a onClick={this.onClickForgotPassword}>
+												<FormattedMessage id="login.forgotPassword" />
+											</a>
+										</div>
+									}
+								</div>
+								<Button
+									className="row-button"
+									onClick={this.submitCredentials}
+									loading={this.state.loading}
+								>
+									<Icon name="codestream" />
+									<div className="copy">Sign In with CodeStream</div>
+									<Icon name="chevron-right" />
+								</Button>
 							</div>
-						</fieldset>
-					</form>
-				</div>
+						</div>
+						<div className="footer">
+							<p>
+								Don't have an account? <a onClick={this.handleClickSignup}>Sign Up</a>
+							</p>
+						</div>
+					</fieldset>
+				</form>
 			</div>
 		);
 	}
@@ -313,10 +320,12 @@ const ConnectedLogin = connect<ConnectedProps, any, any, CodeStreamState>(
 		return {
 			initialEmail: props.email !== undefined ? props.email : state.configs.email,
 			supportsIntegrations: supportsIntegrations(state.configs),
-			oktaEnabled: isOnPrem(state.configs)
+			oktaEnabled: isOnPrem(state.configs),
+			isInVSCode: state.ide.name === 'VSC',
+			supportsVSCodeGithubSignin: state.capabilities.vsCodeGithubSignin
 		};
 	},
-	{ authenticate, goToNewUserEntry, startSSOSignin, goToForgotPassword, goToOktaConfig }
+	{ authenticate, goToNewUserEntry, startSSOSignin, startIDESignin, goToForgotPassword, goToOktaConfig }
 )(Login);
 
 export { ConnectedLogin as Login };

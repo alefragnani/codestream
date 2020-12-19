@@ -12,7 +12,12 @@ import { RepositionCodemark } from "./RepositionCodemark";
 import { markdownify } from "./Markdowner";
 import Timestamp from "./Timestamp";
 import CodemarkDetails from "./CodemarkDetails";
-import { DocumentMarker, CodemarkPlus, Capabilities } from "@codestream/protocols/agent";
+import {
+	DocumentMarker,
+	CodemarkPlus,
+	Capabilities,
+	MarkerNotLocated
+} from "@codestream/protocols/agent";
 import {
 	CodemarkType,
 	CSUser,
@@ -73,6 +78,9 @@ import { isFeatureEnabled } from "../store/apiVersioning/reducer";
 import { HeadshotName } from "../src/components/HeadshotName";
 import { PRCodeCommentPatch } from "./PullRequestComponents";
 import { PullRequestPatch } from "./PullRequestPatch";
+import MarkerActions from "./MarkerActions";
+import { MarkdownText } from "./MarkdownText";
+import { AddReactionIcon, Reactions } from "./Reactions";
 
 interface State {
 	hover: boolean;
@@ -123,24 +131,26 @@ interface ConnectedProps {
 	currentMarkerId?: string;
 	isRepositioning?: boolean;
 	review?: CSReview;
+	post?: CSPost;
 	moveMarkersEnabled: boolean;
 }
 
 export type DisplayType = "default" | "collapsed" | "activity";
 
 interface InheritedProps {
-	contextName?: "Spatial View" | "Codemarks Tab";
+	contextName?: "Spatial View" | "Codemarks Tab" | "Sidebar";
 	displayType?: DisplayType;
 	selected?: boolean;
 	codemark?: CodemarkPlus;
-	marker: DocumentMarker;
+	marker: DocumentMarker | MarkerNotLocated;
 	postAction?(...args: any[]): any;
 	action(action: string, post: any, args: any): any;
-	onClick?(event: React.SyntheticEvent, marker: DocumentMarker): any;
+	onClick?(event: React.SyntheticEvent, marker: DocumentMarker | MarkerNotLocated): any;
 	highlightCodeInTextEditor?: boolean;
 	query?: string;
 	hidden?: boolean;
 	deselectCodemarks?: Function;
+	wrap?: boolean;
 }
 
 type Props = InheritedProps & DispatchProps & ConnectedProps;
@@ -156,6 +166,7 @@ export class Codemark extends React.Component<Props, State> {
 	private _markersToHighlight: { [markerId: string]: { range: Range; fileUri: string } } = {};
 	private _isHighlightedInTextEditor = false; // TODO: when there are multiple markers, this should be inside _markersToHighlight
 	private permalinkRef = React.createRef<HTMLTextAreaElement>();
+	private skipMarkers: number[] = [];
 
 	constructor(props: Props) {
 		super(props);
@@ -298,69 +309,88 @@ export class Codemark extends React.Component<Props, State> {
 	};
 
 	editCodemark = async (attributes: NewCodemarkAttributes) => {
-		const { text, assignees, title, relatedCodemarkIds, tags } = attributes;
-		this.props.editCodemark(this.props.codemark!.id, {
+		const {
+			text,
+			assignees,
+			title,
+			relatedCodemarkIds,
+			tags,
+			codeBlocks,
+			deleteMarkerLocations
+		} = attributes;
+		this.props.editCodemark(this.props.codemark!, {
 			text,
 			title,
 			assignees,
 			relatedCodemarkIds,
-			tags
+			tags,
+			codeBlocks,
+			deleteMarkerLocations
 		});
 		this.setState({ isEditing: false });
 	};
 
-	renderTextLinkified = text => {
-		let html;
-		if (text == null || text === "") {
-			html = "";
-		} else {
-			const me = this.props.currentUser.username;
-			html = markdownify(text).replace(/@(\w+)/g, (match: string, name: string) => {
-				if (
-					this.props.usernames.some(
-						n => name.localeCompare(n, undefined, { sensitivity: "accent" }) === 0
-					)
-				) {
-					return `<span class="at-mention${
-						me.localeCompare(name, undefined, { sensitivity: "accent" }) === 0 ? " me" : ""
-					}">${match}</span>`;
+	renderTextReplaceCodeBlocks = (text: string) => {
+		const { codemark, capabilities } = this.props;
+		if (!codemark || !codemark.markers) return <MarkdownText text={text} inline={true} />;
+
+		const blocks: any[] = [];
+		const groups = text.split(/\[#(\d+)]/);
+		let index = 0;
+		this.skipMarkers = [];
+		while (index < groups.length) {
+			blocks.push(<MarkdownText text={groups[index]} />);
+			if (index + 1 < groups.length) {
+				const markerIndex = parseInt(groups[index + 1], 10);
+				if (markerIndex > 0) {
+					const marker = codemark.markers[markerIndex - 1];
+					if (marker) {
+						this.skipMarkers.push(markerIndex - 1);
+						blocks.push(
+							<div key={index}>
+								<MarkerActions
+									key={marker.id}
+									codemark={codemark}
+									marker={marker}
+									capabilities={capabilities}
+									isAuthor={false}
+									alwaysRenderCode
+									markerIndex={index}
+									selected={true}
+									noMargin
+								/>
+							</div>
+						);
+					}
 				}
-
-				return match;
-			});
-
-			if (this.props.query) {
-				const matchQueryRegexp = new RegExp(this.props.query, "gi");
-				html = html.replace(matchQueryRegexp, "<u><b>$&</b></u>");
 			}
+			index += 2;
 		}
-
-		return <span className="title" dangerouslySetInnerHTML={{ __html: html }} />;
+		return <>{blocks}</>;
 	};
 
 	renderTypeIcon() {
-		let icon: JSX.Element | null = null;
 		const { codemark } = this.props;
-		if (codemark) {
-			switch (codemark.type) {
-				case "question":
-					icon = <Icon name="question" className="type-icon" />;
-					break;
-				case "bookmark":
-					icon = <Icon name="bookmark" className="type-icon" />;
-					break;
-				case "trap":
-					icon = <Icon name="trap" className="type-icon" />;
-					break;
-				case "issue":
-					icon = <Icon name="issue" className="type-icon" />;
-					break;
-				default:
-					icon = <Icon name="comment" className="type-icon" />;
-			}
-		}
+		if (!codemark) return null;
 
-		return icon;
+		const { externalProvider } = codemark;
+		if (externalProvider) {
+			const providerDisplay = PROVIDER_MAPPINGS[externalProvider];
+			if (providerDisplay && providerDisplay.icon)
+				return <Icon name={providerDisplay.icon} className="type-icon" />;
+		}
+		switch (codemark.type) {
+			case "question":
+				return <Icon name="question" className="type-icon" />;
+			case "bookmark":
+				return <Icon name="bookmark" className="type-icon" />;
+			case "trap":
+				return <Icon name="trap" className="type-icon" />;
+			case "issue":
+				return <Icon name="issue" className="type-icon" />;
+			default:
+				return <Icon name="comment" className="type-icon" />;
+		}
 	}
 
 	// renderVisibilitySelected = () => {
@@ -449,7 +479,7 @@ export class Codemark extends React.Component<Props, State> {
 			? null
 			: tags.map(tagId => {
 					const tag = teamTagsHash[tagId];
-					return tag ? <Tag tag={tag} placement="bottom" /> : null;
+					return tag ? <Tag key={tagId} tag={tag} placement="bottom" /> : null;
 			  });
 	};
 
@@ -535,16 +565,17 @@ export class Codemark extends React.Component<Props, State> {
 					);
 				}
 			} else {
-				return (
-					<div className="align-far-left">
-						<div
-							className={cx("status-button", { checked: status === "closed" })}
-							onClick={this.handleClickStatusToggle}
-						>
-							<Icon name="check" className="check" />
-						</div>
-					</div>
-				);
+				return null;
+				// return (
+				// 	<div className="align-far-left">
+				// 		<div
+				// 			className={cx("status-button", { checked: status === "closed" })}
+				// 			onClick={this.handleClickStatusToggle}
+				// 		>
+				// 			<Icon name="check" className="check" />
+				// 		</div>
+				// 	</div>
+				// );
 			}
 		}
 		return null;
@@ -623,10 +654,12 @@ export class Codemark extends React.Component<Props, State> {
 					fileUri: uri,
 					range: info.range
 				};
-				const position = { line: info.range.start.line, character: 0 };
-				const range = { start: position, end: position, cursor: position };
-				this._sendSelectRequest({ uri, selection: range });
-				this._sendHighlightRequest({ uri, range, highlight: true });
+				if (info.range) {
+					const position = { line: info.range.start.line, character: 0 };
+					const range = { start: position, end: position, cursor: position };
+					this._sendSelectRequest({ uri, selection: range });
+					this._sendHighlightRequest({ uri, range, highlight: true });
+				}
 			}
 		});
 	};
@@ -656,7 +689,7 @@ export class Codemark extends React.Component<Props, State> {
 
 		if (markerId && codemark && codemark.markers) {
 			getDocumentFromMarker(markerId).then(info => {
-				if (info) {
+				if (info && info.range) {
 					this._markersToHighlight[markerId] = {
 						fileUri: info.textDocument.uri,
 						range: info.range
@@ -669,7 +702,11 @@ export class Codemark extends React.Component<Props, State> {
 
 		if (marker) {
 			this._isHighlightedInTextEditor = highlight;
-			this._sendHighlightRequest({ uri: marker.fileUri, range: marker.range, highlight });
+			// @ts-ignore
+			if (marker.range) {
+				// @ts-ignore
+				this._sendHighlightRequest({ uri: marker.fileUri, range: marker.range, highlight });
+			}
 		} else {
 			for (let { fileUri: uri, range } of Object.values(this._markersToHighlight)) {
 				this._isHighlightedInTextEditor = highlight;
@@ -778,7 +815,9 @@ export class Codemark extends React.Component<Props, State> {
 		const updatedCodemark: CodemarkPlus = { ...codemark, pinned: value };
 
 		// updating optimistically. because spatial view renders DocumentMarkers, the corresponding one needs to be updated too
+		// @ts-ignore
 		if (marker && marker.fileUri != undefined) {
+			// @ts-ignore
 			this.props.addDocumentMarker(marker.fileUri, {
 				...marker,
 				codemark: updatedCodemark,
@@ -830,33 +869,56 @@ export class Codemark extends React.Component<Props, State> {
 	renderCollapsedCodemark() {
 		const { codemark, marker } = this.props;
 
-		const file: string | undefined = (() => {
-			if (!marker) {
-				// because this is being rendered in <KnowledgePanel />
-				if ((codemark!.markers || emptyArray).length > 0) {
-					return codemark!.markers![0].file;
-				}
-				return;
-			}
-			return marker.file;
+		const lines: string | undefined = (() => {
+			if (!marker) return;
+			//@ts-ignore
+			const range = marker.range;
+			if (range) {
+				if (range.start.line == range.end.line) return `Line ${range.start.line}`;
+				else return `Lines ${range.start.line}-${range.end.line}`;
+			} else return;
 		})();
 
-		if (!codemark) return null;
+		if (!codemark && !marker) return null;
 
-		// TODO: tweak this to support externalContent like PRs
+		// it's a document marker without a codemark
+		if (!codemark) {
+			if (this.props.marker.externalContent) return this.renderCollapsedFromExternalContent();
+			return null;
+		}
+
+		const renderedTags = this.renderTags(codemark);
 		return (
 			<div
-				className={cx("codemark collapsed")}
+				id={`codemark-${codemark.id}`}
+				className={cx("codemark", { collapsed: !this.props.wrap, wrap: this.props.wrap })}
 				onClick={this.handleClickCodemark}
 				onMouseEnter={this.handleMouseEnterCodemark}
 				onMouseLeave={this.handleMouseLeaveCodemark}
 			>
 				<div className="contents">
 					{this.renderStatus(codemark)}
-					<div className="body">
-						<span className={codemark.color}>{this.renderTypeIcon()}</span>
-						{this.renderTextLinkified(codemark.title || codemark.text)}
-						{file && <span className="file-name">{file}</span>}
+					<div style={{ display: "flex", alignItems: "flex-start" }}>
+						<span style={{ flexGrow: 0, flexShrink: 0 }} className={codemark.color}>
+							{this.renderTypeIcon()}
+						</span>
+						<div className="body" style={{ flexGrow: 10 }}>
+							<MarkdownText text={codemark.title || codemark.text} inline={true} />
+							{renderedTags && <span className="cs-tag-container">{renderedTags}</span>}
+						</div>
+						{codemark.numReplies > 0 && (
+							<span className="badge" style={{ marginLeft: "10px", flexGrow: 0, flexShrink: 0 }}>
+								{codemark.numReplies}
+							</span>
+						)}
+						{false && lines && (
+							<span
+								style={{ marginLeft: "auto", paddingLeft: "15px", opacity: 0.75 }}
+								className="subtle"
+							>
+								{lines}
+							</span>
+						)}
 					</div>
 				</div>
 			</div>
@@ -1307,7 +1369,7 @@ export class Codemark extends React.Component<Props, State> {
 		// menuItems.push({ label: "Set Keybinding", action: "set-keybinding", submenu: submenu });
 
 		const description =
-			codemark.title && codemark.text ? this.renderTextLinkified(codemark.text) : null;
+			codemark.title && codemark.text ? <MarkdownText text={codemark.text} inline={true} /> : null;
 
 		// show a striped header if the codemark is selected, or unhidden, and it matches
 		// manual-archive, resolved, or deleted state
@@ -1344,7 +1406,7 @@ export class Codemark extends React.Component<Props, State> {
 		// 			onMouseLeave={this.handleMouseLeaveCodemark}
 		// 			style={{ display: "flex", alignItems: "center" }}
 		// 		>
-		// 			<div>{this.renderTextLinkified(codemark.title || codemark.text)}</div>
+		// 			<div><MarkdownText text={codemark.title || codemark.text} inline={true} /></div>
 		// 			<div className="author" style={{ paddingLeft: "10px" }}>
 		// 				<b>{author.username}</b>
 		// 				<Timestamp relative time={codemark.createdAt} />
@@ -1352,6 +1414,13 @@ export class Codemark extends React.Component<Props, State> {
 		// 		</div>
 		// 	);
 		// }
+
+		const re = /\[#(\d+)]/g;
+		const matchingLocatedBlocks = {};
+		let match;
+		while ((match = re.exec(codemark.title || codemark.text))) {
+			matchingLocatedBlocks[match[1]] = true;
+		}
 
 		return (
 			<div
@@ -1362,7 +1431,8 @@ export class Codemark extends React.Component<Props, State> {
 					selected: selected,
 					unpinned: !codemark.pinned,
 					injecting: isInjecting,
-					repositioning: isRepositioning
+					repositioning: isRepositioning,
+					"has-striped-header": showStripedHeader
 				})}
 				onClick={this.handleClickCodemark}
 				onMouseEnter={this.handleMouseEnterCodemark}
@@ -1420,7 +1490,7 @@ export class Codemark extends React.Component<Props, State> {
 							{!renderExpandedBody && type === "bookmark" ? (
 								<>
 									<span className={codemark.color}>{this.renderTypeIcon()}</span>
-									{this.renderTextLinkified(codemark.title || codemark.text)}
+									<MarkdownText text={codemark.title || codemark.text} inline={true} />
 									<div className="right">
 										<span onClick={this.handleMenuClick}>
 											{menuOpen && (
@@ -1451,6 +1521,7 @@ export class Codemark extends React.Component<Props, State> {
 											</span>
 										)}
 										{this.renderStatus(codemark, menuItems)}
+										{this.props.post && <AddReactionIcon post={this.props.post} />}
 										{/* this.renderKeybinding(codemark) */}
 										{menuOpen && (
 											<Menu items={menuItems} target={menuTarget} action={this.handleSelectMenu} />
@@ -1476,7 +1547,7 @@ export class Codemark extends React.Component<Props, State> {
 							)}
 						</div>
 						{!renderAlternateBody && (renderExpandedBody || type !== "bookmark")
-							? this.renderTextLinkified(codemark.title || codemark.text)
+							? this.renderTextReplaceCodeBlocks(codemark.title || codemark.text)
 							: null}
 						{!renderExpandedBody && !renderAlternateBody && this.renderPinnedReplies()}
 						{!renderExpandedBody && !renderAlternateBody && this.renderDetailIcons(codemark)}
@@ -1496,12 +1567,13 @@ export class Codemark extends React.Component<Props, State> {
 							author={this.props.author}
 							postAction={this.props.postAction}
 							displayType={this.props.displayType}
+							skipMarkers={this.skipMarkers}
 						>
 							<div className="description">
 								{/* this.renderVisibilitySelected() */}
 								{this.props.review != null && (
 									<div className="related">
-										<div className="related-label">Code Review</div>
+										<div className="related-label">Feedback Request</div>
 										<div className="description-body">
 											<Link
 												className="external-link"
@@ -1528,13 +1600,14 @@ export class Codemark extends React.Component<Props, State> {
 										</div>
 									</div>
 								)}
+								{this.props.post && <Reactions className="no-pad-left" post={this.props.post} />}
 								{this.renderExternalLink(codemark)}
 								{this.renderRelatedCodemarks()}
 								{this.renderPinnedRepliesSelected()}
 							</div>
 						</CodemarkDetails>
 					)}
-					{this.state.hover && !renderExpandedBody && type !== "bookmark" && (
+					{false && this.state.hover && !renderExpandedBody && type !== "bookmark" && (
 						<div className="info-wrapper">
 							<Icon
 								className="info"
@@ -1554,6 +1627,8 @@ export class Codemark extends React.Component<Props, State> {
 		const { hidden, selected, author, marker } = this.props;
 		const externalContent = marker.externalContent!;
 		const providerName = externalContent.provider.name;
+		// FIXME better id lookup (we only support GH here)
+		const providerId = providerName === "GitHub" ? "github*com" : undefined;
 
 		const pullOrMergeRequestText = providerName === "GitLab" ? "merge" : "pull";
 
@@ -1566,13 +1641,16 @@ export class Codemark extends React.Component<Props, State> {
 				})}
 				onClick={e => {
 					e.preventDefault();
+					// @ts-ignore
 					HostApi.instance.send(EditorRevealRangeRequestType, {
+						// @ts-ignore
 						uri: marker.fileUri,
+						// @ts-ignore
 						range: marker.range,
 						preserveFocus: true
 					});
-					if (externalContent.externalId) {
-						this.props.setCurrentPullRequest(externalContent.externalId);
+					if (providerId && externalContent.externalId) {
+						this.props.setCurrentPullRequest(providerId!, externalContent.externalId);
 					}
 				}}
 				onMouseEnter={this.handleMouseEnterCodemark}
@@ -1607,7 +1685,7 @@ export class Codemark extends React.Component<Props, State> {
 								<PullRequestPatch patch={externalContent.diffHunk} filename={marker.file} />
 							</PRCodeCommentPatch>
 						)}
-						{this.renderTextLinkified(marker.summary)}
+						<MarkdownText text={marker.summary} inline={true} />
 						{!selected && this.renderPinnedReplies()}
 						{!selected && this.renderDetailIcons(marker)}
 						{((marker.externalContent!.actions || emptyArray).length > 0 ||
@@ -1627,10 +1705,16 @@ export class Codemark extends React.Component<Props, State> {
 										{this.state.showDiffHunk ? "Hide" : "Show"} Diff
 									</span>
 								)}
-								{externalContent.externalId && (
+								{providerId && externalContent.externalId && (
 									<span
 										style={{ marginRight: "10px" }}
-										onClick={() => this.props.setCurrentPullRequest(externalContent.externalId)}
+										onClick={() =>
+											this.props.setCurrentPullRequest(
+												providerId!,
+												externalContent.externalId!,
+												externalContent.externalChildId
+											)
+										}
 									>
 										<Icon name="pull-request" className="margin-right" />
 										View Pull Request
@@ -1700,6 +1784,134 @@ export class Codemark extends React.Component<Props, State> {
 		);
 	}
 
+	renderCollapsedFromExternalContent() {
+		const { marker } = this.props;
+		const externalContent = marker.externalContent!;
+		const providerName = externalContent.provider.name;
+		// FIXME better id lookup (we only support GH here)
+		const providerId = providerName === "GitHub" ? "github*com" : undefined;
+
+		const pullOrMergeRequestText = providerName === "GitLab" ? "Merge" : "Pull";
+
+		const lines: string | undefined = (() => {
+			if (!marker) return;
+			//@ts-ignore
+			const range = marker.range;
+			if (range) {
+				if (range.start.line == range.end.line) return `Line ${range.start.line}`;
+				else return `Lines ${range.start.line}-${range.end.line}`;
+			} else return;
+		})();
+
+		return (
+			<div
+				className={cx("codemark collapsed", { wrap: this.props.wrap })}
+				onClick={e => {
+					e.preventDefault();
+					// @ts-ignore
+					HostApi.instance.send(EditorRevealRangeRequestType, {
+						// @ts-ignore
+						uri: marker.fileUri,
+						// @ts-ignore
+						range: marker.range,
+						preserveFocus: true
+					});
+					if (providerId && externalContent.externalId) {
+						this.props.setCurrentPullRequest(
+							providerId!,
+							externalContent.externalId,
+							externalContent.externalChildId
+						);
+					}
+				}}
+				onMouseEnter={this.handleMouseEnterCodemark}
+				onMouseLeave={this.handleMouseLeaveCodemark}
+			>
+				<div className="contents">
+					<div className="body" style={{ display: "flex", alignItems: "flex-start" }}>
+						<span style={{ flexGrow: 0, flexShrink: 0 }}>
+							<Icon name={externalContent.provider.icon || "codestream"} className="margin-right" />
+						</span>
+						<div>
+							<MarkdownText text={marker.summary} inline={true} />
+							{lines && (
+								<span style={{ paddingLeft: "15px", opacity: 0.75 }} className="subtle">
+									{lines}
+								</span>
+							)}
+						</div>
+						{/*
+						<div className="actions">
+							{((marker.externalContent!.actions || emptyArray).length > 0 ||
+								externalContent.diffHunk ||
+								externalContent.externalId) && (
+								<>
+									{externalContent.diffHunk && (
+										<span
+											onClick={e => {
+												e.preventDefault();
+												e.stopPropagation();
+												this.setState({ showDiffHunk: !this.state.showDiffHunk });
+											}}
+										>
+											<Icon
+												name="diff"
+												className="margin-right"
+												title="Show Diff"
+												delay={1}
+												placement="bottom"
+											/>
+										</span>
+									)}
+									{providerId && externalContent.externalId && (
+										<span
+											onClick={() =>
+												this.props.setCurrentPullRequest(providerId!, externalContent.externalId!)
+											}
+										>
+											<Icon
+												name="pull-request"
+												className="margin-right"
+												title={`View ${pullOrMergeRequestText} Request`}
+												delay={1}
+												placement="bottom"
+											/>
+										</span>
+									)}
+
+									{(marker.externalContent!.actions || emptyArray).map(action => (
+										<span key={action.uri}>
+											<span style={{ marginRight: "5px" }}>
+												<Icon
+													title={action.label}
+													delay={1}
+													placement="bottom"
+													name={action.icon || "link-external"}
+												/>
+											</span>
+											<Link
+												onClick={e => {
+													e.preventDefault();
+													HostApi.instance.send(OpenUrlRequestType, { url: action.uri });
+													HostApi.instance.track("PR Comment Action", {
+														Host: marker.externalContent!.provider.name,
+														"Action Label": action.label
+													});
+												}}
+											>
+												{action.label}
+											</Link>
+										</span>
+									))}
+								</>
+							)}
+											</div> */}
+					</div>
+				</div>
+			</div>
+		);
+	}
+
 	renderPinnedRepliesSelected() {
 		const renderedPinnedReplies = this.renderPinnedReplies();
 
@@ -1724,7 +1936,9 @@ export class Codemark extends React.Component<Props, State> {
 						<div className="pinned-reply">
 							<Icon className="pinned-reply-star" name="star" />{" "}
 							<Headshot size={18} person={this.props.pinnedAuthors[i]} />
-							<div className="pinned-reply-body">{this.renderTextLinkified(post.text)}</div>
+							<div className="pinned-reply-body">
+								<MarkdownText text={post.text} inline={true} />
+							</div>
 						</div>
 					);
 				})}
@@ -1813,19 +2027,11 @@ const unknownAuthor = {
 };
 
 const mapStateToProps = (state: CodeStreamState, props: InheritedProps): ConnectedProps => {
-	const {
-		apiVersioning,
-		capabilities,
-		context,
-		editorContext,
-		preferences,
-		users,
-		session,
-		posts
-	} = state;
+	const { capabilities, context, editorContext, preferences, users, session, posts } = state;
 	const { codemark, marker } = props;
 
-	const teamProvider = getCurrentTeamProvider(state);
+	const post =
+		codemark && codemark.postId ? getPost(posts, codemark!.streamId, codemark.postId) : undefined;
 
 	const pinnedReplies = ((codemark && codemark.pinnedReplies) || emptyArray)
 		.map(id => getPost(posts, codemark!.streamId, id))
@@ -1837,6 +2043,7 @@ const mapStateToProps = (state: CodeStreamState, props: InheritedProps): Connect
 
 	const teamTagsHash = getTeamTagsHash(state);
 
+	// @ts-ignore
 	const meta = marker && marker.location && marker.location.meta;
 	const codeWasDeleted =
 		meta &&
@@ -1877,6 +2084,7 @@ const mapStateToProps = (state: CodeStreamState, props: InheritedProps): Connect
 			: undefined;
 
 	return {
+		post,
 		review,
 		capabilities: capabilities,
 		editorHasFocus: context.hasFocus,

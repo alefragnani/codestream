@@ -18,14 +18,15 @@ const initialState: ContextState = {
 	currentStreamId: "",
 	currentCodemarkId: undefined,
 	createPullRequestReviewId: undefined,
-	currentPullRequestId: undefined,
+	currentPullRequest: undefined,
 	pullRequestCheckoutBranch: false,
 	isRepositioning: false,
 	issueProvider: undefined,
 	threadId: undefined,
+	currentRepo: undefined,
 
 	panelStack: [WebviewPanels.LandingRedirect],
-	// panelStack: [WebviewPanels.CodemarksForFile],
+
 	activeModal: undefined,
 
 	hasFocus: true, // we assume we start with the focus when codestream initializes
@@ -39,6 +40,7 @@ const initialState: ContextState = {
 	codemarksFileViewStyle: "inline",
 	codemarksShowArchived: false,
 	codemarksShowResolved: false,
+	codemarksWrapComments: false,
 	showFeedbackSmiley: true,
 	route: { name: Route.NewUser, params: {} },
 	spatialViewShowPRComments: false,
@@ -80,8 +82,7 @@ export function reduceContext(
 		case ContextActionsType.OpenPanel:
 			return { ...state, panelStack: [action.payload, ...state.panelStack].slice(0, 10) };
 		case ContextActionsType.ClosePanel: {
-			if (state.panelStack.length === 1)
-				return { ...state, panelStack: [WebviewPanels.CodemarksForFile] };
+			if (state.panelStack.length === 1) return { ...state, panelStack: [WebviewPanels.Sidebar] };
 			const [, ...panelStack] = state.panelStack;
 			return { ...state, panelStack };
 		}
@@ -112,14 +113,34 @@ export function reduceContext(
 			return { ...state, codemarksShowArchived: action.payload };
 		case ContextActionsType.SetCodemarksShowResolved:
 			return { ...state, codemarksShowResolved: action.payload };
+		case ContextActionsType.SetCodemarksWrapComments:
+			return { ...state, codemarksWrapComments: action.payload };
 		case ContextActionsType.SetCurrentReview:
 			return { ...state, currentReviewId: action.payload.reviewId };
+		case ContextActionsType.SetCurrentRepo:
+			return {
+				...state,
+				currentRepo:
+					action.payload.id && action.payload.path
+						? {
+								id: action.payload.id,
+								path: action.payload.path
+						  }
+						: undefined
+			};
 		case ContextActionsType.SetCreatePullRequest:
 			return { ...state, createPullRequestReviewId: action.payload.reviewId };
 		case ContextActionsType.SetCurrentPullRequest:
 			return {
 				...state,
-				currentPullRequestId: action.payload.prId,
+				currentPullRequest:
+					action.payload.providerId && action.payload.id
+						? {
+								providerId: action.payload.providerId,
+								id: action.payload.id,
+								commentId: action.payload.commentId
+						  }
+						: undefined,
 				pullRequestCheckoutBranch: false
 			};
 		case ContextActionsType.SetCurrentPullRequestAndBranch:
@@ -128,10 +149,10 @@ export function reduceContext(
 				currentPullRequestId: action.payload.prId,
 				pullRequestCheckoutBranch: true
 			};
+		case ContextActionsType.SetStartWorkCard:
+			return { ...state, startWorkCard: action.payload.card };
 		case ContextActionsType.SetProfileUser:
 			return { ...state, profileUserId: action.payload };
-		case ContextActionsType.SetSpatialViewPRCommentsToggle:
-			return { ...state, spatialViewShowPRComments: action.payload };
 		case ContextActionsType.SetShowFeedbackSmiley:
 			return { ...state, showFeedbackSmiley: action.payload };
 		case ContextActionsType.SetIssueProvider:

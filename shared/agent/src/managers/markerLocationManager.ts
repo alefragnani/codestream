@@ -7,7 +7,11 @@ import { getCache } from "../cache";
 import { Container, SessionContainer } from "../container";
 import { GitRepository } from "../git/models/repository";
 import { Logger } from "../logger";
-import { calculateLocation, calculateLocations } from "../markerLocation/calculator";
+import {
+	calculateLocation,
+	calculateLocations,
+	MAX_RANGE_VALUE
+} from "../markerLocation/calculator";
 import { MarkerNotLocatedReason } from "../protocol/agent.protocol";
 import {
 	CSLocationArray,
@@ -61,10 +65,18 @@ function newGetLocationsResult(): GetLocationsResult {
 }
 
 function compareReferenceLocations(a: CSReferenceLocation, b: CSReferenceLocation): number {
-	const aIsCanonical = Number(!!a.flags.canonical);
-	const bIsCanonical = Number(!!b.flags.canonical);
+	const aIsCanonical = Number(!!a.flags?.canonical);
+	const bIsCanonical = Number(!!b.flags?.canonical);
 
-	return bIsCanonical - aIsCanonical;
+	const canonicalComparison = bIsCanonical - aIsCanonical;
+	if (canonicalComparison !== 0) {
+		return canonicalComparison;
+	}
+
+	const aIsEntirelyDeleted = Number(!!a.location[4]?.entirelyDeleted);
+	const bIsEntirelyDeleted = Number(!!b.location[4]?.entirelyDeleted);
+
+	return aIsEntirelyDeleted - bIsEntirelyDeleted;
 }
 
 export class MarkerLocationManager extends ManagerBase<CSMarkerLocations> {
@@ -246,7 +258,7 @@ export class MarkerLocationManager extends ManagerBase<CSMarkerLocations> {
 			for (const id in futureReferences) {
 				const referenceLocation = futureReferences[id];
 				const referenceText =
-					referenceLocation.flags.diff != undefined
+					referenceLocation.flags?.diff != undefined
 						? applyPatch(currentCommitText, referenceLocation.flags.diff)
 						: currentCommitText;
 
@@ -345,8 +357,8 @@ export class MarkerLocationManager extends ManagerBase<CSMarkerLocations> {
 			if (
 				canonicalLocation &&
 				!canonicalLocation.commitHash &&
-				(canonicalLocation.flags.baseCommit === fileCurrentCommit ||
-					canonicalLocation.flags.baseCommit === repoCurrentCommit)
+				(canonicalLocation.flags?.baseCommit === fileCurrentCommit ||
+					canonicalLocation.flags?.baseCommit === repoCurrentCommit)
 			) {
 				Logger.log(`MARKERS: ${id}: future reference`);
 				result.futureReferences[id] = canonicalLocation;
@@ -462,8 +474,16 @@ export class MarkerLocationManager extends ManagerBase<CSMarkerLocations> {
 			let canCalculate = false;
 			for (const referenceLocation of missingMarker.referenceLocations) {
 				const referenceCommitHash = referenceLocation.commitHash;
+				if (referenceLocation.location[2] === -1) {
+					// This should never happen, but we have some faulty reference locations
+					// in the database with lineEnd === -1 because the end of the marker range
+					// was deleted but not properly trimmed to the edge of the preserved region.
+					// In this case we pretend it ends at the end of its lineStart.
+					referenceLocation.location[2] = referenceLocation.location[0];
+					referenceLocation.location[3] = MAX_RANGE_VALUE;
+				}
 				if (referenceCommitHash == null) {
-					const { baseCommit, diff: diffToCanonicalContents } = referenceLocation.flags;
+					const { baseCommit, diff: diffToCanonicalContents } = referenceLocation.flags || {};
 					if (baseCommit && diffToCanonicalContents) {
 						const baseContents = await git.getFileContentForRevision(filePath, baseCommit);
 						if (!baseContents) continue;
@@ -487,7 +507,7 @@ export class MarkerLocationManager extends ManagerBase<CSMarkerLocations> {
 
 						const meta = calculatedLocation.meta || (calculatedLocation.meta = {});
 						meta.isAncestor = await git.isAncestor(repoRoot!, commitHash, baseCommit);
-						if (referenceLocation.flags.canonical) {
+						if (referenceLocation.flags?.canonical) {
 							meta.isDescendant = await git.isAncestor(repoRoot!, baseCommit, commitHash);
 							Logger.log(
 								`MARKERS: saving location calculated from canonical reference for missing marker ${missingMarker.id}`
@@ -516,7 +536,7 @@ export class MarkerLocationManager extends ManagerBase<CSMarkerLocations> {
 					if (diff) {
 						const isAncestor = await git.isAncestor(repoRoot!, commitHash, referenceCommitHash);
 						const isDescendant =
-							referenceLocation.flags.canonical &&
+							referenceLocation.flags?.canonical &&
 							(await git.isAncestor(repoRoot!, referenceCommitHash, commitHash));
 						diffsByCommitHash.set(referenceCommitHash, { diff, isAncestor, isDescendant });
 						if (!locationsByCommitHash.has(referenceCommitHash)) {

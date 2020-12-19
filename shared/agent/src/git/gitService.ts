@@ -1,6 +1,7 @@
 "use strict";
 import { createPatch, ParsedDiff, parsePatch } from "diff";
 import * as fs from "fs";
+import { memoize } from "lodash-es";
 import * as path from "path";
 import { CommitsChangedData, WorkspaceChangedData } from "protocol/agent.protocol";
 import { Disposable, Event } from "vscode-languageserver";
@@ -11,6 +12,7 @@ import { CodeStreamSession } from "../session";
 import { Iterables, log, Strings } from "../system";
 import { xfs } from "../xfs";
 import { git, GitErrors, GitWarnings } from "./git";
+import { GitServiceLite } from "./gitServiceLite";
 import { GitAuthor, GitCommit, GitNumStat, GitRemote, GitRepository } from "./models/models";
 import { GitAuthorParser } from "./parsers/authorParser";
 import { GitBlameRevisionParser, RevisionEntry } from "./parsers/blameRevisionParser";
@@ -18,10 +20,9 @@ import { GitBranchParser } from "./parsers/branchParser";
 import { GitLogParser } from "./parsers/logParser";
 import { GitRemoteParser } from "./parsers/remoteParser";
 import { GitRepositories } from "./repositories";
+import { RepositoryLocator } from "./repositoryLocator";
 
 export * from "./models/models";
-
-const cygwinRegex = /\/cygdrive\/([a-zA-Z])/;
 
 export interface BlameOptions {
 	ref?: string;
@@ -35,6 +36,8 @@ export interface TrackingBranch {
 	fullName?: string;
 	shortName?: string;
 }
+
+export const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 export interface IGitService extends Disposable {
 	getFileAuthors(uri: URI, options?: BlameOptions): Promise<GitAuthor[]>;
@@ -91,10 +94,25 @@ export interface IGitService extends Disposable {
 
 export class GitService implements IGitService, Disposable {
 	private _disposable: Disposable | undefined;
+	private readonly _memoizedGetDefaultBranch: (
+		repoPath: string,
+		remote: string
+	) => Promise<string | undefined>;
+	private readonly _memoizedGetRepoRemotes: (repoPath: string) => Promise<GitRemote[]>;
+
 	private readonly _repositories: GitRepositories;
 
-	constructor(public readonly session: CodeStreamSession) {
-		this._repositories = new GitRepositories(this, session);
+	constructor(
+		public readonly session: CodeStreamSession,
+		readonly repoLocator: RepositoryLocator,
+		private readonly _gitServiceLite: GitServiceLite
+	) {
+		this._memoizedGetDefaultBranch = memoize(
+			this._getDefaultBranch,
+			(repoPath, remote) => `${repoPath}|${remote}`
+		);
+		this._memoizedGetRepoRemotes = memoize(this._getRepoRemotes);
+		this._repositories = new GitRepositories(session, repoLocator);
 	}
 
 	dispose() {
@@ -243,7 +261,7 @@ export class GitService implements IGitService, Disposable {
 				`${ref}:./${fileRelativePath}`,
 				"--"
 			);
-			return data;
+			return Strings.normalizeFileContents(data);
 		} catch (ex) {
 			const msg = ex && ex.toString();
 			if (
@@ -258,7 +276,10 @@ export class GitService implements IGitService, Disposable {
 		}
 	}
 
-	async getDefaultBranch(repoPath: string, remote: string): Promise<string | undefined> {
+	getDefaultBranch(repoPath: string, remote: string): Promise<string | undefined> {
+		return this._memoizedGetDefaultBranch(repoPath, remote);
+	}
+	private async _getDefaultBranch(repoPath: string, remote: string): Promise<string | undefined> {
 		try {
 			Logger.debug("IN GDB: " + remote);
 			const data = await git(
@@ -297,7 +318,8 @@ export class GitService implements IGitService, Disposable {
 		initialCommitHash: string,
 		finalCommitHash: string,
 		filePath: string,
-		fetchIfCommitNotFound: boolean = false
+		fetchIfCommitNotFound: boolean = false,
+		conetxtLines: number = 3
 	): Promise<ParsedDiff | undefined> {
 		const [dir, filename] = Strings.splitPath(filePath);
 		let data;
@@ -306,6 +328,7 @@ export class GitService implements IGitService, Disposable {
 				{ cwd: dir },
 				"diff",
 				"--no-ext-diff",
+				`-U${conetxtLines}`,
 				initialCommitHash,
 				finalCommitHash,
 				"--",
@@ -383,6 +406,27 @@ export class GitService implements IGitService, Disposable {
 
 		const patches = parsePatch(data);
 		return patches;
+	}
+
+	async diffBranches(
+		repoPath: string,
+		baseRef: string,
+		headRef?: string
+	): Promise<{ patches: ParsedDiff[]; data: string }> {
+		let data: string | undefined;
+		try {
+			const options = ["diff", "--no-ext-diff", "--no-prefix", baseRef];
+			if (headRef) options.push(headRef);
+			options.push("--");
+			data = await git({ cwd: repoPath }, ...options);
+		} catch (err) {
+			Logger.warn(`Error diffing branches ${repoPath}:${baseRef}:${headRef}`);
+			throw err;
+		}
+
+		const patches = parsePatch(data);
+		Logger.log("RETURNING PATCHES: ", JSON.stringify(patches, null, 4));
+		return { patches, data };
 	}
 
 	// this isn't technically a git operation, but we leave it here since it's
@@ -527,20 +571,7 @@ export class GitService implements IGitService, Disposable {
 	async getRepoCommitHistory(repoPath: string): Promise<string[]>;
 	async getRepoCommitHistory(repoUriOrPath: URI | string): Promise<string[]> {
 		const repoPath = typeof repoUriOrPath === "string" ? repoUriOrPath : repoUriOrPath.fsPath;
-
-		let data;
-		try {
-			data = await git({ cwd: repoPath }, "rev-list", "--date-order", "master", "--");
-		} catch {}
-		if (!data) {
-			try {
-				data = await git({ cwd: repoPath }, "rev-list", "--date-order", "HEAD", "--");
-			} catch {}
-		}
-
-		if (!data) return [];
-
-		return data.trim().split("\n");
+		return this._gitServiceLite.getRepoCommitHistory(repoPath);
 	}
 
 	async getRepoBranchForkCommits(repoUri: URI): Promise<string[]>;
@@ -548,31 +579,7 @@ export class GitService implements IGitService, Disposable {
 	async getRepoBranchForkCommits(repoUriOrPath: URI | string): Promise<string[]> {
 		const repoPath = typeof repoUriOrPath === "string" ? repoUriOrPath : repoUriOrPath.fsPath;
 
-		let data: string | undefined;
-		try {
-			data = await git({ cwd: repoPath }, "branch", "--");
-		} catch {}
-		if (!data) return [];
-
-		const branches = data.trim().split("\n");
-		const commits: string[] = [];
-		await Promise.all(
-			branches.map(async branch => {
-				branch = branch.trim();
-				if (branch.startsWith("*")) {
-					branch = branch.split("*")[1].trim();
-				}
-				let result: string | undefined;
-				try {
-					result = await git({ cwd: repoPath }, "merge-base", "--fork-point", branch, "--");
-				} catch {}
-				if (result) {
-					commits.push(result.split("\n")[0]);
-				}
-			})
-		);
-
-		return commits;
+		return this._gitServiceLite.getRepoBranchForkCommits(repoPath);
 	}
 
 	async getRepoBranchForkPoint(
@@ -624,15 +631,17 @@ export class GitService implements IGitService, Disposable {
 		return push || fetch;
 	}
 
-	async getRepoRemotes(repoUri: URI): Promise<GitRemote[]>;
-	async getRepoRemotes(repoPath: string): Promise<GitRemote[]>;
+	getRepoRemotes(repoUri: URI): Promise<GitRemote[]>;
+	getRepoRemotes(repoPath: string): Promise<GitRemote[]>;
 	@log({
 		exit: (result: GitRemote[]) =>
 			`returned [${result.length !== 0 ? result.map(r => r.uri.toString(true)).join(", ") : ""}]`
 	})
-	async getRepoRemotes(repoUriOrPath: URI | string): Promise<GitRemote[]> {
+	getRepoRemotes(repoUriOrPath: URI | string): Promise<GitRemote[]> {
 		const repoPath = typeof repoUriOrPath === "string" ? repoUriOrPath : repoUriOrPath.fsPath;
-
+		return this._memoizedGetRepoRemotes(repoPath);
+	}
+	private async _getRepoRemotes(repoPath: string) {
 		try {
 			const data = await git({ cwd: repoPath }, "remote", "-v");
 			return GitRemoteParser.parse(data, repoPath);
@@ -641,34 +650,25 @@ export class GitService implements IGitService, Disposable {
 		}
 	}
 
-	async repoHasRemote(repoPath: string, remoteUrl: string): Promise<boolean> {
-		let data;
-		try {
-			data = await git({ cwd: repoPath }, "remote", "-v");
-			if (!data) return false;
-		} catch {
-			return false;
-		}
+	getRepoRoot(uri: URI): Promise<string | undefined>;
+	getRepoRoot(path: string): Promise<string | undefined>;
+	getRepoRoot(uriOrPath: URI | string): Promise<string | undefined> {
+		const filePath = typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath;
 
-		const remotes = GitRemoteParser.parse(data, repoPath);
-		for (const r of remotes) {
-			if (r.normalizedUrl === remoteUrl) {
-				return true;
-			}
-		}
-
-		return false;
+		return this._gitServiceLite.getRepoRoot(filePath);
 	}
 
-	async getRepoRoot(uri: URI): Promise<string | undefined>;
-	async getRepoRoot(path: string): Promise<string | undefined>;
-	async getRepoRoot(uriOrPath: URI | string): Promise<string | undefined> {
-		const filePath = typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath;
+	private async _getRepoRoot(filePath: string): Promise<string | undefined> {
 		let cwd;
 		if (fs.existsSync(filePath) && fs.lstatSync(filePath).isDirectory()) {
 			cwd = filePath;
 		} else {
 			[cwd] = Strings.splitPath(filePath);
+
+			if (!fs.existsSync(cwd)) {
+				Logger.log(`getRepoRoot: ${cwd} doesn't exist. Returning undefined`);
+				return undefined;
+			}
 		}
 
 		try {
@@ -800,15 +800,20 @@ export class GitService implements IGitService, Disposable {
 	}
 
 	async getBranches(
-		repoPath: string
+		repoPath: string,
+		remote?: boolean
 	): Promise<{ current: string; branches: string[] } | undefined> {
 		try {
-			const data = await git({ cwd: repoPath }, "branch");
+			const options = ["branch"];
+			if (remote) options.push("-r");
+			const data = await git({ cwd: repoPath }, ...options);
 			if (!data) return undefined;
 			const branches = data
 				.split("\n")
 				.map(b => b.substr(2).trim())
-				.filter(b => b.length > 0);
+				.filter(b => b.length > 0)
+				.filter(b => !b.startsWith("HEAD ->"))
+				.map(b => (remote ? b.replace(/^origin\//, "") : b));
 			const current = data.split("\n").find(b => b.startsWith("* "));
 			return { branches, current: current ? current.substr(2).trim() : "" };
 		} catch (ex) {
@@ -845,83 +850,37 @@ export class GitService implements IGitService, Disposable {
 		}
 	}
 
-	async isCommitsExclusiveOnBranch(repoPath: string, branch: string): Promise<boolean> {
-		const commits = await this.getCommitsExclusiveToBranch(repoPath, branch);
-
-		return !(commits === undefined || commits.size === 0);
-	}
-
-	async getCommitsExclusiveToBranch(
-		repoPath: string,
-		branch: string
-	): Promise<Map<string, GitCommit> | undefined> {
-		// commits for a specific branch
-		// https://stackoverflow.com/questions/14848274/git-log-to-get-commits-only-for-a-specific-branch
-		// git log [BRANCHNAME] --not $(git for-each-ref --format='%(refname)' refs/heads/ | grep -v "refs/heads/[BRANCHNAME]")
-
-		let data: string | undefined;
-		try {
-			data = await git({ cwd: repoPath }, "branch", "--");
-		} catch {}
-		if (!data) return;
-		const otherBranches = data
-			.trim()
-			.split("\n")
-			.filter(b => !b.startsWith("*"))
-			.map(b => "refs/heads/" + b.trim());
-		// .join(" ");
-
-		const data2 = await git(
-			{ cwd: repoPath },
-			"log",
-			branch,
-			`--format='${GitLogParser.defaultFormat}`,
-			"--not",
-			...otherBranches,
-			"--"
-		);
-
-		return GitLogParser.parse(data2.trim(), repoPath);
-	}
-
 	async getCommitsOnBranch(
 		repoPath: string,
 		branch: string,
 		prevEndCommit?: string
 	): Promise<{ sha: string; info: {}; localOnly: boolean }[] | undefined> {
 		try {
-			let commits = await this.getCommitsExclusiveToBranch(repoPath, branch);
-
-			let hasCommitsExclusiveToThisBranch = true;
+			const commitsData = await git(
+				{ cwd: repoPath },
+				"log",
+				branch,
+				"--first-parent",
+				"-n100",
+				`--format='${GitLogParser.defaultFormat}`,
+				"--"
+			);
+			const commits = GitLogParser.parse(commitsData.trim(), repoPath);
 			if (commits === undefined || commits.size === 0) {
-				hasCommitsExclusiveToThisBranch = false;
-				// if we didn't find unique commits on the branch we resort to git log
-				const data3 = await git(
-					{ cwd: repoPath },
-					"log",
-					branch,
-					"--first-parent",
-					"-n100",
-					`--format='${GitLogParser.defaultFormat}`,
-					"--"
-				);
-				commits = GitLogParser.parse(data3.trim(), repoPath);
-				if (commits === undefined || commits.size === 0) {
-					return undefined;
-				}
+				return undefined;
 			}
 
 			let localCommits: string[] | undefined = undefined;
 			try {
 				// https://stackoverflow.com/questions/2016901/viewing-unpushed-git-commits
-				const data3 = await git(
+				const localCommitsData = await git(
 					{ cwd: repoPath, throwRawExceptions: true },
 					"log",
 					"@{push}..",
 					"--format=%H",
 					"--"
 				);
-				localCommits = data3.trim().split("\n");
+				localCommits = localCommitsData.trim().split("\n");
 			} catch (ex) {
 				// Chances are this branch has no remote tracking branch, so we'll consider all commits as localOnly
 				Logger.log(`Unable to identify pushed commits. Reason: ${ex.message}`);
@@ -934,8 +893,8 @@ export class GitService implements IGitService, Disposable {
 					info: val,
 					// !localCommits means that the command to find local commits failed, so we
 					// were not able to find any. for instance, when there is not an up-stream configured
-					localOnly:
-						hasCommitsExclusiveToThisBranch && (!localCommits || localCommits.includes(key))
+					localOnly: localCommits != undefined && localCommits.includes(key)
+					// hasCommitsExclusiveToThisBranch && (!localCommits || localCommits.includes(key))
 				});
 			});
 
@@ -947,6 +906,25 @@ export class GitService implements IGitService, Disposable {
 			return ret;
 		} catch {
 			return undefined;
+		}
+	}
+
+	async commitAndPush(
+		repoPath: string,
+		message: string,
+		files: string[],
+		pushAfterCommit: boolean
+	): Promise<{ success: boolean; error?: string }> {
+		try {
+			// const escapedMessage = message.replace(/\'/g, "\\'");
+			const data = await git({ cwd: repoPath }, "commit", "-m", message, ...files);
+			if (pushAfterCommit) {
+				await git({ cwd: repoPath }, "pull");
+				await git({ cwd: repoPath }, "push", "origin");
+			}
+			return { success: true };
+		} catch (err) {
+			return { success: false, error: err.message };
 		}
 	}
 
@@ -1224,7 +1202,7 @@ export class GitService implements IGitService, Disposable {
 		file: string,
 		includeSaved: boolean,
 		includeStaged: boolean,
-		ref: string | undefined
+		ref: string = "HEAD"
 	): Promise<GitAuthor[]> {
 		try {
 			let data: string | undefined;
@@ -1239,12 +1217,16 @@ export class GitService implements IGitService, Disposable {
 			} catch {}
 			if (!data) return [];
 			const patch = parsePatch(data)[0];
+			// if hunk start line equal 0 means that the file was just created
+			const isNewFile = patch.hunks.some(hunk => hunk.oldStart === 0);
+			if (isNewFile) return [];
 			try {
 				const options = ["blame"];
 				if (ref && ref.length) options.push(ref);
 				patch.hunks.forEach(hunk => {
-					const oldEnd = hunk.oldStart + hunk.oldLines;
-					options.push(`-L${hunk.oldStart},${oldEnd}`);
+					// -1 cuz we should take into account hunk.oldStart line
+					const oldEnd = hunk.oldStart + hunk.oldLines - 1;
+					options.push(`-L${hunk.oldStart},${Math.max(hunk.oldStart, oldEnd)}`);
 				});
 				options.push("--root", "--incremental", "-w");
 				options.push("--");
@@ -1387,14 +1369,8 @@ export class GitService implements IGitService, Disposable {
 		}
 	}
 
-	async getKnownCommitHashes(filePath: string): Promise<string[]> {
-		const commitHistory = await this.getRepoCommitHistory(filePath);
-		const firstLastCommits =
-			commitHistory.length > 10
-				? [...commitHistory.slice(0, 5), ...commitHistory.slice(-5)]
-				: commitHistory;
-		const branchPoints = await this.getRepoBranchForkCommits(filePath);
-		return [...firstLastCommits, ...branchPoints];
+	getKnownCommitHashes(filePath: string): Promise<string[]> {
+		return this._gitServiceLite.getKnownCommitHashes(filePath);
 	}
 
 	async getCommittersForRepo(
@@ -1437,14 +1413,63 @@ export class GitService implements IGitService, Disposable {
 	async setBranchRemote(
 		repoPath: string,
 		remoteName: string,
-		branch: string
+		branch: string,
+		throwOnError: boolean | undefined = false
 	): Promise<string | undefined> {
 		try {
 			const data = await git({ cwd: repoPath }, "push", "-u", remoteName, branch);
 			return data.trim();
-		} catch {
+		} catch (err) {
+			if (throwOnError) throw err;
 			return undefined;
 		}
+	}
+
+	isRebasing(repoPath: string) {
+		return (
+			fs.existsSync(path.join(repoPath, ".git", "rebase-merge")) ||
+			fs.existsSync(path.join(repoPath, ".git", "rebase-apply"))
+		);
+	}
+
+	async getConfig(repoPath: string, key: string): Promise<string | undefined> {
+		try {
+			const data = await git({ cwd: repoPath }, "config", key);
+			return data.trim();
+		} catch (err) {
+			Logger.warn(err);
+			return undefined;
+		}
+	}
+
+	async findAncestor(
+		repoPath: string,
+		sha: string,
+		limit: number,
+		predicate: (c: GitCommit) => Boolean
+	): Promise<GitCommit | undefined> {
+		const commitsData = await git(
+			{ cwd: repoPath },
+			"log",
+			sha,
+			"--first-parent",
+			`-n${limit}`,
+			"--skip=1",
+			`--format='${GitLogParser.defaultFormat}`,
+			"--"
+		);
+		const commits = GitLogParser.parse(commitsData.trim(), repoPath);
+		if (commits === undefined || commits.size === 0) {
+			return undefined;
+		}
+
+		for (const commit of commits.values()) {
+			if (predicate(commit)) {
+				return commit;
+			}
+		}
+
+		return undefined;
 	}
 
 	// mondo useful for prototyping ;)
@@ -1458,16 +1483,6 @@ export class GitService implements IGitService, Disposable {
 	// }
 
 	private _normalizePath(path: string): string {
-		const cygwinMatch = cygwinRegex.exec(path);
-		if (cygwinMatch != null) {
-			const [, drive] = cygwinMatch;
-			// c is just a placeholder to get the length, since drive letters are always 1 char
-			let sanitized = `${drive}:${path.substr("/cygdrive/c".length)}`;
-			sanitized = sanitized.replace(/\//g, "\\");
-			Logger.debug(`Cygwin git path sanitized: ${path} -> ${sanitized}`);
-			return sanitized;
-		}
-		// Make sure to normalize: https://github.com/git-for-windows/git/issues/2478
-		return Strings.normalizePath(path.trim());
+		return this._gitServiceLite._normalizePath(path);
 	}
 }

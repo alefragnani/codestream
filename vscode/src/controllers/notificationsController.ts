@@ -1,21 +1,53 @@
 "use strict";
+import { PullRequestsChangedEvent } from "api/sessionEvents";
 import { Disposable, MessageItem, window } from "vscode";
 import { Post, PostsChangedEvent } from "../api/session";
 import { Container } from "../container";
 import { CodemarkPlus, ReviewPlus } from "../protocols/agent/agent.protocol";
+import { Functions } from "../system";
 import { vslsUrlRegex } from "./liveShareController";
+
+type ToastType = "PR" | "Review" | "Codemark";
 
 export class NotificationsController implements Disposable {
 	private _disposable: Disposable;
 
 	constructor() {
 		this._disposable = Disposable.from(
-			Container.session.onDidChangePosts(this.onSessionPostsReceived, this)
+			Container.session.onDidChangePosts(this.onSessionPostsReceived, this),
+			Container.session.onDidChangePullRequests(this.onSessionPullRequestsReceived, this)
 		);
 	}
 
 	dispose() {
 		this._disposable && this._disposable.dispose();
+	}
+
+	private async onSessionPullRequestsReceived(e: PullRequestsChangedEvent) {
+		const { user } = Container.session;
+
+		if (!user.wantsToastNotifications()) return;
+
+		for (const pullRequestNotification of e.pullRequestNotifications()) {
+			const actions: MessageItem[] = [{ title: "Open" }];
+
+			Container.agent.telemetry.track("Toast Notification", { Content: "PR" });
+
+			const result = await window.showInformationMessage(
+				`Pull Request "${pullRequestNotification.pullRequest.title}" ${pullRequestNotification.queryName}`,
+				...actions
+			);
+
+			if (result === actions[0]) {
+				Container.webview.openPullRequest(
+					pullRequestNotification.pullRequest.providerId,
+					pullRequestNotification.pullRequest.id
+				);
+				Container.agent.telemetry.track("Toast Clicked", { Content: "PR" });
+			}
+
+			return;
+		}
 	}
 
 	private async onSessionPostsReceived(e: PostsChangedEvent) {
@@ -24,11 +56,12 @@ export class NotificationsController implements Disposable {
 
 		if (!user.wantsToastNotifications()) return;
 
-		for (const post of e.items()) {
-			// Don't show notifications for deleted, edited (if edited it isn't the first time its been seen), has replies (same as edited), has reactions, or was posted by the current user
-			if (!post.isNew() || post.senderId === user.id) {
-				continue;
-			}
+		// Don't show notifications for deleted, edited (if edited it isn't the first time its been seen),
+		// has replies (same as edited), has reactions, or was posted by the current user
+		const items = Functions.uniqueBy(e.items(), (_: Post) => _.id).filter(
+			_ => _.senderId !== user.id && _.isNew()
+		);
+		for (const post of items) {
 			let codemark;
 			let review;
 			const parentPost = await post.parentPost();
@@ -96,16 +129,22 @@ export class NotificationsController implements Disposable {
 		// TODO: Need to better deal with formatted text for notifications
 		const actions: MessageItem[] = [{ title: "Open" }];
 
+		const toastContentType: ToastType = codemark ? "Codemark" : "Review";
+
+		Container.agent.telemetry.track("Toast Notification", { Content: toastContentType });
+
 		const result = await window.showInformationMessage(
 			`${sender !== undefined ? sender.name : "Someone"}${colon} ${text}`,
 			...actions
 		);
+
 		if (result === actions[0]) {
 			if (codemark) {
 				Container.webview.openCodemark(codemark.id);
 			} else if (review) {
 				Container.webview.openReview(review.id);
 			}
+			Container.agent.telemetry.track("Toast Clicked", { Content: toastContentType });
 		}
 	}
 }

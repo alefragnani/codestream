@@ -48,6 +48,11 @@ class CodeStreamLanguageClient(private val project: Project) : LanguageClient {
         project.webViewService?.postNotification("codestream/didChangeDocumentMarkers", notification)
     }
 
+    @JsonNotification("codestream/didChangePullRequestComments")
+    fun didChangePullRequestComments(notification: DidChangePullRequestCommentsNotification) {
+        project.editorService?.updatePullRequestDiffMarkers()
+    }
+
     @JsonNotification("codestream/didChangeData")
     fun didChangeData(json: JsonElement) {
         project.webViewService?.postNotification("codestream/didChangeData", json)
@@ -59,6 +64,7 @@ class CodeStreamLanguageClient(private val project: Project) : LanguageClient {
             "unreads" -> session.didChangeUnreads(gson.fromJson(notification.data))
             "posts" -> session.didChangePosts(gson.fromJson(notification.data))
             "preferences" -> session.didChangePreferences(gson.fromJson(notification.data))
+            "pullRequests" -> session.didChangePullRequests(gson.fromJson(notification.data))
         }
     }
 
@@ -99,6 +105,12 @@ class CodeStreamLanguageClient(private val project: Project) : LanguageClient {
         project.webViewService?.postNotification("codestream/didChangeServerUrl", json, true)
     }
 
+    @JsonNotification("codestream/didStartLogin")
+    fun didStartLogin(json: JsonElement?) {}
+
+    @JsonNotification("codestream/didFailLogin")
+    fun didFailLogin(json: JsonElement?) {}
+
     @JsonNotification("codestream/didLogin")
     fun didLogin(json: JsonElement) {
         val notification = gson.fromJson<DidLoginNotification>(json)
@@ -108,10 +120,13 @@ class CodeStreamLanguageClient(private val project: Project) : LanguageClient {
     }
 
     @JsonNotification("codestream/didLogout")
-    fun didLogout(json: JsonElement) = GlobalScope.launch {
+    fun didLogout(notification: DidLogoutNotification) = GlobalScope.launch {
         project.authenticationService?.logout()
-        project.agentService?.onDidStart {
-            project.webViewService?.load(true)
+
+        if (notification.reason === LogoutReason.TOKEN) {
+            project.agentService?.onDidStart {
+                project.webViewService?.load(true)
+            }
         }
     }
 
@@ -128,7 +143,9 @@ class CodeStreamLanguageClient(private val project: Project) : LanguageClient {
     }
 
     override fun workspaceFolders(): CompletableFuture<MutableList<WorkspaceFolder>> {
-        return CompletableFuture.completedFuture(project.workspaceFolders.toMutableList())
+        val folders = project.workspaceFolders.toMutableList()
+        logger.info("Workspace folders: ${folders.joinToString()}")
+        return CompletableFuture.completedFuture(folders)
     }
 
     override fun configuration(configurationParams: ConfigurationParams): CompletableFuture<List<Any>> {
@@ -179,6 +196,12 @@ class DidChangeDocumentMarkersNotification(
     val textDocument: TextDocumentIdentifier
 )
 
+class DidChangePullRequestCommentsNotification(
+    val pullRequestId: String?,
+    val commentId: String?,
+    val filePath: String?
+)
+
 class DidChangeDataNotification(
     val type: String,
     val data: JsonElement
@@ -190,6 +213,19 @@ class DidChangeUnreadsNotification(
 )
 
 class DidLoginNotification(val data: LoginResult)
+
+class DidLogoutNotification(val reason: LogoutReason)
+
+enum class LogoutReason {
+    @SerializedName("token")
+    TOKEN,
+    @SerializedName("unknown")
+    UNKNOWN,
+    @SerializedName("unsupportedVersion")
+    UNSUPPORTED_VERSION,
+    @SerializedName("unsupportedApiVersion")
+    UNSUPPORTED_API_VERSION
+}
 
 class DidChangeApiVersionCompatibilityNotification(
     val compatibility: ApiVersionCompatibility,

@@ -19,7 +19,9 @@ import {
 	ShowStreamNotificationType,
 	WebviewDidInitializeNotificationType,
 	WebviewPanels,
-	HostDidChangeVisibleEditorsNotificationType
+	HostDidChangeVisibleEditorsNotificationType,
+	ShowPullRequestNotificationType,
+	HostDidChangeLayoutNotificationType
 } from "./ipc/webview.protocol";
 import { createCodeStreamStore } from "./store";
 import { HostApi } from "./webview-api";
@@ -47,7 +49,6 @@ import { getReview } from "./store/reviews/reducer";
 import { fetchCodemarks, openPanel } from "./Stream/actions";
 import { ContextState } from "./store/context/types";
 import { CodemarksState } from "./store/codemarks/types";
-import { ReviewsState } from "./store/reviews/types";
 import { EditorContextState } from "./store/editorContext/types";
 import { updateProviders } from "./store/providers/actions";
 import { apiCapabilitiesUpdated } from "./store/apiVersioning/actions";
@@ -58,7 +59,7 @@ import { updatePreferences } from "./store/preferences/actions";
 import { updateDocument, removeDocument, resetDocuments } from "./store/documents/actions";
 import { updateUnreads } from "./store/unreads/actions";
 import { updateConfigs } from "./store/configs/actions";
-import { setEditorContext } from "./store/editorContext/actions";
+import { setEditorContext, setEditorLayout } from "./store/editorContext/actions";
 import {
 	blur,
 	focus,
@@ -66,14 +67,17 @@ import {
 	setCurrentCodemark,
 	setCurrentReview,
 	setCurrentPullRequest,
-	setCurrentPullRequestAndBranch
+	setStartWorkCard,
+	closeAllPanels
 } from "./store/context/actions";
 import { URI } from "vscode-uri";
 import { moveCursorToLine } from "./Stream/CodemarkView";
 import { setMaintenanceMode } from "./store/session/actions";
-import { updateModifiedRepos } from "./store/users/actions";
+import { updateModifiedReposDebounced } from "./store/users/actions";
 import { logWarning } from "./logger";
 import { fetchReview } from "./store/reviews/actions";
+import { openPullRequestByUrl } from "./store/providerPullRequests/actions";
+import { updateCapabilities } from "./store/capabilities/actions";
 
 export { HostApi };
 
@@ -99,11 +103,14 @@ export async function initialize(selector: string) {
 
 	HostApi.instance.notify(WebviewDidInitializeNotificationType, {});
 
-	HostApi.instance.send(VerifyConnectivityRequestType, void {}).then(resp => {
-		if (resp.error) {
-			store.dispatch(errorOccurred(resp.error.message, resp.error.details));
-		}
-	});
+	// verify we can connect to the server, if successful, as a side effect,
+	// we get the api server's capabilities
+	const resp = await HostApi.instance.send(VerifyConnectivityRequestType, void {});
+	if (resp.error) {
+		store.dispatch(errorOccurred(resp.error.message, resp.error.details));
+	} else if (resp.capabilities) {
+		store.dispatch(updateCapabilities(resp.capabilities));
+	}
 }
 
 // TODO: type up the store state
@@ -151,7 +158,7 @@ function listenForEvents(store) {
 				store.dispatch(resetDocuments());
 				if (data && (data as any).type === "change") {
 					// need to be careful as updateModifiedRepos triggers git actions
-					store.dispatch(updateModifiedRepos());
+					updateModifiedReposDebounced(store.dispatch);
 				}
 				break;
 			case ChangeDataType.Documents:
@@ -161,7 +168,7 @@ function listenForEvents(store) {
 					store.dispatch(updateDocument((data as any).document));
 				}
 				if ((data as any).reason === "saved") {
-					store.dispatch(updateModifiedRepos());
+					updateModifiedReposDebounced(store.dispatch);
 				}
 				break;
 			case ChangeDataType.Preferences:
@@ -213,6 +220,10 @@ function listenForEvents(store) {
 			};
 		}
 		store.dispatch(setEditorContext(context));
+	});
+
+	api.on(HostDidChangeLayoutNotificationType, async params => {
+		store.dispatch(setEditorLayout(params));
 	});
 
 	api.on(HostDidChangeVisibleEditorsNotificationType, async params => {
@@ -323,6 +334,10 @@ function listenForEvents(store) {
 		store.dispatch(setCurrentReview(e.reviewId));
 	});
 
+	api.on(ShowPullRequestNotificationType, async e => {
+		store.dispatch(setCurrentPullRequest(e.providerId, e.id, e.commentId));
+	});
+
 	api.on(HostDidReceiveRequestNotificationType, async e => {
 		if (!e) return;
 
@@ -355,13 +370,14 @@ function listenForEvents(store) {
 				}
 				break;
 			}
-			case "review": {
+			case RouteControllerType.Review: {
 				if (route.action) {
 					switch (route.action) {
 						case "open": {
 							if (route.id) {
 								const { reviews } = store.getState();
 								const review = getReview(reviews, route.id);
+								store.dispatch(closeAllPanels());
 								if (!review) {
 									await store.dispatch(fetchReview(route.id));
 								}
@@ -373,28 +389,63 @@ function listenForEvents(store) {
 				}
 				break;
 			}
-			case "pullRequest": {
+			case RouteControllerType.PullRequest: {
 				switch (route.action) {
 					case "open": {
-						HostApi.instance
-							.send(ExecuteThirdPartyRequestUntypedType, {
-								method: "getPullRequestIdFromUrl",
-								providerId: "github*com",
-								params: { url: route.query.url }
-							})
-							.then((id: any) => {
-								if (id) {
-									store.dispatch(setCurrentReview(""));
-									if (route.query.checkoutBranch)
-										store.dispatch(setCurrentPullRequestAndBranch(id));
-									else store.dispatch(setCurrentPullRequest(id));
-								} else {
-									console.warn("Unable to load PR from: ", route);
-								}
-							})
-							.catch(e => {
-								console.warn("Unable to load PR from: ", route);
-							});
+						store.dispatch(closeAllPanels());
+						store.dispatch(
+							openPullRequestByUrl(route.query.url, { checkoutBranch: route.query.checkoutBranch })
+						);
+						break;
+					}
+				}
+				break;
+			}
+			case RouteControllerType.StartWork: {
+				switch (route.action) {
+					case "open": {
+						const { query } = route;
+						if (query.providerId === "trello*com") {
+							const card = { ...query, providerIcon: "trello" };
+							HostApi.instance
+								.send(ExecuteThirdPartyRequestUntypedType, {
+									method: "selfAssignCard",
+									providerId: card.providerId,
+									params: { cardId: card.id }
+								})
+								.then(() => {
+									store.dispatch(closeAllPanels());
+									store.dispatch(setStartWorkCard(card));
+								});
+						} else {
+							HostApi.instance
+								.send(ExecuteThirdPartyRequestUntypedType, {
+									method: "getIssueIdFromUrl",
+									providerId: route.query.providerId,
+									params: { url: route.query.url }
+								})
+								.then((issue: any) => {
+									if (issue) {
+										HostApi.instance
+											.send(ExecuteThirdPartyRequestUntypedType, {
+												method: "setAssigneeOnIssue",
+												providerId: route.query.providerId,
+												params: { issueId: issue.id, assigneeId: issue.viewer.id, onOff: true }
+											})
+											.then(() => {
+												store.dispatch(closeAllPanels());
+												store.dispatch(
+													setStartWorkCard({ ...issue, providerId: route.query.providerId })
+												);
+											});
+									} else {
+										console.error("Unable to find issue from: ", route);
+									}
+								})
+								.catch(e => {
+									console.error("Error: Unable to load issue from: ", route);
+								});
+						}
 						break;
 					}
 				}
@@ -403,8 +454,7 @@ function listenForEvents(store) {
 			case "navigate": {
 				if (route.action) {
 					if (Object.values(WebviewPanels).includes(route.action as any)) {
-						store.dispatch(setCurrentReview(""));
-						store.dispatch(setCurrentCodemark(""));
+						store.dispatch(closeAllPanels());
 						store.dispatch(openPanel(route.action));
 					} else {
 						logWarning(`Cannot navigate to route.action=${route.action}`);

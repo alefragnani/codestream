@@ -4,7 +4,9 @@ import {
 	PostsChangedNotification,
 	Unreads,
 	UnreadsChangedNotification,
-	ReviewsChangedNotification
+	ReviewsChangedNotification,
+	PullRequestsChangedNotification,
+	PullRequestsChangedData
 } from "@codestream/protocols/agent";
 import { Uri } from "vscode";
 import { memoize } from "../system";
@@ -21,10 +23,15 @@ export class TextDocumentMarkersChangedEvent {
 	constructor(public readonly session: CodeStreamSession, public readonly uri: Uri) {}
 }
 
+export class PullRequestCommentsChangedEvent {
+	constructor(public readonly session: CodeStreamSession) {}
+}
+
 export enum SessionChangedEventType {
 	Codemarks = "codemarks",
 	Posts = "posts",
 	Preferences = "preferences",
+	PullRequests = "pullRequests",
 	Repositories = "repos",
 	Streams = "streams",
 	StreamsMembership = "streamsMembership",
@@ -93,6 +100,20 @@ export class UnreadsChangedEvent extends SessionChangedEventBase<UnreadsChangedN
 
 	@memoize
 	unreads(): Unreads {
+		return this._event.data;
+	}
+}
+
+export class PullRequestsChangedEvent extends SessionChangedEventBase<PullRequestsChangedNotification>
+	implements MergeableEvent<PullRequestsChangedEvent> {
+	readonly type = SessionChangedEventType.PullRequests;
+
+	merge(e: PullRequestsChangedEvent) {
+		this._event.data.push(...e._event.data);
+	}
+
+	@memoize
+	pullRequestNotifications(): PullRequestsChangedData[]  {
 		return this._event.data;
 	}
 }

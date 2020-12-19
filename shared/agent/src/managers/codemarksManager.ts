@@ -1,4 +1,6 @@
 "use strict";
+import { createPatch, ParsedDiff, parsePatch } from "diff";
+import { xfs } from "xfs";
 import { MessageType } from "../api/apiProvider";
 import { MarkerLocation } from "../api/extensions";
 import { Container, SessionContainer } from "../container";
@@ -23,9 +25,13 @@ import {
 	FollowReviewRequest,
 	FollowReviewRequestType,
 	FollowReviewResponse,
+	GetCodemarkRangeRequest,
+	GetCodemarkRangeRequestType,
+	GetCodemarkRangeResponse,
 	GetCodemarkSha1Request,
 	GetCodemarkSha1RequestType,
 	GetCodemarkSha1Response,
+	GetRangeResponse,
 	PinReplyToCodemarkRequest,
 	PinReplyToCodemarkRequestType,
 	PinReplyToCodemarkResponse,
@@ -39,7 +45,7 @@ import {
 	UpdateCodemarkRequestType,
 	UpdateCodemarkResponse
 } from "../protocol/agent.protocol";
-import { CSCodemark } from "../protocol/api.protocol";
+import { CSCodemark, CSMarker } from "../protocol/api.protocol";
 import { log, lsp, lspHandler, Strings } from "../system";
 import { CachedEntityManagerBase, Id } from "./entityManager";
 
@@ -158,10 +164,86 @@ export class CodemarksManager extends CachedEntityManagerBase<CSCodemark> {
 		return response;
 	}
 
+	@lspHandler(GetCodemarkRangeRequestType)
+	@log()
+	async getCodemarkRange({
+		codemarkId,
+		markerId
+	}: GetCodemarkRangeRequest): Promise<GetCodemarkRangeResponse> {
+		const cc = Logger.getCorrelationContext();
+
+		const { codemarks, files, markerLocations, scm } = SessionContainer.instance();
+		const { documents } = Container.instance();
+
+		const codemark = await codemarks.getEnrichedCodemarkById(codemarkId);
+		if (codemark === undefined) {
+			throw new Error(`No codemark could be found for Id(${codemarkId})`);
+		}
+
+		if (codemark.markers == null || codemark.markers.length === 0) {
+			Logger.warn(cc, `No markers are associated with codemark Id(${codemarkId})`);
+			return { success: false };
+		}
+
+		if (codemark.fileStreamIds.length === 0) {
+			Logger.warn(cc, `No documents are associated with codemark Id(${codemarkId})`);
+			return { success: false };
+		}
+
+		// Get the most up-to-date location for the codemark
+		const marker = markerId
+			? codemark.markers.find(m => m.id === markerId) || codemark.markers[0]
+			: codemark.markers[0];
+
+		const fileStreamId = marker.fileStreamId;
+		const uri = await files.getDocumentUri(fileStreamId);
+		if (uri === undefined) {
+			Logger.warn(cc, `No document could be loaded for codemark Id(${codemarkId})`);
+			return { success: false };
+		}
+
+		const document = documents.get(uri);
+
+		const { locations } = await markerLocations.getCurrentLocations(uri, fileStreamId, [marker]);
+
+		let documentRange: GetRangeResponse | undefined = {};
+		let diff = "";
+
+		const location = locations[marker.id];
+		if (location != null) {
+			const range = MarkerLocation.toRange(location);
+			const response = await scm.getRange({ uri: uri, range: range });
+			documentRange = response;
+			if (documentRange) {
+				diff = response.currentContent
+					? createPatch(marker.file, marker.code, response.currentContent)
+					: createPatch(marker.file, "", marker.code);
+				const diffs = diff.trim().split("\n");
+				diffs.splice(0, 5);
+				let startLine = 1;
+				if (marker.locationWhenCreated && marker.locationWhenCreated.length) {
+					startLine = marker.locationWhenCreated[0];
+				} else if (marker.referenceLocations && marker.referenceLocations.length) {
+					startLine = marker.referenceLocations[0].location[0];
+				}
+				const newHeader = `@@ -${startLine},${marker.code.split("\n").length} +${range.start.line +
+					1},${(documentRange.currentContent || "").split("\n").length}`;
+				diff = `${newHeader}\n${diffs.join("\n")}`;
+			}
+		}
+
+		const response = {
+			// Normalize to /n line endings
+			...documentRange,
+			diff,
+			success: true
+		};
+
+		return response;
+	}
+
 	async getIdByPostId(postId: string): Promise<string | undefined> {
-		const codemark = (await this.getAllCached()).find(
-			c => c.postId === postId
-		);
+		const codemark = (await this.getAllCached()).find(c => c.postId === postId);
 		return codemark && codemark.id;
 	}
 
@@ -172,18 +254,43 @@ export class CodemarksManager extends CachedEntityManagerBase<CSCodemark> {
 	async enrichCodemark(codemark: CSCodemark): Promise<CodemarkPlus> {
 		const { markers: markersManager } = SessionContainer.instance();
 
-		const markers = [];
+		const markerObjects: { [key: string]: CSMarker } = {};
+		const markers: CSMarker[] = [];
+		const markersInOrder: CSMarker[] = [];
 		if (codemark.markerIds != null && codemark.markerIds.length !== 0) {
 			for (const markerId of codemark.markerIds) {
 				try {
-					const marker = await markersManager.getById(markerId);
-					if (marker.supersededByMarkerId == null) {
-						markers.push(marker);
-					}
+					markerObjects[markerId] = await markersManager.getById(markerId);
+					markersInOrder.push(markerObjects[markerId]);
 				} catch (err) {
 					// https://trello.com/c/ti6neIz1/2969-activity-feed-loads-forever-if-restart-jb-while-on-the-feed
 					Logger.warn(err.message);
 				}
+			}
+
+			const addMarkerAfterCheckingForSuperseded = (marker: CSMarker) => {
+				if (marker.supersededByMarkerId) {
+					// check to see if the marker has been superseded by another.
+					// if so, grab it from the markerObjects and push it at the location
+					// of the "retired" marker, then delete it from the hash so that
+					// it doesn't get inserted at its original location
+					const supersededMarker = markerObjects[marker.supersededByMarkerId];
+					if (supersededMarker) {
+						addMarkerAfterCheckingForSuperseded(supersededMarker);
+						delete markerObjects[marker.supersededByMarkerId];
+					}
+					// if there's no supersededMarker in markerObjects, that's kind of
+					// an error condition -- the ID is pointing to a marker that for
+					// whatever reason doesn't exist, so we do nothing in this case.
+				} else {
+					// if there's no supersededMarkerId, then it's just a regular
+					// marker and add it to the array in the normal position
+					markers.push(marker);
+				}
+			};
+
+			for (const markerId of codemark.markerIds) {
+				if (markerObjects[markerId]) addMarkerAfterCheckingForSuperseded(markerObjects[markerId]);
 			}
 		}
 

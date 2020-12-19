@@ -24,6 +24,8 @@ import com.codestream.protocols.webview.EditorNotifications
 import com.codestream.protocols.webview.EditorSelection
 import com.codestream.protocols.webview.WebViewContext
 import com.codestream.review.ReviewDiffFileSystem
+import com.codestream.review.ReviewDiffSide
+import com.codestream.review.ReviewDiffVirtualFile
 import com.codestream.sessionService
 import com.codestream.settings.ApplicationSettingsService
 import com.codestream.settingsService
@@ -50,6 +52,7 @@ import com.intellij.openapi.editor.markup.TextAttributes
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.KeyWithDefaultValue
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import kotlinx.coroutines.CompletableDeferred
@@ -59,6 +62,7 @@ import kotlinx.coroutines.launch
 import org.eclipse.lsp4j.DidChangeTextDocumentParams
 import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
+import org.eclipse.lsp4j.DidSaveTextDocumentParams
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.Range
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
@@ -67,6 +71,8 @@ import org.eclipse.lsp4j.TextDocumentSyncKind
 import org.eclipse.lsp4j.VersionedTextDocumentIdentifier
 import java.io.File
 import java.net.URI
+
+val CODESTREAM_HIGHLIGHTER = KeyWithDefaultValue.create("CODESTREAM_HIGHLIGHTER", false)
 
 class EditorService(val project: Project) {
 
@@ -89,11 +95,15 @@ class EditorService(val project: Project) {
     private var codeStreamVisible = project.codeStream?.isVisible ?: false
 
     fun add(editor: Editor) {
+        val reviewFile = editor.document.file as? ReviewDiffVirtualFile
+        if (reviewFile?.side == ReviewDiffSide.LEFT) return
+
         val agentService = project.agentService ?: return
         managedEditors.add(editor)
         rangeHighlighters[editor] = mutableSetOf()
         editor.selectionModel.addSelectionListener(SelectionListenerImpl(project))
         editor.scrollingModel.addVisibleAreaListener(VisibleAreaListenerImpl(project))
+        NewCodemarkGutterIconManager(editor)
 
         val document = editor.document
         agentService.onDidStart {
@@ -105,11 +115,6 @@ class EditorService(val project: Project) {
                         DidOpenTextDocumentParams(document.textDocumentItem)
                     )
                     document.addDocumentListener(DocumentSynchronizer())
-                }
-            }
-            ApplicationManager.getApplication().invokeLater {
-                GlobalScope.launch {
-                    editor.renderMarkers(getDocumentMarkers(editor.document))
                 }
             }
         }
@@ -133,6 +138,18 @@ class EditorService(val project: Project) {
                         )
                     }
                 }
+            }
+        }
+    }
+
+    fun save(document: Document) {
+        val agentService = project.agentService ?: return
+
+        synchronized(managedDocuments) {
+            if (managedDocuments.contains(document)) {
+                agentService.agent.textDocumentService.didSave(
+                    DidSaveTextDocumentParams(document.textDocumentIdentifier)
+                )
             }
         }
     }
@@ -194,11 +211,33 @@ class EditorService(val project: Project) {
         }
     }
 
-    fun updateMarkers(document: Document) = GlobalScope.launch {
+    fun updatePullRequestDiffMarkers() {
+        managedEditors
+            .filter {
+                val reviewFile = it.document.file as? ReviewDiffVirtualFile
+                reviewFile?.side == ReviewDiffSide.RIGHT
+            }
+            .forEach {
+                GlobalScope.launch {
+                    val markers = getDocumentMarkers(it.document)
+                    it.renderMarkers(markers)
+                }
+            }
+    }
+
+    fun updateMarkers(document: Document) = ApplicationManager.getApplication().invokeLater {
         val editors = EditorFactory.getInstance().getEditors(document, project)
-        val markers = getDocumentMarkers(document)
-        for (editor in editors) {
-            editor.renderMarkers(markers)
+        val visibleEditors = editors
+            .filter { !it.scrollingModel.visibleArea.isEmpty }
+            .filter {
+                val reviewFile = it.document.file as? ReviewDiffVirtualFile ?: return@filter true
+                reviewFile.side == ReviewDiffSide.RIGHT
+            }
+        if (visibleEditors.isEmpty()) return@invokeLater
+
+        GlobalScope.launch {
+            val markers = getDocumentMarkers(document)
+            visibleEditors.forEach { it.renderMarkers(markers) }
         }
     }
 
@@ -317,12 +356,13 @@ class EditorService(val project: Project) {
                 null,
                 HighlighterTargetArea.EXACT_RANGE
             ).also {
-                if (showGutterIcons && marker.codemark != null) {
+                if (showGutterIcons && (marker.codemark != null || marker.externalContent != null)) {
                     it.gutterIconRenderer = GutterIconRendererImpl(this, marker)
                 }
                 it.isThinErrorStripeMark = true
                 it.errorStripeMarkColor = marker.codemark?.color() ?: blue
                 it.errorStripeTooltip = marker.summary
+                it.putUserData(CODESTREAM_HIGHLIGHTER, true)
             }
         }
     }

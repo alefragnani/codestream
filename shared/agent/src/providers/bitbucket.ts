@@ -1,5 +1,5 @@
 "use strict";
-import { GitRemote, GitRepository } from "git/gitService";
+import { GitRemoteLike, GitRepository } from "git/gitService";
 import * as paths from "path";
 import * as qs from "querystring";
 import { URI } from "vscode-uri";
@@ -20,13 +20,15 @@ import {
 	FetchThirdPartyCardsResponse,
 	FetchThirdPartyCardWorkflowRequest,
 	FetchThirdPartyCardWorkflowResponse,
-	MoveThirdPartyCardRequest,
-	MoveThirdPartyCardResponse,
-	ThirdPartyProviderCard,
+	FetchThirdPartyPullRequestCommitsRequest,
+	FetchThirdPartyPullRequestCommitsResponse,
 	FetchThirdPartyPullRequestRequest,
 	FetchThirdPartyPullRequestResponse,
-	FetchThirdPartyPullRequestCommitsRequest,
-	FetchThirdPartyPullRequestCommitsResponse
+	GetMyPullRequestsRequest,
+	GetMyPullRequestsResponse,
+	MoveThirdPartyCardRequest,
+	MoveThirdPartyCardResponse,
+	ThirdPartyProviderCard
 } from "../protocol/agent.protocol";
 import {
 	CodemarkType,
@@ -154,6 +156,27 @@ export class BitbucketProvider extends ThirdPartyIssueProviderBase<CSBitbucketPr
 		return {
 			Authorization: `Bearer ${this.accessToken}`,
 			"Content-Type": "application/json"
+		};
+	}
+
+	getPRExternalContent(comment: PullRequestComment) {
+		return {
+			provider: {
+				name: this.displayName,
+				icon: this.name,
+				id: this.providerConfig.id
+			},
+			subhead: `#${comment.pullRequest.id}`,
+			actions: [
+				{
+					label: "Open Comment",
+					uri: comment.url
+				},
+				{
+					label: `Open Merge Request #${comment.pullRequest.id}`,
+					uri: comment.pullRequest.url
+				}
+			]
 		};
 	}
 
@@ -343,7 +366,14 @@ export class BitbucketProvider extends ThirdPartyIssueProviderBase<CSBitbucketPr
 	}
 
 	@log()
-	async getPullRequestDocumentMarkers({
+	getMyPullRequests(
+		request: GetMyPullRequestsRequest
+	): Promise<GetMyPullRequestsResponse[][] | undefined> {
+		throw new Error("Method not implemented.");
+	}
+
+	@log()
+	getPullRequestDocumentMarkers({
 		uri,
 		repoId,
 		streamId
@@ -352,117 +382,11 @@ export class BitbucketProvider extends ThirdPartyIssueProviderBase<CSBitbucketPr
 		repoId: string | undefined;
 		streamId: string;
 	}): Promise<DocumentMarker[]> {
-		void (await this.ensureConnected());
-
-		const documentMarkers: DocumentMarker[] = [];
-
-		const { git, session } = SessionContainer.instance();
-
-		const repo = await git.getRepositoryByFilePath(uri.fsPath);
-		if (repo === undefined) return documentMarkers;
-
-		const comments = await this._getCommentsForPath(uri.fsPath, repo);
-		if (comments === undefined) return documentMarkers;
-
-		const commentsById: { [id: string]: PullRequestComment } = Object.create(null);
-		const markersByCommit = new Map<string, Markerish[]>();
-		const trackingBranch = await git.getTrackingBranch(uri);
-
-		for (const c of comments) {
-			if (
-				c.pullRequest.isOpen &&
-				c.pullRequest.targetBranch !== trackingBranch?.shortName &&
-				c.pullRequest.sourceBranch !== trackingBranch?.shortName
-			) {
-				continue;
-			}
-
-			let markers = markersByCommit.get(c.commit);
-			if (markers === undefined) {
-				markers = [];
-				markersByCommit.set(c.commit, markers);
-			}
-
-			commentsById[c.id] = c;
-			const referenceLocations: CSReferenceLocation[] = [];
-			if (c.line >= 0) {
-				referenceLocations.push({
-					commitHash: c.commit,
-					location: [c.line, 1, c.line, MAX_RANGE_VALUE, undefined] as CSLocationArray,
-					flags: {
-						canonical: true
-					}
-				});
-			}
-			markers.push({
-				id: c.id,
-				referenceLocations
-			});
-		}
-
-		const locations = await MarkerLocationManager.computeCurrentLocations(uri, markersByCommit);
-
-		const teamId = session.teamId;
-
-		for (const [id, location] of Object.entries(locations.locations)) {
-			const comment = commentsById[id];
-
-			documentMarkers.push({
-				id: id,
-				fileUri: uri.toString(),
-				codemarkId: undefined,
-				fileStreamId: streamId,
-				// postId: undefined!,
-				// postStreamId: undefined!,
-				repoId: repoId!,
-				teamId: teamId,
-				file: uri.fsPath,
-				// commitHashWhenCreated: revision!,
-				// locationWhenCreated: MarkerLocation.toArray(location),
-				modifiedAt: new Date(comment.createdAt).getTime(),
-				code: comment.code,
-
-				createdAt: new Date(comment.createdAt).getTime(),
-				creatorId: comment.author.id,
-				creatorName: comment.author.nickname,
-				externalContent: {
-					provider: {
-						name: this.displayName,
-						icon: this.name
-					},
-					subhead: `#${comment.pullRequest.id}`,
-					actions: [
-						{
-							label: "Open Comment",
-							uri: comment.url
-						},
-						{
-							label: `Open Merge Request #${comment.pullRequest.id}`,
-							uri: comment.pullRequest.url
-						}
-					]
-				},
-				range: {
-					start: {
-						line: location.lineStart - 1,
-						character: 0
-					},
-					end: {
-						line: location.lineEnd - 1,
-						character: 0
-					}
-				},
-				location: location,
-				summary: comment.text,
-				summaryMarkdown: `\n\n${Strings.escapeMarkdown(comment.text)}`,
-				type: CodemarkType.Comment
-			});
-		}
-
-		return documentMarkers;
+		return super.getPullRequestDocumentMarkersCore({ uri, repoId, streamId });
 	}
 
 	async getRemotePaths(repo: any, _projectsByRemotePath: any) {
+		// TODO don't need this ensureConnected -- doesn't hit api
 		await this.ensureConnected();
 		const remotePaths = await getRemotePaths(
 			repo,
@@ -579,13 +503,13 @@ export class BitbucketProvider extends ThirdPartyIssueProviderBase<CSBitbucketPr
 		{ expiresAt: number; comments: Promise<PullRequestComment[]> }
 	>();
 
-	private _isMatchingRemotePredicate = (r: GitRemote) => r.domain === "bitbucket.org";
+	private _isMatchingRemotePredicate = (r: GitRemoteLike) => r.domain === "bitbucket.org";
 	getIsMatchingRemotePredicate() {
 		return this._isMatchingRemotePredicate;
 	}
 
 	@log()
-	private async _getCommentsForPath(
+	async getCommentsForPath(
 		filePath: string,
 		repo: GitRepository
 	): Promise<PullRequestComment[] | undefined> {

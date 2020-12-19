@@ -3,7 +3,11 @@ package com.codestream
 import com.codestream.agent.ModuleListenerImpl
 import com.codestream.editor.EditorFactoryListenerImpl
 import com.codestream.editor.FileEditorManagerListenerImpl
+import com.codestream.editor.VirtualFileListenerImpl
+import com.codestream.protocols.webview.EditorNotifications
 import com.codestream.protocols.webview.FocusNotifications
+import com.codestream.protocols.webview.Sidebar
+import com.codestream.protocols.webview.SidebarLocation
 import com.codestream.settings.ApplicationSettingsService
 import com.codestream.system.CodeStreamDiffURLStreamHandler
 import com.codestream.workaround.ToolWindowManagerWorkaround
@@ -16,13 +20,17 @@ import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.IconLoader
+import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.wm.ToolWindow
+import com.intellij.openapi.wm.ToolWindowAnchor
+import com.intellij.openapi.wm.ToolWindowManager
+import com.intellij.openapi.wm.ToolWindowType
 import com.intellij.openapi.wm.WindowManager
 import com.intellij.openapi.wm.ex.ToolWindowManagerListener
 import com.intellij.util.ui.UIUtil
+import java.awt.KeyboardFocusManager
 import java.awt.event.WindowEvent
 import java.awt.event.WindowFocusListener
-import javax.swing.JLabel
 import kotlin.properties.Delegates
 
 const val CODESTREAM_TOOL_WINDOW_ID = "CodeStream"
@@ -43,12 +51,18 @@ class CodeStreamComponent(val project: Project) : Disposable {
     init {
         logger.info("Initializing CodeStream")
         CodeStreamDiffURLStreamHandler
+        initDebugMonitors()
         initEditorFactoryListener()
+        initVirtualFileListener()
         initMessageBusSubscriptions()
         showToolWindowOnFirstRun()
         ApplicationManager.getApplication().invokeLater {
             initWindowFocusListener()
             initUnreadsListener()
+        }
+        project.agentService?.onDidStart {
+            val webViewService = project.webViewService ?: return@onDidStart
+            webViewService.load()
         }
     }
 
@@ -74,6 +88,13 @@ class CodeStreamComponent(val project: Project) : Disposable {
         )
     }
 
+    private fun initVirtualFileListener() {
+        if (project.isDisposed) return
+        VirtualFileManager.getInstance().addVirtualFileListener(
+            VirtualFileListenerImpl(project), this
+        )
+    }
+
     private fun initMessageBusSubscriptions() {
         if (project.isDisposed) return
         project.messageBus.connect().let {
@@ -88,23 +109,18 @@ class CodeStreamComponent(val project: Project) : Disposable {
             it.subscribe(
                 ToolWindowManagerListener.TOPIC,
                 object : ToolWindowManagerListener {
-                    override fun toolWindowRegistered(id: String) {
-                        if (id != CODESTREAM_TOOL_WINDOW_ID) return
-                        val loadingLabel = JLabel("Loading...", IconLoader.getIcon("/images/codestream.svg"), JLabel.CENTER)
-                        toolWindow!!.component.add(loadingLabel)
-                        project.agentService?.onDidStart {
-                            val webViewService = project.webViewService ?: return@onDidStart
-                            webViewService.load()
-                            toolWindow?.component?.let { cmp ->
-                                cmp.remove(loadingLabel)
-                                cmp.add(webViewService.webView)
-                            }
-                        }
-                    }
-
                     override fun stateChanged() {
                         isVisible = toolWindow?.isVisible ?: false
                         updateWebViewFocus()
+                        updateSidebar()
+                        toolWindow?.component?.repaint()
+                    }
+
+                    override fun toolWindowRegistered(id: String) {
+                        if (id == CODESTREAM_TOOL_WINDOW_ID) {
+                            val toolWindow = ToolWindowManager.getInstance(project).getToolWindow(CODESTREAM_TOOL_WINDOW_ID)
+                            toolWindow?.contentManager // trigger content (webview) initialization
+                        }
                     }
                 }
             )
@@ -164,11 +180,43 @@ class CodeStreamComponent(val project: Project) : Disposable {
         )
     }
 
+    private var oldSidebarLocation: SidebarLocation? = null
+    private fun updateSidebar() {
+        val tw = toolWindow ?: return
+        val sidebarLocation = when (tw.type) {
+            ToolWindowType.FLOATING -> SidebarLocation.FLOATING
+            ToolWindowType.WINDOWED -> SidebarLocation.FLOATING
+            else -> when(tw.anchor?.toString()) {
+                ToolWindowAnchor.LEFT.toString() -> SidebarLocation.LEFT
+                ToolWindowAnchor.RIGHT.toString() -> SidebarLocation.RIGHT
+                ToolWindowAnchor.TOP.toString() -> SidebarLocation.TOP
+                ToolWindowAnchor.BOTTOM.toString() -> SidebarLocation.BOTTOM
+                else -> SidebarLocation.FLOATING
+            }
+        }
+        if (sidebarLocation != oldSidebarLocation) {
+            project.webViewService?.postNotification(
+                EditorNotifications.DidChangeLayout(Sidebar(sidebarLocation))
+            )
+            oldSidebarLocation = sidebarLocation
+        }
+    }
+
     override fun dispose() {
     }
 
     private val _isVisibleObservers = mutableListOf<(Boolean) -> Unit>()
     fun onIsVisibleChanged(observer: (Boolean) -> Unit) {
         _isVisibleObservers += observer
+    }
+
+    private fun initDebugMonitors() {
+        if (!DEBUG) return
+
+        KeyboardFocusManager.getCurrentKeyboardFocusManager().addPropertyChangeListener { evt ->
+            if (evt.propertyName === "focusOwner") {
+                logger.debug("Current focus owner: ${evt.newValue}")
+            }
+        }
     }
 }

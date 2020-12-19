@@ -475,6 +475,15 @@ export interface CSCreateMarkerResponse {
 	marker: CSMarker;
 }
 
+export interface CSAddMarkersRequest {
+	markers: CSCreateMarkerRequest[];
+	at?: number[];
+}
+
+export interface CSAddMarkersResponse {
+	codemark: CSCodemark;
+}
+
 export interface CSCreateCodemarkResponse {
 	codemark: CSCodemark;
 	markers?: CSMarker[];

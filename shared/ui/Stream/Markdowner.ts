@@ -9,6 +9,20 @@ import { getUsernames } from "../store/users/reducer";
 import React from "react";
 import { CodeStreamState } from "../store";
 
+interface MarkdownOptions {
+	/**
+	 * When true, the renderInline function will be used.
+	 * While this does not include a wrapper <p> tag, it also
+	 * will not render html highlighting, so any code wrapped in
+	 * ``` will be displayed as a single line.
+	 *
+	 * @type {boolean}
+	 * @memberof MarkdownOptions
+	 */
+	inline: boolean;
+	excludeOnlyEmoji: boolean;
+}
+
 const md = new MarkdownIt({
 	breaks: true,
 	linkify: true,
@@ -47,16 +61,13 @@ export const emojiPlain = text => {
 	return mdPlain.renderInline(text);
 };
 
-export const markdownify = (
-	text: string,
-	options?: { excludeParagraphWrap: boolean; excludeOnlyEmoji: boolean }
-) => {
+export const markdownify = (text: string, options?: MarkdownOptions) => {
 	// safeguard against undefined at runtime - akonwi
 	if (text == null) return text;
 	const identifyOnlyEmoji = !options || !options.excludeOnlyEmoji;
 	try {
 		const replaced =
-			options && options.excludeParagraphWrap
+			options && options.inline
 				? md.renderInline(text, { references: {} })
 				: md
 						.render(text, { references: {} })
@@ -78,6 +89,11 @@ export const markdownify = (
 	}
 };
 
+//https://stackoverflow.com/questions/3446170/escape-string-for-use-in-javascript-regex
+const escapeRegExp = (str: string) => {
+	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // $& means the whole matched string
+};
+
 /*
 	The returned function will markdownify and highlight usernames.
 	This hook loads whatever data it needs from the redux store.
@@ -87,33 +103,23 @@ export const markdownify = (
 export function useMarkdownifyToHtml() {
 	const derivedState = useSelector((state: CodeStreamState) => {
 		const currentUser = state.users[state.session.userId!];
-		return { currentUserName: currentUser.username, usernames: getUsernames(state) };
+		const escapedUsernames = getUsernames(state)
+			.map(username => escapeRegExp(username))
+			.join("|");
+		const usernameRegExp = new RegExp(`@(${escapedUsernames})\\b`, "gi");
+		return { currentUsername: currentUser.username, usernameRegExp, escapedUsernames };
 	}, shallowEqual);
 
 	return React.useCallback(
-		(text: string, options?: { excludeParagraphWrap: boolean; excludeOnlyEmoji: boolean }) => {
-			let html: string;
-			if (text == null || text === "") {
-				html = "";
-			} else {
-				const me = derivedState.currentUserName;
-				html = markdownify(text, options).replace(/@(\w+)/g, (match, name) => {
-					if (
-						derivedState.usernames.some(
-							n => name.localeCompare(n, undefined, { sensitivity: "accent" }) === 0
-						)
-					) {
-						return `<span class="at-mention${
-							me.localeCompare(name, undefined, { sensitivity: "accent" }) === 0 ? " me" : ""
-						}">${match}</span>`;
-					}
-
-					return match;
-				});
-			}
-			// console.log('useMarkdownifyToHtml input/output', text, html);
-			return html;
+		(text: string, options?: MarkdownOptions) => {
+			if (text == null || text === "") return "";
+			const me = derivedState.currentUsername;
+			const regExp = derivedState.usernameRegExp;
+			return markdownify(text, options).replace(regExp, (match, name) => {
+				const isMe = me.localeCompare(name, undefined, { sensitivity: "accent" }) === 0;
+				return `<span class="at-mention${isMe ? " me" : ""}">${match}</span>`;
+			});
 		},
-		[derivedState.usernames]
+		[derivedState.escapedUsernames]
 	);
 }

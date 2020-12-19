@@ -12,7 +12,7 @@ import {
 import {
 	Capabilities,
 	CodemarkPlus,
-	GetCodemarkSha1RequestType,
+	GetCodemarkRangeRequestType,
 	TelemetryRequestType,
 	GetDocumentFromMarkerRequestType
 } from "@codestream/protocols/agent";
@@ -25,10 +25,14 @@ import { CSMarker } from "@codestream/protocols/api";
 import { getVisibleRanges } from "../store/editorContext/reducer";
 import { getDocumentFromMarker, highlightRange } from "./api-functions";
 import { Marker } from "./Marker";
+import cx from "classnames";
 
 interface State {
 	hasDiff: boolean;
-	codemarkSha1: string | undefined;
+	currentContent?: string;
+	currentBranch?: string;
+	currentCommitHash?: string;
+	diff?: string;
 	warning?: string;
 	textDocumentUri: string;
 	startLine: number;
@@ -54,7 +58,7 @@ interface InheritedProps {
 	codemark: CodemarkPlus;
 	marker: CSMarker;
 	markerIndex: number;
-	numMarkers: number;
+	numMarkers?: number;
 	capabilities: Capabilities;
 	isAuthor: boolean;
 	alwaysRenderCode?: boolean;
@@ -63,6 +67,7 @@ interface InheritedProps {
 	selected: boolean;
 	disableDiffCheck?: boolean;
 	disableHighlightOnHover?: boolean;
+	noMargin?: boolean;
 }
 
 type Props = InheritedProps & ConnectedProps & IntlProps;
@@ -72,7 +77,6 @@ class MarkerActions extends React.Component<Props, State> {
 		super(props);
 		this.state = {
 			hasDiff: false,
-			codemarkSha1: "",
 			textDocumentUri: "",
 			startLine: 0,
 			endLine: 0,
@@ -201,14 +205,16 @@ class MarkerActions extends React.Component<Props, State> {
 		if (codemark == null || marker == null) return;
 
 		try {
-			const response = await HostApi.instance.send(GetCodemarkSha1RequestType, {
+			const response = await HostApi.instance.send(GetCodemarkRangeRequestType, {
 				codemarkId: codemark.id,
 				markerId: marker.id
 			});
+			const hasDiff = !response.success || response.currentContent !== marker.code;
 			this.setState({
-				hasDiff:
-					response.codemarkSha1 === undefined || response.codemarkSha1 !== response.documentSha1,
-				codemarkSha1: response.codemarkSha1
+				hasDiff,
+				currentContent: response.currentContent,
+				currentBranch: response.currentBranch,
+				diff: response.diff
 			});
 		} catch (error) {}
 
@@ -436,8 +442,12 @@ class MarkerActions extends React.Component<Props, State> {
 			<>
 				{(this.props.alwaysRenderCode || this.state.hasDiff || this.state.warning || canJump) &&
 					this.renderCodeblock(marker)}
-				{(canCompare || canApply || canOpenRevision || canJump) && selected && !this.state.warning && (
-					<div className="button-spread" id={codemark.id} key="left">
+				{/*(canCompare || canApply || canOpenRevision || canJump) && selected && !this.state.warning && (
+					<div
+						className={cx("button-spread", { "no-padding": this.props.noMargin })}
+						id={codemark.id}
+						key="left"
+					>
 						{this.state.hasDiff && (
 							<div className="left">
 								<Icon name="alert" /> This code has changed
@@ -463,7 +473,7 @@ class MarkerActions extends React.Component<Props, State> {
 										Compare
 									</div>
 								</Tooltip>
-							)}
+							) }
 							{canOpenRevision && (
 								<a
 									id="open-revision-button"
@@ -471,12 +481,12 @@ class MarkerActions extends React.Component<Props, State> {
 									tabIndex={4}
 									onClick={e => this.handleClickOpenRevision(e, marker)}
 								>
-									Open Revision {ref}
+									Open {ref}
 								</a>
 							)}
 						</div>
 					</div>
-				)}
+							)*/}
 			</>
 		);
 	}
@@ -528,17 +538,19 @@ class MarkerActions extends React.Component<Props, State> {
 	};
 
 	renderCodeblock(marker) {
-		const { scrollingCodeBlock, expandCodeBlock, warning } = this.state;
+		const { scrollingCodeBlock, expandCodeBlock, warning, hasDiff, currentContent } = this.state;
 		if (marker === undefined) return;
 
+		const sideMargin = this.props.noMargin ? "0" : "10px";
 		return (
 			<div
 				className={`related${warning ? "" : " clickable-marker"}`}
 				style={{
 					padding: "0",
-					marginBottom: 0,
-					marginLeft: "10px",
-					marginRight: "10px",
+					marginBottom: "20px",
+					marginTop: "20px",
+					marginLeft: sideMargin,
+					marginRight: sideMargin,
 					position: "relative"
 				}}
 				onMouseEnter={e => {
@@ -551,7 +563,12 @@ class MarkerActions extends React.Component<Props, State> {
 				}}
 				onClick={e => !warning && this.handleClickJump(e)}
 			>
-				<Marker marker={marker} />
+				<Marker
+					marker={marker}
+					hasDiff={hasDiff && !warning}
+					currentContent={currentContent}
+					diff={this.state.diff}
+				/>
 				{warning && (
 					<div className="repo-warning">
 						<Icon name="alert" /> {this.getWarningMessage()}

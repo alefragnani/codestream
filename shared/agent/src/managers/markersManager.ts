@@ -2,6 +2,12 @@
 import { Marker } from "../api/extensions";
 import { SessionContainer } from "../container";
 import {
+	AddMarkersRequest,
+	AddMarkersRequestType,
+	AddMarkersResponse,
+	DeleteMarkerRequest,
+	DeleteMarkerRequestType,
+	DeleteMarkerResponse,
 	GetMarkerRequest,
 	GetMarkerRequestType,
 	GetMarkerResponse,
@@ -129,5 +135,28 @@ export class MarkersManager extends EntityManagerBase<CSMarker> {
 			oldMarkerId: request.markerId,
 			newMarker: createMarkerRequest
 		});
+	}
+
+	@lspHandler(AddMarkersRequestType)
+	protected async addMarkers(request: AddMarkersRequest): Promise<AddMarkersResponse> {
+		const markers = [];
+		for (let marker of request.newMarkers) {
+			const { code, documentId, range, source } = marker;
+			markers.push(await MarkersBuilder.buildCreateMarkerRequest(
+				documentId,
+				code,
+				range,
+				source
+			));
+		}
+		return await this.session.api.addMarkers({
+			codemarkId: request.codemarkId,
+			newMarkers: markers
+		});
+	}
+
+	@lspHandler(DeleteMarkerRequestType)
+	deleteMarker(request: DeleteMarkerRequest): Promise<DeleteMarkerResponse> {
+		return this.session.api.deleteMarker(request);
 	}
 }

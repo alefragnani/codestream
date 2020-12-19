@@ -19,14 +19,26 @@ import {
 	GetReposScmRequestType,
 	GetBranchesRequestType,
 	ReposScm,
-	CheckPullRequestPreconditionsResponse
+	CheckPullRequestPreconditionsResponse,
+	GetLatestCommitScmRequestType,
+	DiffBranchesRequestType,
+	ExecuteThirdPartyTypedType,
+	ExecuteThirdPartyTypedRequest,
+	GetMyPullRequestsResponse,
+	ExecuteThirdPartyRequestUntypedType
 } from "@codestream/protocols/agent";
 import { connectProvider } from "./actions";
 import { isConnected, getPRLabel } from "../store/providers/reducer";
 import { CodeStreamState } from "../store";
 import { inMillis } from "../utils";
 import { useInterval, useTimeout } from "../utilities/hooks";
-import { setCurrentReview, openPanel, setCurrentPullRequest } from "../store/context/actions";
+import {
+	setCurrentReview,
+	openPanel,
+	setCurrentPullRequest,
+	setCurrentRepo,
+	closeAllPanels
+} from "../store/context/actions";
 import { PROVIDER_MAPPINGS } from "./CrossPostIssueControls/types";
 import { PrePRProviderInfoModal } from "./PrePRProviderInfoModal";
 import Icon from "./Icon";
@@ -34,13 +46,16 @@ import { OpenUrlRequestType } from "@codestream/protocols/webview";
 import { Checkbox } from "../src/components/Checkbox";
 import { PanelHeader } from "../src/components/PanelHeader";
 import { CSMe } from "@codestream/protocols/api";
-import Headshot from "./Headshot";
-import { EMPTY_STATUS } from "./StatusPanel";
+import { EMPTY_STATUS } from "./StartWork";
 import Tooltip from "./Tooltip";
-import { clearMyPullRequests } from "../store/providerPullRequests/actions";
-
-// base branch dropdown: show only pushed branches
-// base branch dropdown: try to default to fork point branch
+import { api, clearMyPullRequests } from "../store/providerPullRequests/actions";
+import { css } from "react-select/src/components/SingleValue";
+import { InlineMenu } from "../src/components/controls/InlineMenu";
+import { PRDiffHunks, PRDiffHunk } from "./PullRequestFilesChangedList";
+import { PullRequestPatch } from "./PullRequestPatch";
+import { PullRequestFilesChangedList } from "./PullRequestFilesChangedList";
+import { PRError } from "./PullRequestComponents";
+import { RequestType } from "vscode-languageserver-protocol";
 
 export const ButtonRow = styled.div`
 	text-align: right;
@@ -67,39 +82,8 @@ const Root = styled.div`
 			color: var(--text-color-info) !important;
 		}
 	}
-`;
-const PRError = styled.div`
-	padding: 15px 15px 10px 15px;
-	display: flex;
-	align-items: center;
-	> .icon {
-		flex-grow: 0;
-		flex-shrink: 0;
-		display: inline-block;
-		margin-right: 15px;
-		transform: scale(1.5);
-	}
-	> div {
-		flex-grow: 10;
-		display: flex;
-		align-items: center;
-		button {
-			margin-left: auto;
-		}
-	}
-	strong {
-		font-weight: normal;
-		color: var(--text-color-highlight);
-	}
-	a {
-		text-decoration: none;
-		color: var(--text-color-highlight);
-		&:hover {
-			color: var(--text-color-info) !important;
-		}
-	}
-	.spacer {
-		// height: 10px;
+	.no-padding {
+		padding: 0;
 	}
 `;
 const PRCompare = styled.div`
@@ -134,7 +118,9 @@ const Step4 = props => (props.step !== 4 ? null : <div>{props.children}</div>);
 export const CreatePullRequestPanel = props => {
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
-		const { providers } = state;
+		const { providers, context } = state;
+
+		const supportedPullRequestViewProviders = ["github*com", "github/enterprise"];
 		const codeHostProviders = Object.keys(providers).filter(id =>
 			[
 				"github",
@@ -152,17 +138,19 @@ export const CreatePullRequestPanel = props => {
 		return {
 			repos: state.repos,
 			currentUser,
+			supportedPullRequestViewProviders,
 			userStatus: status,
 			providers: providers,
 			codeHostProviders: codeHostProviders,
-			reviewId: state.context.createPullRequestReviewId,
+			reviewId: context.createPullRequestReviewId,
 			isConnectedToGitHub: isConnected(state, { name: "github" }),
 			isConnectedToGitLab: isConnected(state, { name: "gitlab" }),
+			isConnectedToBitbucket: isConnected(state, { name: "bitbucket" }),
 			isConnectedToGitHubEnterprise: isConnected(state, { name: "github_enterprise" }),
 			isConnectedToGitLabEnterprise: isConnected(state, { name: "gitlab_enterprise" }),
-			isConnectedToBitbucket: isConnected(state, { name: "bitbucket" }),
 			isConnectedToBitbucketServer: isConnected(state, { name: "bitbucket_server" }),
-			prLabel: getPRLabel(state)
+			prLabel: getPRLabel(state),
+			currentRepo: context.currentRepo
 		};
 	});
 	const { userStatus, reviewId, prLabel } = derivedState;
@@ -185,13 +173,18 @@ export const CreatePullRequestPanel = props => {
 
 	const [reviewBranch, setReviewBranch] = useState("");
 	const [branches, setBranches] = useState([] as string[]);
+	const [remoteBranches, setRemoteBranches] = useState([] as string[]);
 	const [requiresUpstream, setRequiresUpstream] = useState(false);
 	const [origins, setOrigins] = useState([] as string[]);
+	const [latestCommit, setLatestCommit] = useState("");
 
 	// states used to create the eventual pr
 	const [prBranch, setPrBranch] = useState("");
 	const [prTitle, setPrTitle] = useState("");
 	const [prText, setPrText] = useState("");
+	const [prTextTouched, setPrTextTouched] = useState(false);
+	const [numLines, setNumLines] = useState(8);
+
 	const [prRemoteUrl, setPrRemoteUrl] = useState("");
 	const [prProviderId, setPrProviderId] = useState("");
 	const [prProviderIconName, setPrProviderIconName] = useState("");
@@ -205,10 +198,20 @@ export const CreatePullRequestPanel = props => {
 
 	const [currentStep, setCurrentStep] = useState(0);
 
+	const [isLoadingDiffs, setIsLoadingDiffs] = useState(false);
+	const [filesChanged, setFilesChanged] = useState<any[]>([]);
+
 	const [isWaiting, setIsWaiting] = useState(false);
 	const [propsForPrePRProviderInfoModal, setPropsForPrePRProviderInfoModal] = useState<any>();
 
 	const [prUrl, setPrUrl] = useState("");
+	const [hasMounted, setHasMounted] = useState(false);
+
+	const [acrossForks, setAcrossForks] = useState(false);
+	const [forkedRepos, setForkedRepos] = useState<any[]>([]);
+	const [parentRepo, setParentRepo] = useState<any>(undefined);
+	const [baseForkedRepo, setBaseForkedRepo] = useState<any>(undefined);
+	const [headForkedRepo, setHeadForkedRepo] = useState<any>(undefined);
 
 	const stopWaiting = useCallback(() => {
 		setIsWaiting(false);
@@ -232,17 +235,30 @@ export const CreatePullRequestPanel = props => {
 				// if we're not creating a PR from a review, then get the current
 				// repo and branch from the editor
 				const response = await HostApi.instance.send(GetReposScmRequestType, {
-					inEditorOnly: true
+					inEditorOnly: true,
+					includeConnectedProviders: true
 				});
 
-				if (response && response.repositories) {
+				if (response && response.repositories && response.repositories.length) {
+					let panelRepo =
+						selectedRepo ||
+						response.repositories.find(_ => _.providerId) ||
+						response.repositories[0];
+					if (derivedState.currentRepo && derivedState.currentRepo.id) {
+						const currentRepoId = derivedState.currentRepo.id;
+						const currentRepo = response.repositories.find(_ => _.id === currentRepoId);
+						panelRepo = currentRepo ? currentRepo : panelRepo;
+						dispatch(setCurrentRepo());
+					}
 					setOpenRepos(response.repositories);
-					if (!selectedRepo) setSelectedRepo(response.repositories[0]);
-					args.repoId = (selectedRepo || response.repositories[0]).id || "";
+					if (!selectedRepo) {
+						setSelectedRepo(panelRepo);
+					}
+					args.repoId = panelRepo.id || "";
 					setPrRepoId(args.repoId);
 
 					let branchInfo = await HostApi.instance.send(GetBranchesRequestType, {
-						uri: (selectedRepo || response.repositories[0]).folder.uri
+						uri: panelRepo.folder.uri
 					});
 					if (branchInfo && branchInfo.scm && branchInfo.scm.current) {
 						args.headRefName = branchInfo.scm.current;
@@ -252,18 +268,31 @@ export const CreatePullRequestPanel = props => {
 			}
 			const result = await HostApi.instance.send(CheckPullRequestPreconditionsRequestType, args);
 			if (result && result.success) {
-				setReviewBranch(result.branch!);
+				args.repoId = result.repoId!;
 				setBranches(result.branches!);
+				setRemoteBranches(result.remoteBranches!);
+
+				let newPrBranch = prBranch;
+				let newReviewBranch = args.headRefName || reviewBranch || result.branch || "";
 				if (result.pullRequestProvider && result.pullRequestProvider.defaultBranch) {
-					setPrBranch(result.pullRequestProvider.defaultBranch!);
+					newPrBranch = result.pullRequestProvider.defaultBranch;
 				}
+				setReviewBranch(newReviewBranch);
+				setPrBranch(newPrBranch);
 
 				setPrRemoteUrl(result.remoteUrl!);
-				setPrTitle(result.review!.title!);
-				setPrText(result.review!.text!);
+				if (result.review && result.review.title) changePRTitle(result.review.title);
+
+				const template = result.pullRequestTemplate || "";
+				setNumLines(Math.max(template.split("\n").length, 8));
+				let newText = result.pullRequestTemplate || "";
+				if (result.review && result.review.text) newText += result.review.text;
+				if (!prTextTouched) setPrText(newText);
+
 				setPrProviderId(result.providerId!);
 
 				setCurrentStep(3);
+				fetchFilesChanged(args.repoId, newPrBranch, newReviewBranch);
 				if (result.warning && result.warning.type) {
 					if (result.warning.type === "REQUIRES_UPSTREAM") {
 						setRequiresUpstream(true);
@@ -290,6 +319,10 @@ export const CreatePullRequestPanel = props => {
 				if (result.error.type === "REQUIRES_PROVIDER") {
 					setCurrentStep(1);
 				} else {
+					if (result.error.type === "REQUIRES_PROVIDER_REPO") {
+						setIsWaiting(false);
+						setCurrentStep(1);
+					}
 					setPreconditionError({
 						type: result.error.type || "UNKNOWN",
 						message: result.error.message || "",
@@ -298,8 +331,9 @@ export const CreatePullRequestPanel = props => {
 					});
 				}
 			}
-		} catch (ex) {
-			logError(`Unexpected error during pull request precondition check: ${ex.message}`, {
+		} catch (error) {
+			const errorMessage = typeof error === "string" ? error : error.message;
+			logError(`Unexpected error during pull request precondition check: ${errorMessage}`, {
 				reviewId: derivedState.reviewId
 			});
 			setUnexpectedError(true);
@@ -309,6 +343,9 @@ export const CreatePullRequestPanel = props => {
 	};
 
 	useEffect(() => {
+		// prevent this from firing if we haven't mounted yet
+		if (!hasMounted) return;
+
 		fetchPreconditionData();
 	}, [
 		selectedRepo && selectedRepo.id,
@@ -332,7 +369,9 @@ export const CreatePullRequestPanel = props => {
 	}, [prProviderId]);
 
 	useEffect(() => {
-		fetchPreconditionData();
+		fetchPreconditionData().then(_ => {
+			setHasMounted(true);
+		});
 
 		const disposable = HostApi.instance.on(DidChangeDataNotificationType, (e: any) => {
 			if (pauseDataNotifications.current) return;
@@ -344,6 +383,11 @@ export const CreatePullRequestPanel = props => {
 			disposable.dispose();
 		};
 	}, []);
+
+	const changePRTitle = (title: string) => {
+		setPrTitle(title);
+		setTitleValidity(isTitleValid(title));
+	};
 
 	const isTitleValid = (title: string) => title != null && title !== "";
 
@@ -360,13 +404,16 @@ export const CreatePullRequestPanel = props => {
 	const onSubmit = async (event: React.SyntheticEvent) => {
 		setUnexpectedError(false);
 		pauseDataNotifications.current = true;
-		onValidityChanged("title", isTitleValid(prTitle));
-		if (!titleValidity) return;
+		if (!isTitleValid(prTitle)) return;
 
 		let success = false;
 		setSubmitting(true);
 		setFormState({ message: "", type: "", url: "", id: "" });
 		setPreconditionError({ message: "", type: "", url: "", id: "" });
+		const headRefName = acrossForks
+			? `${headForkedRepo.owner.login}:${reviewBranch}`
+			: reviewBranch;
+		const providerRepositoryId = acrossForks ? baseForkedRepo.id : undefined;
 		try {
 			const result = await HostApi.instance.send(CreatePullRequestRequestType, {
 				reviewId: derivedState.reviewId!,
@@ -375,7 +422,8 @@ export const CreatePullRequestPanel = props => {
 				title: prTitle,
 				description: prText,
 				baseRefName: prBranch,
-				headRefName: reviewBranch,
+				headRefName: headRefName,
+				providerRepositoryId: providerRepositoryId,
 				remote: prRemoteUrl,
 				remoteName: prUpstreamOn && prUpstream ? prUpstream : undefined,
 				addresses: addressesStatus
@@ -395,10 +443,9 @@ export const CreatePullRequestPanel = props => {
 				});
 				success = true;
 				setFormState({ message: "", type: "", url: "", id: "" });
-				if (prProviderId === "github*com") {
-					// FIXME look for enterprise
+				if (result.id && (prProviderId === "github*com" || prProviderId === "github/enterprise")) {
 					props.closePanel();
-					dispatch(setCurrentPullRequest(result.id));
+					dispatch(setCurrentPullRequest(prProviderId, result.id!));
 				} else {
 					if (derivedState.reviewId) {
 						props.closePanel();
@@ -427,9 +474,17 @@ export const CreatePullRequestPanel = props => {
 	};
 
 	const checkPullRequestBranchPreconditions = async (localPrBranch, localReviewBranch) => {
-		if (localPrBranch === localReviewBranch) {
+		if (acrossForks) {
+			if (baseForkedRepo.id === headForkedRepo.id && localPrBranch === localReviewBranch) {
+				setPreconditionError({ type: "BRANCHES_MUST_NOT_MATCH", message: "", url: "", id: "" });
+				setFormState({ type: "", message: "", url: "", id: "" });
+				setFilesChanged([]);
+				return;
+			}
+		} else if (localPrBranch === localReviewBranch) {
 			setPreconditionError({ type: "BRANCHES_MUST_NOT_MATCH", message: "", url: "", id: "" });
 			setFormState({ type: "", message: "", url: "", id: "" });
+			setFilesChanged([]);
 			return;
 		}
 
@@ -443,11 +498,13 @@ export const CreatePullRequestPanel = props => {
 				repoId = selectedRepo.id;
 			} else {
 				const response = await HostApi.instance.send(GetReposScmRequestType, {
-					inEditorOnly: true
+					inEditorOnly: true,
+					includeConnectedProviders: true
 				});
 
 				if (response && response.repositories) {
-					repoId = response.repositories[0].id || "";
+					const providerRepo = response.repositories.find(_ => _.providerId);
+					repoId = providerRepo ? providerRepo.id || "" : response.repositories[0].id || "";
 				}
 			}
 		}
@@ -464,7 +521,6 @@ export const CreatePullRequestPanel = props => {
 			.then((result: CheckPullRequestPreconditionsResponse) => {
 				setPreconditionError({ type: "", message: "", url: "", id: "" });
 				setFormState({ type: "", message: "", url: "", id: "" });
-				console.warn("RESULT IS: ", result);
 				if (result && result.warning && result.warning.type === "REQUIRES_UPSTREAM") {
 					setRequiresUpstream(true);
 					setOrigins(result.origins!);
@@ -491,26 +547,96 @@ export const CreatePullRequestPanel = props => {
 				} else {
 					setFormState({ type: "", message: "", url: "", id: "" });
 				}
+				// is there a way to fetch diffs across forks w/provider APIs?
+				if (!acrossForks) fetchFilesChanged(result.repoId!, localPrBranch, localReviewBranch);
 				setLoadingBranchInfo(false);
+			})
+			.catch(error => {
+				setPreconditionError({
+					type: "UNKNOWN",
+					message: typeof error === "string" ? error : error.message,
+					url: "",
+					id: ""
+				});
 			});
 	};
 
-	// useEffect(() => {
-	// checkPullRequestBranchPreconditions();
-	// }, [prBranch, reviewBranch]);
+	const fetchRepositoryForks = async () => {
+		if (!prProviderId || !prRemoteUrl) return;
+
+		const response = (await HostApi.instance.send(ExecuteThirdPartyRequestUntypedType, {
+			method: "getForkedRepos",
+			providerId: prProviderId,
+			params: { remote: prRemoteUrl }
+		})) as any;
+
+		// console.warn("GOT RESPONSE: ", response);
+		if (response) {
+			const forks = response.forks || [];
+			setForkedRepos(forks);
+			setParentRepo(response.parent);
+			setBaseForkedRepo(response.parent);
+			setHeadForkedRepo(response.parent);
+		}
+	};
+
+	useEffect(() => {
+		fetchRepositoryForks();
+	}, [prProviderId, prRemoteUrl]);
+
+	// 			.then((result: GetForkedRepositoriesResponse) => {
+	// 			setPreconditionError({ type: "", message: "", url: "", id: "" });
+	// 			setFormState({ type: "", message: "", url: "", id: "" });
+	// 			if (result && result.error) {
+	// 				setPreconditionError({
+	// 					type: result.error.type || "UNKNOWN",
+	// 					message: result.error.message || "",
+	// 					url: result.error.url || "",
+	// 					id: result.error.id || ""
+	// 				});
+	// 			} else if (result && result.warning) {
+	// 				setPreconditionError({
+	// 					type: result.warning.type || "UNKNOWN",
+	// 					message: result.warning.message || "Unknown error.",
+	// 					url: result.warning.url || "",
+	// 					id: result.warning.id || ""
+	// 				});
+	// 			} else {
+	// 				setFormState({ type: "", message: "", url: "", id: "" });
+	// 			}
+	// 			setForkedRepos(result.repositories);
+	// 			// fetchFilesChanged(repoId, localPrBranch, localReviewBranch);
+	// 			setLoadingBranchInfo(false);
+	// 		})
+	// 		.catch(error => {
+	// 			setPreconditionError({
+	// 				type: "UNKNOWN",
+	// 				message: typeof error === "string" ? error : error.message,
+	// 				url: "",
+	// 				id: ""
+	// 			});
+	// 		});
+	// };
 
 	const renderBaseBranchesDropdown = () => {
-		const items = branches!.map(_ => {
+		if (acrossForks) return renderBaseBranchesAcrossForksDropdown();
+		if (!remoteBranches || !remoteBranches.length) return undefined;
+		const items = remoteBranches!.map(_ => {
 			return {
 				label: _,
+				searchLabel: _,
 				key: _,
 				action: async () => {
 					setPrBranch(_);
 					checkPullRequestBranchPreconditions(_, reviewBranch);
 				}
 			};
-		});
+		}) as any;
 		if (items.length === 0) return undefined;
+		if (items.length >= 10) {
+			items.unshift({ label: "-" });
+			items.unshift({ type: "search", placeholder: "Search...", action: "search" });
+		}
 		return (
 			<span>
 				<DropdownButton variant="secondary" items={items}>
@@ -520,18 +646,52 @@ export const CreatePullRequestPanel = props => {
 		);
 	};
 
+	const renderBaseBranchesAcrossForksDropdown = () => {
+		if (!baseForkedRepo || !baseForkedRepo.refs) return;
+		const items = baseForkedRepo.refs.nodes.map(_ => {
+			return {
+				label: _.name,
+				searchLabel: _.name,
+				key: _.name,
+				action: () => {
+					setPrBranch(_.name);
+					checkPullRequestBranchPreconditions(_.name, reviewBranch);
+				}
+			};
+		});
+		if (items.length === 0) return null;
+		if (items.length >= 10) {
+			items.unshift({ label: "-" });
+			items.unshift({ type: "search", placeholder: "Search...", action: "search" });
+		}
+		return (
+			<span>
+				<DropdownButton variant="secondary" items={items}>
+					<span className="subtle">base:</span> <strong>{prBranch}</strong>
+				</DropdownButton>
+			</span>
+		);
+	};
+
 	const renderCompareBranchesDropdown = () => {
+		if (acrossForks) return renderCompareBranchesAcrossForksDropdown();
+
 		const items = branches!.map(_ => {
 			return {
 				label: _,
+				searchLabel: _,
 				key: _,
 				action: async () => {
 					setReviewBranch(_);
 					checkPullRequestBranchPreconditions(prBranch, _);
 				}
 			};
-		});
+		}) as any;
 		if (items.length === 0) return undefined;
+		if (items.length >= 10) {
+			items.unshift({ label: "-" });
+			items.unshift({ type: "search", placeholder: "Search...", action: "search" });
+		}
 		return (
 			<DropdownButton variant="secondary" items={items}>
 				<span className="subtle">compare:</span> <strong>{reviewBranch}</strong>
@@ -539,20 +699,50 @@ export const CreatePullRequestPanel = props => {
 		);
 	};
 
-	const renderReposDropdown = () => {
+	const renderCompareBranchesAcrossForksDropdown = () => {
+		if (!headForkedRepo || !headForkedRepo.refs) return null;
+		const items = headForkedRepo.refs.nodes.map(_ => {
+			return {
+				label: _.name,
+				searchLabel: _.name,
+				key: _.name,
+				action: () => {
+					setReviewBranch(_.name);
+					checkPullRequestBranchPreconditions(prBranch, _.name);
+				}
+			};
+		});
+		if (items.length === 0) return null;
+		if (items.length >= 10) {
+			items.unshift({ label: "-" });
+			items.unshift({ type: "search", placeholder: "Search...", action: "search" });
+		}
+		return (
+			<DropdownButton variant="secondary" items={items}>
+				<span className="subtle">compare:</span> <strong>{reviewBranch}</strong>
+			</DropdownButton>
+		);
+	};
+
+	const renderBaseReposDropdown = () => {
+		if (acrossForks) return renderBaseReposAcrossForksDropdown();
+
 		const items = openRepos!.map(_ => {
 			const repoName = _.id && derivedState.repos[_.id] ? derivedState.repos[_.id].name : _.path;
 			return {
 				label: repoName,
+				searchLabel: repoName,
 				key: _.folder.uri,
 				action: async () => {
-					// optimistically
-					// setPrBranch(_);
 					setSelectedRepo(_);
 				}
 			};
-		});
+		}) as any;
 		if (items.length === 0) return undefined;
+		if (items.length >= 10) {
+			items.unshift({ label: "-" });
+			items.unshift({ type: "search", placeholder: "Search...", action: "search" });
+		}
 		if (
 			derivedState.repos &&
 			selectedRepo &&
@@ -570,6 +760,72 @@ export const CreatePullRequestPanel = props => {
 		} else {
 			return null;
 		}
+	};
+
+	const renderBaseReposAcrossForksDropdown = () => {
+		const items = forkedRepos.map(repo => {
+			const repoName = repo.nameWithOwner;
+			return {
+				label: repoName,
+				searchLabel: repoName,
+				key: repo.id,
+				action: () => setBaseForkedRepo(repo)
+			};
+		}) as any;
+		if (parentRepo) {
+			items.unshift({
+				label: parentRepo.nameWithOwner,
+				searchLabel: parentRepo.nameWithOwner,
+				key: parentRepo.id,
+				action: () => setBaseForkedRepo(parentRepo)
+			});
+		}
+		if (items.length === 0) return null;
+		if (items.length >= 10) {
+			items.unshift({ label: "-" });
+			items.unshift({ type: "search", placeholder: "Search...", action: "search" });
+		}
+		if (!baseForkedRepo) return null;
+		return (
+			<span>
+				<DropdownButton variant="secondary" items={items}>
+					<span className="subtle">base repo:</span> <strong>{baseForkedRepo.nameWithOwner}</strong>
+				</DropdownButton>
+			</span>
+		);
+	};
+
+	const renderCompareReposAcrossForksDropdown = () => {
+		const items = forkedRepos.map(repo => {
+			const repoName = repo.nameWithOwner;
+			return {
+				label: repoName,
+				searchLabel: repoName,
+				key: repo.id,
+				action: () => setHeadForkedRepo(repo)
+			};
+		}) as any;
+		if (parentRepo) {
+			items.unshift({
+				label: parentRepo.nameWithOwner,
+				searchLabel: parentRepo.nameWithOwner,
+				key: parentRepo.id,
+				action: () => setHeadForkedRepo(parentRepo)
+			});
+		}
+		if (items.length === 0) return null;
+		if (items.length >= 10) {
+			items.unshift({ label: "-" });
+			items.unshift({ type: "search", placeholder: "Search...", action: "search" });
+		}
+		if (!headForkedRepo) return null;
+		return (
+			<span>
+				<DropdownButton variant="secondary" items={items}>
+					<span className="subtle">head repo:</span> <strong>{headForkedRepo.nameWithOwner}</strong>
+				</DropdownButton>
+			</span>
+		);
 	};
 
 	const renderDisplayHost = host => {
@@ -707,11 +963,27 @@ export const CreatePullRequestPanel = props => {
 				break;
 			}
 			case "BRANCH_REMOTE_CREATION_FAILED": {
-				messageElement = <span>Could not create branch remote</span>;
+				const title = "Could not create branch remote";
+				if (message) {
+					messageElement = (
+						<span>
+							{title}
+							{": "}
+							{message}
+						</span>
+					);
+				} else {
+					messageElement = <span>{title}</span>;
+				}
+
 				break;
 			}
 			case "REPO_NOT_OPEN": {
 				messageElement = <span>Repo not currently open</span>;
+				break;
+			}
+			case "REQUIRES_PROVIDER_REPO": {
+				messageElement = <span>{message}</span>;
 				break;
 			}
 			case "REQUIRES_UPSTREAM": {
@@ -722,8 +994,9 @@ export const CreatePullRequestPanel = props => {
 			case "HAS_LOCAL_COMMITS": {
 				messageElement = (
 					<span>
-						A PR can't be created because the code review includes local commits. Push your changes
-						and then <Link onClick={onClickTryAgain}>try again</Link>
+						A PR can't be created because {reviewId ? "the feedback request" : "the compare branch"}{" "}
+						includes local commits. Push your changes and then{" "}
+						<Link onClick={onClickTryAgain}>try again</Link>.
 					</span>
 				);
 				break;
@@ -731,8 +1004,9 @@ export const CreatePullRequestPanel = props => {
 			case "HAS_LOCAL_MODIFICATIONS": {
 				messageElement = (
 					<span>
-						A PR can't be created because the code review includes uncommitted changes. Commit and
-						push your changes and then <Link onClick={onClickTryAgain}>try again</Link>.
+						A PR can't be created because {reviewId ? "the feedback request" : "the compare branch"}{" "}
+						includes uncommitted changes. Commit and push your changes and then{" "}
+						<Link onClick={onClickTryAgain}>try again</Link>.
 					</span>
 				);
 				break;
@@ -745,8 +1019,13 @@ export const CreatePullRequestPanel = props => {
 							<Button
 								onClick={e => {
 									e.preventDefault();
-									if (id) {
-										dispatch(setCurrentPullRequest(id));
+									if (
+										id &&
+										prProviderId &&
+										derivedState.supportedPullRequestViewProviders.find(_ => _ === prProviderId)
+									) {
+										dispatch(closeAllPanels());
+										dispatch(setCurrentPullRequest(prProviderId, id));
 									} else {
 										HostApi.instance.send(OpenUrlRequestType, { url: url! });
 									}
@@ -810,6 +1089,30 @@ export const CreatePullRequestPanel = props => {
 		return <React.Fragment>{dots}</React.Fragment>;
 	}
 
+	const getLatestCommit = async () => {
+		const result = await HostApi.instance.send(GetLatestCommitScmRequestType, {
+			repoId: prRepoId,
+			branch: reviewBranch
+		});
+		if (result) {
+			setLatestCommit(result.shortMessage);
+		}
+	};
+
+	useEffect(() => {
+		getLatestCommit();
+	}, [selectedRepo, reviewBranch]);
+
+	const setTitleBasedOnBranch = () => {
+		setPrTitle(
+			reviewBranch.charAt(0).toUpperCase() +
+				reviewBranch
+					.slice(1)
+					.replace("-", " ")
+					.replace(/^(\w+)\//, "$1: ")
+		);
+	};
+
 	const providerAuthenticationMessage = () => {
 		let providerName = "Provider";
 		if (prProviderId) {
@@ -830,6 +1133,46 @@ export const CreatePullRequestPanel = props => {
 		);
 	};
 
+	// const repositoryName = React.useMemo(() => {
+	// 	selectedRepo
+	// }, [review, selectedRepo]);
+
+	const fetchFilesChanged = async (repoId: string, prBranch: string, reviewBranch: string) => {
+		setIsLoadingDiffs(true);
+		const response = await HostApi.instance.send(DiffBranchesRequestType, {
+			repoId: repoId,
+			baseRef: prBranch,
+			headRef: reviewBranch
+		});
+
+		if (response.error) {
+			setFilesChanged([]);
+		} else if (response && response.filesChanged) {
+			const { patches, data } = response.filesChanged;
+			const filesChanged = patches
+				.map(_ => {
+					const fileName = _.newFileName === "/dev/null" ? _.oldFileName : _.newFileName;
+					return {
+						..._,
+						linesAdded: _.additions,
+						linesRemoved: _.deletions,
+						file: fileName,
+						filename: fileName,
+						hunks: _.hunks,
+						sha: _.sha
+					};
+				})
+				.filter(_ => _.filename);
+			setFilesChanged(filesChanged);
+		}
+		setIsLoadingDiffs(false);
+	};
+
+	// useEffect(() => {
+	// 	if (prBranch && reviewBranch) fetchFilesChanged();
+	// 	else setFilesChanged([]);
+	// }, [prBranch, reviewBranch]);
+
 	if (propsForPrePRProviderInfoModal) {
 		return <PrePRProviderInfoModal {...propsForPrePRProviderInfoModal} />;
 	}
@@ -838,11 +1181,18 @@ export const CreatePullRequestPanel = props => {
 		<Root className="full-height-codemark-form">
 			<PanelHeader title={`Open a ${prLabel.PullRequest}`}>
 				{reviewId ? "" : `Choose two branches to start a new ${prLabel.pullrequest}.`}
+				{!reviewId && prProviderId === "github*com" && (
+					<>
+						{" "}
+						If you need to, you can also{" "}
+						<a onClick={() => setAcrossForks(!acrossForks)}>compare across forks</a>.
+					</>
+				)}
 			</PanelHeader>
 			<CancelButton onClick={props.closePanel} />
 			<span className="plane-container">
 				<div className="codemark-form-container">
-					<form className="codemark-form standard-form vscroll" id="code-comment-form">
+					<div className="codemark-form standard-form vscroll" id="code-comment-form">
 						<fieldset className="form-body">
 							<div id="controls">
 								{/*
@@ -875,18 +1225,25 @@ export const CreatePullRequestPanel = props => {
 									)}
 									<div className="control-group">
 										<PRCompare>
-											{openRepos.length > 0 && !reviewId && (
+											{acrossForks && <Icon name="git-compare" />}
+											{(acrossForks || openRepos.length > 0) && !reviewId && (
 												<PRDropdown>
-													<Icon name="repo" />
-													{renderReposDropdown()}
+													{!acrossForks && <Icon name="repo" />}
+													{renderBaseReposDropdown()}
 												</PRDropdown>
 											)}
 											<PRDropdown>
-												<Icon name="git-compare" />
+												{!acrossForks && <Icon name="git-compare" />}
 												{renderBaseBranchesDropdown()}
 											</PRDropdown>
+											{acrossForks && (
+												<PRDropdown>
+													<Icon name="arrow-left" />
+													{renderCompareReposAcrossForksDropdown()}
+												</PRDropdown>
+											)}
 											<PRDropdown>
-												<Icon name="arrow-left" />
+												{!acrossForks && <Icon name="arrow-left" />}
 												{renderCompareBranchesDropdown()}
 											</PRDropdown>
 										</PRCompare>
@@ -894,12 +1251,12 @@ export const CreatePullRequestPanel = props => {
 									{loadingBranchInfo && <LoadingMessage>Loading branch info...</LoadingMessage>}
 									{(!loading && preconditionError.type) || loadingBranchInfo ? null : (
 										<div>
-											<div className="control-group">
-												{!titleValidity && (
-													<small className={cx("explainer", { "error-message": !titleValidity })}>
-														<FormattedMessage id="pullRequest.title" />
-													</small>
-												)}
+											{!titleValidity && (
+												<small className={cx("explainer", { "error-message": !titleValidity })}>
+													<FormattedMessage id="pullRequest.title" />
+												</small>
+											)}
+											<div key="title" className="control-group has-input-actions">
 												<TextInput
 													name="title"
 													value={prTitle}
@@ -909,14 +1266,55 @@ export const CreatePullRequestPanel = props => {
 													onValidityChanged={onValidityChanged}
 													validate={isTitleValid}
 												/>
+												<div className="actions">
+													{prTitle.length > 0 && (
+														<Icon
+															name="x"
+															placement="top"
+															title="Clear Title"
+															className="clickable"
+															onClick={() => changePRTitle("")}
+														/>
+													)}
+													{userStatus.label && (
+														<Icon
+															placement="top"
+															title="Use Current Ticket"
+															name={userStatus.ticketProvider || "ticket"}
+															className="clickable"
+															onClick={() => changePRTitle(userStatus.label)}
+														/>
+													)}
+													{latestCommit && (
+														<Icon
+															placement="topRight"
+															title="Use Latest Commit Message"
+															name="git-commit-vertical"
+															className="clickable"
+															onClick={() => changePRTitle(latestCommit)}
+														/>
+													)}
+													{reviewBranch && (
+														<Icon
+															placement="top"
+															title="Use Branch Name"
+															name="git-branch"
+															className="clickable"
+															onClick={() => setTitleBasedOnBranch()}
+														/>
+													)}
+												</div>
 											</div>
 											<div className="control-group">
 												<textarea
 													className="input-text"
 													name="description"
-													rows={5}
+													rows={numLines > 20 ? 20 : numLines}
 													value={prText}
-													onChange={e => setPrText(e.target.value)}
+													onChange={e => {
+														setPrTextTouched(true);
+														setPrText(e.target.value);
+													}}
 													placeholder={`${prLabel.Pullrequest}  description (optional)`}
 													style={{ resize: "vertical" }}
 												/>
@@ -1028,9 +1426,25 @@ export const CreatePullRequestPanel = props => {
 								</Step4>
 							</div>
 						</fieldset>
-					</form>
+					</div>
 					{!loading && !loadingBranchInfo && preconditionError.type && preconditionErrorMessages()}
 				</div>
+				<div style={{ height: "40px" }} />
+				{filesChanged.length > 0 && (
+					<PanelHeader className="no-padding" title="Comparing Changes"></PanelHeader>
+				)}
+				{!acrossForks && (
+					<PullRequestFilesChangedList
+						readOnly
+						isLoading={loadingBranchInfo || isLoadingDiffs}
+						repoId={prRepoId}
+						filesChanged={filesChanged}
+						baseRef={prBranch}
+						headRef={reviewBranch}
+						baseRefName={prBranch}
+						headRefName={reviewBranch}
+					/>
+				)}
 			</span>
 		</Root>
 	);

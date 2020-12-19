@@ -30,6 +30,10 @@ object EditorNotifications {
     class DidChangeActive(val editor: EditorInformation?) : WebViewNotification {
         override fun getMethod() = "webview/editor/didChangeActive"
     }
+
+    class DidChangeLayout(val sidebar: Sidebar): WebViewNotification {
+        override fun getMethod() = "webview/editor/didChangeLayout"
+    }
 }
 
 object CodemarkNotifications {
@@ -55,6 +59,7 @@ object CodemarkNotifications {
 object ReviewNotifications {
     class Show(
         val reviewId: String,
+        val codemarkId: String? = null,
         val sourceUri: String? = null,
         val simulated: Boolean? = null
     ) : WebViewNotification {
@@ -76,6 +81,24 @@ object WorkNotifications {
         val source: String?
     ) : WebViewNotification {
         override fun getMethod() = "webview/work/start"
+    }
+}
+
+object PullRequestNotifications {
+    class New(
+        val uri: String?,
+        val range: Range,
+        val source: String?
+    ) : WebViewNotification {
+        override fun getMethod() = "webview/pullRequest/new"
+    }
+
+    class Show(
+        val providerId: String,
+        val id: String,
+        val commentId: String? = null
+    ) : WebViewNotification {
+        override fun getMethod() = "webview/pullRequest/show"
     }
 }
 

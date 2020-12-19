@@ -80,7 +80,9 @@ export const PullRequestReviewStatus = (props: {
 		const team = state.teams[state.context.currentTeamId];
 		return {
 			currentUser,
-			currentPullRequestId: state.context.currentPullRequestId,
+			currentPullRequestId: state.context.currentPullRequest
+				? state.context.currentPullRequest.id
+				: undefined,
 			composeCodemarkActive: state.context.composeCodemarkActive,
 			team
 		};
@@ -110,47 +112,51 @@ export const PullRequestReviewStatus = (props: {
 
 	return (
 		<>
-			{reviewState.totalReviews === 0 && pendingReviewers.length > 0 && (
-				<PRStatusRow>
-					<PRIconButton className="green-background">
-						<Icon name="check" />
-					</PRIconButton>
-					<div className="middle">
-						<h1>Review Requested</h1>
-						Review has been requested on this pull request.
-					</div>
-				</PRStatusRow>
-			)}
-			{reviewState.changeRequests.length === 0 && reviewState.totalReviews > 0 && (
-				<PRStatusRow>
-					<PRIconButton className="green-background">
-						<Icon name="check" />
-					</PRIconButton>
-					<div className="middle">
-						<h1>Changes Approved</h1>
-						{reviewState.approvals.length == 1
-							? "1 approving review"
-							: `${reviewState.approvals.length} approving reviews`}
-					</div>
-				</PRStatusRow>
-			)}
-			{reviewState.changeRequests.length > 0 && (
-				<PRStatusRow>
-					<Donut degrees={reviewState.degrees} />
-					<div className="middle">
-						{reviewState.changeRequests.length > 0 ? (
-							<>
-								<h1>Changes Requested</h1>
-								{reviewState.changeRequests.length == 1
-									? "1 review "
-									: `${reviewState.changeRequests.length} reviews `}
-								requesting changes
-							</>
-						) : (
-							<></>
-						)}
-					</div>
-				</PRStatusRow>
+			{pr.mergeStateStatus !== "BLOCKED" && (
+				<>
+					{reviewState.totalReviews === 0 && pendingReviewers.length > 0 && (
+						<PRStatusRow>
+							<PRIconButton className="green-background">
+								<Icon name="check" />
+							</PRIconButton>
+							<div className="middle">
+								<h1>Review Requested</h1>
+								Review has been requested on this pull request.
+							</div>
+						</PRStatusRow>
+					)}
+					{reviewState.changeRequests.length === 0 && reviewState.totalReviews > 0 && (
+						<PRStatusRow>
+							<PRIconButton className="green-background">
+								<Icon name="check" />
+							</PRIconButton>
+							<div className="middle">
+								<h1>Changes Approved</h1>
+								{reviewState.approvals.length == 1
+									? "1 approving review"
+									: `${reviewState.approvals.length} approving reviews`}
+							</div>
+						</PRStatusRow>
+					)}
+					{reviewState.changeRequests.length > 0 && (
+						<PRStatusRow>
+							<Donut degrees={reviewState.degrees} />
+							<div className="middle">
+								{reviewState.changeRequests.length > 0 ? (
+									<>
+										<h1>Changes Requested</h1>
+										{reviewState.changeRequests.length == 1
+											? "1 review "
+											: `${reviewState.changeRequests.length} reviews `}
+										requesting changes
+									</>
+								) : (
+									<></>
+								)}
+							</div>
+						</PRStatusRow>
+					)}
+				</>
 			)}
 			{reviewState.changeRequests.length > 0 && (
 				<PRShortStatusRow className="clickable" onClick={() => setRequestedOpen(!requestedOpen)}>

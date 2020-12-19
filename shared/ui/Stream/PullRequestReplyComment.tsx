@@ -1,8 +1,8 @@
 import React, { useState } from "react";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { CodeStreamState } from "../store";
 import styled from "styled-components";
-import { PRButtonRow, PRCodeCommentReply } from "./PullRequestComponents";
+import { PRButtonRow, PRCodeCommentReply, PRCodeCommentReplyInput } from "./PullRequestComponents";
 import { HostApi } from "../webview-api";
 import {
 	ExecuteThirdPartyTypedType,
@@ -13,10 +13,12 @@ import { CSMe } from "@codestream/protocols/api";
 import { Button } from "../src/components/Button";
 import { confirmPopup } from "./Confirm";
 import { Headshot, PRHeadshot } from "../src/components/Headshot";
+import { api } from "../store/providerPullRequests/actions";
+import { replaceHtml } from "../utils";
 
 interface Props {
 	pr: FetchThirdPartyPullRequestPullRequest;
-	setIsLoadingMessage: Function;
+	mode?: string;
 	fetch: Function;
 	className?: string;
 	databaseId: string;
@@ -25,15 +27,13 @@ interface Props {
 }
 
 export const PullRequestReplyComment = styled((props: Props) => {
-	const { pr, fetch, setIsLoadingMessage, databaseId } = props;
-	const derivedState = useSelector((state: CodeStreamState) => {
-		const currentUser = state.users[state.session.userId!] as CSMe;
-		return { currentUser, currentPullRequestId: state.context.currentPullRequestId };
-	});
+	const { pr, fetch, databaseId } = props;
+	const dispatch = useDispatch();
 
 	const [text, setText] = useState("");
 	const [open, setOpen] = useState(props.isOpen);
 	const [isSubmitting, setIsSubmitting] = useState(false);
+	const [isPreviewing, setIsPreviewing] = useState(false);
 
 	const handleComment = async () => {
 		try {
@@ -42,18 +42,23 @@ export const PullRequestReplyComment = styled((props: Props) => {
 
 			HostApi.instance.track("PR Comment Added", {
 				Host: pr.providerId,
-				"Comment Type": "Review Reply"
+				"Comment Type": "Single Reply",
+				"Diff View":
+					props.mode === "files"
+						? "List View"
+						: props.mode === "hunks"
+						? "Diff Hunks"
+						: props.mode === "tree"
+						? "Tree View"
+						: "Unknown"
 			});
 
-			await HostApi.instance.send(new ExecuteThirdPartyTypedType<any, any>(), {
-				method: "createCommentReply",
-				providerId: pr.providerId,
-				params: {
-					pullRequestId: pr.id,
+			await dispatch(
+				api("createCommentReply", {
 					commentId: databaseId,
-					text: text
-				}
-			});
+					text: replaceHtml(text)
+				})
+			);
 
 			fetch().then(() => {
 				setText("");
@@ -96,24 +101,18 @@ export const PullRequestReplyComment = styled((props: Props) => {
 		<PRCodeCommentReply>
 			<PRHeadshot size={30} person={pr.viewer} />
 
-			<div
-				style={{
-					margin: "0 0 0 40px",
-					border: "1px solid var(--base-border-color)"
-				}}
-				className={open ? "open-comment" : ""}
-				onClick={() => setOpen(true)}
-			>
+			<PRCodeCommentReplyInput className={open ? "open-comment" : ""} onClick={() => setOpen(true)}>
 				<MessageInput
 					multiCompose
 					text={text}
 					placeholder="Reply..."
 					onChange={value => setText(value)}
 					onSubmit={handleComment}
+					setIsPreviewing={value => setIsPreviewing(value)}
 					__onDidRender={stuff => props.__onDidRender(stuff)}
 				/>
-			</div>
-			{open && (
+			</PRCodeCommentReplyInput>
+			{open && !isPreviewing && (
 				<PRButtonRow>
 					<Button variant="secondary" onClick={handleCancelComment}>
 						Cancel

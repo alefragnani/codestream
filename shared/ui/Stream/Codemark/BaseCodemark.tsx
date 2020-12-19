@@ -8,7 +8,7 @@ import {
 	getCardProps
 } from "../../src/components/Card";
 import { Headshot } from "@codestream/webview/src/components/Headshot";
-import { CSUser, CSMarker, CodemarkType, CodemarkStatus } from "@codestream/protocols/api";
+import { CSUser, CSMarker, CodemarkType, CodemarkStatus, CSPost } from "@codestream/protocols/api";
 import Timestamp from "../Timestamp";
 import Tag from "../Tag";
 import Icon from "../Icon";
@@ -25,6 +25,7 @@ import { DropdownButton } from "../Review/DropdownButton";
 import { useDispatch } from "react-redux";
 import { setCodemarkStatus } from "../actions";
 import { OpenUrlRequestType } from "@codestream/protocols/webview";
+import { AddReactionIcon, Reactions } from "../Reactions";
 
 export interface BaseCodemarkProps extends CardProps {
 	codemark: CodemarkPlus;
@@ -47,6 +48,8 @@ export interface BaseCodemarkProps extends CardProps {
 	// The <CardFooter/> is provided to allow overriding the container style and it must be the returned child
 	renderFooter?: (footer: typeof CardFooter) => React.ReactNode;
 	renderActions?: boolean;
+	noCard?: boolean;
+	post?: CSPost;
 }
 
 export function BaseCodemark(props: BaseCodemarkProps) {
@@ -101,6 +104,7 @@ export function BaseCodemark(props: BaseCodemarkProps) {
 	const renderIssueDropdownAndMenu = renderActions && codemark.type === CodemarkType.Issue;
 	const menu = (
 		<HeaderActions>
+			{props.post && <AddReactionIcon post={props.post} />}
 			{renderIssueDropdownAndMenu &&
 				(codemark.status === CodemarkStatus.Closed ? (
 					<DropdownButton
@@ -118,6 +122,7 @@ export function BaseCodemark(props: BaseCodemarkProps) {
 			{!renderIssueDropdownAndMenu && renderedMenu}
 			{!renderIssueDropdownAndMenu && props.renderMenu && (
 				<KebabIcon
+					className="kebab"
 					onClickCapture={e => {
 						e.preventDefault();
 						e.stopPropagation();
@@ -154,6 +159,11 @@ export function BaseCodemark(props: BaseCodemarkProps) {
 						{menu}
 						<MarkdownText text={codemark.title || codemark.text} />
 					</Title>
+				)}
+				{props.post && (
+					<div style={{ marginBottom: "10px" }}>
+						<Reactions className="reactions no-pad-left" post={props.post} />
+					</div>
 				)}
 				{!collapsed && (
 					<>
@@ -354,6 +364,16 @@ export const HeaderActions = styled.div`
 	// & > *:not(:last-child) {
 	// 	margin: 0 5px;
 	// }
+	${AddReactionIcon} {
+		opacity: 0.5;
+		vertical-align: -1px;
+		&:hover {
+			opacity: 1;
+		}
+		&.in-review {
+			vertical-align: -3px;
+		}
+	}
 `;
 
 export const AuthorInfo = styled.div`

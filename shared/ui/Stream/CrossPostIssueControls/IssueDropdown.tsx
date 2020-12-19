@@ -1,7 +1,12 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { connect, useDispatch, useSelector } from "react-redux";
 import { connectProvider, getUserProviderInfo } from "../../store/providers/actions";
-import { openPanel, setIssueProvider, setCurrentCodemark } from "../../store/context/actions";
+import {
+	openPanel,
+	setIssueProvider,
+	setCurrentCodemark,
+	setNewPostEntry
+} from "../../store/context/actions";
 import Icon from "../Icon";
 import Menu from "../Menu";
 import { ProviderDisplay, PROVIDER_MAPPINGS } from "./types";
@@ -10,24 +15,15 @@ import {
 	ThirdPartyProviders,
 	FetchThirdPartyBoardsRequestType,
 	FetchThirdPartyCardsRequestType
-	// FetchThirdPartyCardWorkflowRequestType
 } from "@codestream/protocols/agent";
 import { CSMe } from "@codestream/protocols/api";
 import { PrePRProviderInfoModalProps, PrePRProviderInfoModal } from "../PrePRProviderInfoModal";
 import { CodeStreamState } from "@codestream/webview/store";
-import { getConnectedProviderNames } from "@codestream/webview/store/providers/reducer";
 import { updateForProvider } from "@codestream/webview/store/activeIntegrations/actions";
 import { setUserPreference } from "../actions";
 import { HostApi } from "../..";
 import { keyFilter } from "@codestream/webview/utils";
-import {
-	StartWorkIssueContext,
-	RoundedLink,
-	RoundedSearchLink,
-	H4,
-	WideStatusSection,
-	EMPTY_STATUS
-} from "../StatusPanel";
+import { EMPTY_STATUS } from "../StartWork";
 import styled from "styled-components";
 import Filter from "../Filter";
 import { SmartFormattedList } from "../SmartFormattedList";
@@ -40,9 +36,11 @@ import { useDidMount } from "@codestream/webview/utilities/hooks";
 import { Modal } from "../Modal";
 import { Button } from "@codestream/webview/src/components/Button";
 import { OpenUrlRequestType, WebviewPanels } from "@codestream/protocols/webview";
-import { Card } from "@codestream/webview/src/components/Card";
-import { ButtonRow } from "../StatusPanel";
+import { ButtonRow } from "@codestream/webview/src/components/Dialog";
 import { Dialog } from "@codestream/webview/src/components/Dialog";
+import { PaneHeader, PaneBody, PaneState } from "@codestream/webview/src/components/Pane";
+import { StartWork } from "../StartWork";
+import { mapFilter } from "@codestream/webview/utils";
 
 interface ProviderInfo {
 	provider: ThirdPartyProviderConfig;
@@ -50,13 +48,14 @@ interface ProviderInfo {
 }
 
 interface ConnectedProps {
-	connectedProviderNames: string[];
+	// connectedProviderNames: string[];
 	currentTeamId: string;
 	currentUser: CSMe;
 	issueProviderConfig?: ThirdPartyProviderConfig;
 	providers: ThirdPartyProviders;
 	disabledProviders: { [key: string]: boolean };
 	setUserPreference?: Function;
+	teamSettings: { [key: string]: any };
 }
 
 interface Props extends ConnectedProps {
@@ -65,7 +64,8 @@ interface Props extends ConnectedProps {
 	setIssueProvider(providerId?: string): void;
 	openPanel(...args: Parameters<typeof openPanel>): void;
 	isEditing?: boolean;
-	selectedCardId: string;
+	selectedCardId?: string;
+	paneState?: PaneState;
 }
 
 interface State {
@@ -139,7 +139,8 @@ class IssueDropdown extends React.Component<Props, State> {
 	};
 
 	render() {
-		const { issueProviderConfig } = this.props;
+		// console.warn("rendering issues...");
+		const { issueProviderConfig, teamSettings } = this.props;
 		const providerInfo = issueProviderConfig
 			? this.getProviderInfo(issueProviderConfig.id)
 			: undefined;
@@ -154,28 +155,25 @@ class IssueDropdown extends React.Component<Props, State> {
 			return null;
 		}
 
-		const selectedProviderId = providerInfo && providerInfo.provider.id;
-		const knownIssueProviderOptions = knownIssueProviders
-			.map(providerId => {
-				const issueProvider = this.props.providers![providerId];
-				const providerDisplay = PROVIDER_MAPPINGS[issueProvider.name];
-				const displayName = issueProvider.isEnterprise
-					? `${providerDisplay.displayName} - ${issueProvider.host}`
-					: providerDisplay.displayName;
-				const supported = providerDisplay.supportsStartWork;
-				return {
-					providerIcon: <Icon name={providerDisplay.icon || "blank"} />,
-					checked: this.providerIsConnected(providerId) && !this.providerIsDisabled(providerId),
-					value: providerId,
-					label: displayName + (supported ? "" : " (soon!)"),
-					disabled: !supported,
-					key: providerId,
-					action: () => this.selectIssueProvider(providerId)
-				};
-			})
-			.sort((a, b) =>
-				a.disabled === b.disabled ? a.label.localeCompare(b.label) : a.disabled ? 1 : -1
-			);
+		const knownIssueProviderOptions = mapFilter(knownIssueProviders, providerId => {
+			const issueProvider = this.props.providers![providerId];
+			const providerDisplay = PROVIDER_MAPPINGS[issueProvider.name];
+			const displayName = issueProvider.isEnterprise
+				? `${providerDisplay.displayName} - ${issueProvider.host}`
+				: providerDisplay.displayName;
+
+			const checked = this.providerIsConnected(providerId) && !this.providerIsDisabled(providerId);
+			if (!providerDisplay.supportsStartWork) return;
+			if (teamSettings.limitIssues && !teamSettings.issuesProviders[providerId] && !checked) return;
+			return {
+				providerIcon: <Icon name={providerDisplay.icon || "blank"} />,
+				checked: checked,
+				value: providerId,
+				label: displayName,
+				key: providerId,
+				action: () => this.selectIssueProvider(providerId)
+			};
+		}).sort((a, b) => a.label.localeCompare(b.label));
 		// const index = knownIssueProviderOptions.findIndex(i => i.disabled);
 		// @ts-ignore
 		// knownIssueProviderOptions.splice(index, 0, { label: "-" });
@@ -194,6 +192,7 @@ class IssueDropdown extends React.Component<Props, State> {
 					knownIssueProviderOptions={knownIssueProviderOptions}
 					selectedCardId={this.props.selectedCardId}
 					loadingMessage={this.state.isLoading ? this.renderLoading() : null}
+					paneState={this.props.paneState}
 				></IssueList>
 			</>
 		);
@@ -283,10 +282,11 @@ class IssueDropdown extends React.Component<Props, State> {
 			);
 		} else {
 			const { name } = providerInfo.provider;
-			const { connectedProviderNames, issueProviderConfig } = this.props;
+			const { issueProviderConfig } = this.props;
 			const newValueIsNotCurrentProvider =
 				issueProviderConfig == undefined || issueProviderConfig.name !== name;
-			const newValueIsNotAlreadyConnected = !connectedProviderNames.includes(name);
+			const newValueIsNotAlreadyConnected =
+				!issueProviderConfig || !this.providerIsConnected(issueProviderConfig.id);
 			if (
 				newValueIsNotCurrentProvider &&
 				newValueIsNotAlreadyConnected &&
@@ -300,13 +300,13 @@ class IssueDropdown extends React.Component<Props, State> {
 						},
 						action: () => {
 							this.setState({ isLoading: true, loadingProvider: providerInfo });
-							this.props.connectProvider(providerInfo.provider.id, "Status");
+							this.props.connectProvider(providerInfo.provider.id, "Issues Section");
 						}
 					}
 				});
 			} else {
 				this.setState({ isLoading: true, loadingProvider: providerInfo });
-				const ret = await this.props.connectProvider(providerInfo.provider.id, "Status");
+				const ret = await this.props.connectProvider(providerInfo.provider.id, "Issues Section");
 				if (ret && ret.alreadyConnected) this.setState({ isLoading: false });
 			}
 		}
@@ -343,23 +343,33 @@ class IssueDropdown extends React.Component<Props, State> {
 		providerInfo = providerInfo.hosts[provider.id];
 		return providerInfo && !!providerInfo.accessToken;
 	}
+	componentWillReceiveProps(nextProps) {
+		for (const index in nextProps) {
+			if (nextProps[index] !== this.props[index]) {
+				console.warn(index, this.props[index], "-->", nextProps[index]);
+			}
+		}
+	}
 }
 
+const EMPTY_HASH2 = {};
 const mapStateToProps = (state: CodeStreamState): ConnectedProps => {
-	const { users, session, context, providers, preferences } = state;
+	const { users, teams, session, context, providers, preferences } = state;
 	const currentIssueProviderConfig = context.issueProvider
 		? providers[context.issueProvider]
 		: undefined;
 
-	const workPreferences = preferences.startWork || {};
+	const workPreferences = preferences.startWork || EMPTY_HASH;
+	const team = teams[context.currentTeamId];
+	const teamSettings = team.settings || EMPTY_HASH2;
 
 	return {
 		currentUser: users[session.userId!] as CSMe,
 		currentTeamId: context.currentTeamId,
+		teamSettings,
 		providers,
 		issueProviderConfig: currentIssueProviderConfig,
-		connectedProviderNames: getConnectedProviderNames(state),
-		disabledProviders: workPreferences.disabledProviders || {}
+		disabledProviders: workPreferences.disabledProviders || EMPTY_HASH
 	};
 };
 
@@ -384,18 +394,19 @@ export function Issue(props) {
 interface IssueListProps {
 	providers: ThirdPartyProviderConfig[];
 	knownIssueProviderOptions: any;
-	selectedCardId: string;
+	selectedCardId?: string;
 	loadingMessage?: React.ReactNode;
+	paneState?: PaneState;
 }
 
 const EMPTY_HASH = {};
 const EMPTY_CUSTOM_FILTERS = { selected: "", filters: {} };
 
-export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
+export const IssueList = React.memo((props: React.PropsWithChildren<IssueListProps>) => {
 	const dispatch = useDispatch();
 	const data = useSelector((state: CodeStreamState) => state.activeIntegrations);
 	const derivedState = useSelector((state: CodeStreamState) => {
-		const { preferences = {} } = state;
+		const { preferences } = state;
 		const currentUser = state.users[state.session.userId!] as CSMe;
 		const startWorkPreferences = preferences.startWork || EMPTY_HASH;
 		const providerIds = props.providers.map(provider => provider.id).join(":");
@@ -405,7 +416,15 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 		let status =
 			currentUser.status && "label" in currentUser.status ? currentUser.status : EMPTY_STATUS;
 
-		return { status, currentUser, startWorkPreferences, providerIds, csIssues, skipConnect };
+		return {
+			status,
+			currentUser,
+			startWorkPreferences,
+			providerIds,
+			csIssues,
+			skipConnect,
+			startWorkCard: state.context.startWorkCard
+		};
 	});
 
 	const [isLoading, setIsLoading] = React.useState(false);
@@ -422,6 +441,7 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 	const [reload, setReload] = React.useState(1);
 	const [testCards, setTestCards] = React.useState<any[] | undefined>(undefined);
 	const [loadingTest, setLoadingTest] = React.useState(false);
+	const [startWorkCard, setStartWorkCard] = React.useState<any>(undefined);
 
 	const getFilterLists = (providerId: string) => {
 		const prefs = derivedState.startWorkPreferences[providerId] || {};
@@ -453,6 +473,11 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 			// dispatch(bootstrapCodemarks());
 		}
 	});
+
+	useEffect(() => {
+		const card = derivedState.startWorkCard;
+		if (card) selectCard({ ...card, label: card.title });
+	}, [derivedState.startWorkCard]);
 
 	const updateDataState = (providerId, data) => dispatch(updateForProvider(providerId, data));
 
@@ -540,7 +565,7 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 						// setIsLoadingCard("");
 						moveCardOptions = card.lists;
 					}
-					startWorkIssueContext.setValues({
+					setStartWorkCard({
 						...card,
 						label: card.title,
 						providerIcon: provider.id === "codestream" ? "issue" : providerDisplay.icon,
@@ -553,16 +578,14 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 					});
 				} else {
 					// creating a new card/issue
-					startWorkIssueContext.setValues({ ...card });
+					setStartWorkCard({ ...card });
 				}
 			} else {
-				startWorkIssueContext.setValues(undefined);
+				setStartWorkCard(undefined);
 			}
 		},
 		[loadedBoards, loadedCards]
 	);
-
-	const startWorkIssueContext = React.useContext(StartWorkIssueContext);
 
 	// https://stackoverflow.com/questions/3446170/escape-string-for-use-in-javascript-regex
 	const escapeRegExp = string => string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // $& means the whole matched string
@@ -934,7 +957,7 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 													<span style={{ display: "inline-block", width: "20px" }}>&nbsp;</span>
 												)}
 												{card.id === isLoadingCard ? (
-													<Icon name="sync" className="spin" />
+													<Icon name="refresh" className="spin" />
 												) : card.typeIcon ? (
 													<img className="issue-type-icon" src={card.typeIcon} />
 												) : (
@@ -957,73 +980,65 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 	};
 	return (
 		<>
+			{startWorkCard && (
+				<StartWork
+					card={startWorkCard}
+					onClose={() => {
+						setStartWorkCard(undefined);
+						setReload(reload + 1);
+					}}
+				/>
+			)}
 			{renderCustomFilter()}
-			<WideStatusSection id="start-work-div">
-				<div className="instructions">
-					<Icon name="light-bulb" />
-					Start work by grabbing a ticket below, and creating a branch.
-				</div>
-				<div className="filters" style={{ padding: "0 20px 0 20px" }}>
-					<H4>
-						<Tooltip title="Create a ticket" placement="bottom" delay={1}>
-							<RoundedLink onClick={() => dispatch(openPanel(WebviewPanels.NewIssue))}>
-								<Icon name="plus" />
-								<span className="wide-text">New </span>
-								{cardLabel}
-							</RoundedLink>
-						</Tooltip>
-						<Tooltip title="For untracked work" placement="bottom" delay={1}>
-							<RoundedLink
-								onClick={() => {
-									selectCard({ title: "" });
-									HostApi.instance.track("StartWork Form Opened", {
-										"Opened Via": "Ad-Hoc Button"
-									});
-								}}
-							>
-								<Icon name="plus" />
-								Ad-hoc<span className="wide-text"> Work</span>
-							</RoundedLink>
-						</Tooltip>
-						{(cards.length > 0 || query) && (
-							<RoundedSearchLink className={queryOpen ? "" : "collapsed"}>
-								<Icon
-									name="search"
-									onClick={() => {
-										setQueryOpen(true);
-										document.getElementById("search-input")!.focus();
-									}}
-								/>
-								<span className="accordion">
-									<Icon
-										name="x"
-										onClick={() => {
-											setQuery("");
-											setQueryOpen(false);
-										}}
-									/>
-									<input
-										autoFocus
-										id="search-input"
-										type="text"
-										value={query}
-										onChange={e => setQuery(e.target.value)}
-										onKeyDown={e => {
-											if (e.key == "Escape") {
-												setQuery("");
-												setQueryOpen(false);
-											}
-										}}
-									/>
-								</span>
-							</RoundedSearchLink>
-						)}
-						What are you working on?
-					</H4>
+			<PaneHeader
+				title="Issues"
+				count={cards.length}
+				id={WebviewPanels.Tasks}
+				isLoading={isLoading}
+			>
+				{!firstLoad && (
+					<Icon
+						title="Refresh"
+						onClick={() => setReload(reload + 1)}
+						className={`fixed ${isLoading ? "spin" : "spinnable"}`}
+						name="refresh"
+						placement="bottom"
+						delay={1}
+					/>
+				)}
+				<Icon
+					name="plus"
+					onClick={() => {
+						dispatch(setNewPostEntry("Issues Section"));
+						dispatch(openPanel(WebviewPanels.NewIssue));
+					}}
+					title={"New " + cardLabel}
+					placement="bottom"
+					delay={1}
+				/>
+				<Icon
+					name="checked-checkbox"
+					onClick={() => {
+						selectCard({ title: "" });
+						HostApi.instance.track("StartWork Form Opened", {
+							"Opened Via": "Ad-Hoc Button"
+						});
+					}}
+					title="Start ad-hoc work"
+					placement="bottom"
+					delay={1}
+				/>
+			</PaneHeader>
+			{props.paneState !== PaneState.Collapsed && (
+				<PaneBody>
+					<div className="instructions">
+						<Icon name="light-bulb" />
+						Start work by grabbing a ticket below, and creating a branch.
+					</div>
 					{props.loadingMessage ? (
-						<div style={{ margin: "0 -20px" }}>{props.loadingMessage}</div>
+						<div>{props.loadingMessage}</div>
 					) : props.providers.length > 0 || derivedState.skipConnect ? (
-						<div style={{ paddingBottom: "5px" }}>
+						<div className="filters" style={{ padding: "0 20px 5px 20px" }}>
 							Show{" "}
 							{canFilter ? (
 								<Filter
@@ -1031,7 +1046,7 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 									selected={"selectedLabel"}
 									labels={{ selectedLabel }}
 									items={[{ label: "-" }, ...menuItems.filters]}
-									align="bottomLeft"
+									align="center"
 									dontCloseOnSelect
 								/>
 							) : (
@@ -1043,32 +1058,28 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 								selected={"providersLabel"}
 								labels={{ providersLabel }}
 								items={[{ label: "-" }, ...menuItems.services]}
-								align="bottomLeft"
+								align="center"
 								dontCloseOnSelect
 							/>
-							{!firstLoad && (
-								<Icon
-									onClick={() => setReload(reload + 1)}
-									className={`smaller fixed clickable ${isLoading ? "spin" : "spinnable"}`}
-									name="sync"
-								/>
-							)}
 						</div>
 					) : (
 						<>
-							<span>
-								Connect your issue provider(s) to make it easy to manage tasks, create branches, and
-								connect tasks to commits &amp; PRs, or{" "}
-								<Tooltip title="Connect later on the Integrations page" placement="top">
-									<Linkish
-										onClick={() => dispatch(setUserPreference(["skipConnectIssueProviders"], true))}
-									>
-										skip this step
-									</Linkish>
-								</Tooltip>
-							</span>
-							<div style={{ height: "10px" }} />
-							<IntegrationButtons style={{ marginBottom: "10px" }}>
+							<div className="filters" style={{ padding: "0 20px 10px 20px" }}>
+								<span>
+									Connect your issue provider(s) to make it easy to manage tasks, create branches,
+									and connect tasks to commits &amp; PRs, or{" "}
+									<Tooltip title="Connect later on the Integrations page" placement="top">
+										<Linkish
+											onClick={() =>
+												dispatch(setUserPreference(["skipConnectIssueProviders"], true))
+											}
+										>
+											skip this step
+										</Linkish>
+									</Tooltip>
+								</span>
+							</div>
+							<IntegrationButtons noBorder style={{ marginBottom: "20px" }}>
 								{props.knownIssueProviderOptions.map(item => {
 									if (item.disabled) return null;
 									return (
@@ -1081,15 +1092,8 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 							</IntegrationButtons>
 						</>
 					)}
-				</div>
-				{firstLoad && <LoadingMessage align="left">Loading...</LoadingMessage>}
-				{cards.map(card => (
-					<Tooltip
-						key={"tt-" + card.key}
-						title="Click to start work on this item"
-						delay={1}
-						placement="bottom"
-					>
+					{firstLoad && <LoadingMessage align="left">Loading...</LoadingMessage>}
+					{cards.map(card => (
 						<Row
 							key={card.key}
 							onClick={() => {
@@ -1164,12 +1168,12 @@ export function IssueList(props: React.PropsWithChildren<IssueListProps>) {
 								)}
 							</div>
 						</Row>
-					</Tooltip>
-				))}
-			</WideStatusSection>
+					))}
+				</PaneBody>
+			)}
 		</>
 	);
-}
+});
 
 export const Row = styled.div`
 	display: flex;
@@ -1178,10 +1182,13 @@ export const Row = styled.div`
 		cursor: pointer;
 	}
 	white-space: nowrap;
+	&.wrap {
+		white-space: normal;
+	}
 	overflow: hidden;
 	text-overflow: ellipsis;
 	width: 100%;
-	padding: 0 15px 0 20px;
+	padding: 0 10px 0 20px;
 	&.selected {
 		color: var(--text-color-highlight);
 		font-weight: bold;
@@ -1212,11 +1219,15 @@ export const Row = styled.div`
 	.icons {
 		margin-left: auto;
 		text-align: right;
+		color: var(--text-color);
 		.icon {
-			// margin-left: 5px;
+			margin-left: 10px;
 			display: none;
 		}
 		padding-left: 2.5px;
+		.clickable {
+			opacity: 0.7;
+		}
 	}
 	&:hover .icons .icon {
 		display: inline-block;
@@ -1224,16 +1235,21 @@ export const Row = styled.div`
 	&:hover > div:nth-child(3) {
 		min-width: 30px;
 	}
+	.status,
+	time {
+		color: var(--text-color-subtle);
+		opacity: 0.75;
+		padding-left: 5px;
+	}
+	&:hover .status,
 	&:hover time {
 		display: none;
 	}
-	.status {
-		color: var(--text-color-subtle);
-		opacity: 0.75;
-		padding-left: 10px;
-	}
-	&:hover .status {
-		display: none;
+	@media only screen and (max-width: 350px) {
+		.status,
+		time {
+			display: none;
+		}
 	}
 	&:not(.disabled):not(.no-hover):hover {
 		background: var(--app-background-color-hover);

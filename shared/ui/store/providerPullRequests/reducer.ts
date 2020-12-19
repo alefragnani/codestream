@@ -1,11 +1,16 @@
 import { ActionType, Index } from "../common";
 import * as actions from "./actions";
+import { clearCurrentPullRequest, setCurrentPullRequest } from "../context/actions";
 import { ProviderPullRequestActionsTypes, ProviderPullRequestsState } from "./types";
 import { createSelector } from "reselect";
 import { CodeStreamState } from "..";
 import { CSRepository } from "@codestream/protocols/api";
+import { ContextActionsType } from "../context/types";
 
-type ProviderPullRequestActions = ActionType<typeof actions>;
+type ProviderPullRequestActions =
+	| ActionType<typeof actions>
+	| ActionType<typeof setCurrentPullRequest>
+	| ActionType<typeof clearCurrentPullRequest>;
 
 const initialState: ProviderPullRequestsState = { pullRequests: {}, myPullRequests: {} };
 
@@ -20,6 +25,29 @@ export function reduceProviderPullRequests(
 	action: ProviderPullRequestActions
 ): ProviderPullRequestsState {
 	switch (action.type) {
+		case ContextActionsType.SetCurrentPullRequest: {
+			if (action.payload && action.payload.id && action.payload.providerId) {
+				const newState = createNewObject(state, action);
+				newState[action.payload.providerId][action.payload.id] = {
+					...newState[action.payload.providerId][action.payload.id]
+				};
+				newState[action.payload.providerId][action.payload.id].error = undefined;
+				return {
+					myPullRequests: { ...state.myPullRequests },
+					pullRequests: newState
+				};
+			} else if (action.payload) {
+				const newState = { ...state };
+				if (newState && newState.pullRequests) {
+					for (const prProviders of Object.values(newState.pullRequests)) {
+						for (const pr of Object.values(prProviders)) {
+							pr.error = undefined;
+						}
+					}
+				}
+			}
+			return state;
+		}
 		case ProviderPullRequestActionsTypes.AddMyPullRequests: {
 			const newState = { ...state.myPullRequests };
 			newState[action.payload.providerId] = {
@@ -33,9 +61,7 @@ export function reduceProviderPullRequests(
 		case ProviderPullRequestActionsTypes.RemoveFromMyPullRequests: {
 			const newState = { ...state.myPullRequests };
 			newState[action.payload.providerId] = {
-				data: (newState[action.payload.providerId].data || []).filter(
-					_ => _.id !== action.payload.id
-				)
+				data: undefined
 			};
 			return {
 				myPullRequests: newState,
@@ -96,12 +122,199 @@ export function reduceProviderPullRequests(
 				pullRequests: newState
 			};
 		}
+		case ProviderPullRequestActionsTypes.AddPullRequestCollaborators: {
+			const newState = createNewObject(state, action);
+			newState[action.payload.providerId][action.payload.id] = {
+				...newState[action.payload.providerId][action.payload.id],
+				collaborators: action.payload.collaborators
+			};
+			return {
+				myPullRequests: { ...state.myPullRequests },
+				pullRequests: newState
+			};
+		}
 		case ProviderPullRequestActionsTypes.AddPullRequestConversations: {
 			const newState = createNewObject(state, action);
 			newState[action.payload.providerId][action.payload.id] = {
 				...newState[action.payload.providerId][action.payload.id],
-				conversations: action.payload.pullRequest
+				conversations: action.payload.pullRequest,
+				conversationsLastFetch: Date.now()
 			};
+			return {
+				myPullRequests: { ...state.myPullRequests },
+				pullRequests: newState
+			};
+		}
+		case ProviderPullRequestActionsTypes.ClearPullRequestError: {
+			const newState = createNewObject(state, action);
+			newState[action.payload.providerId][action.payload.id] = {
+				...newState[action.payload.providerId][action.payload.id]
+			};
+			newState[action.payload.providerId][action.payload.id].error = undefined;
+			return {
+				myPullRequests: { ...state.myPullRequests },
+				pullRequests: newState
+			};
+		}
+		case ProviderPullRequestActionsTypes.AddPullRequestError: {
+			const newState = createNewObject(state, action);
+			newState[action.payload.providerId][action.payload.id] = {
+				...newState[action.payload.providerId][action.payload.id]
+			};
+			newState[action.payload.providerId][action.payload.id].error = action.payload.error;
+			return {
+				myPullRequests: { ...state.myPullRequests },
+				pullRequests: newState
+			};
+		}
+		case ProviderPullRequestActionsTypes.HandleDirectives: {
+			const newState = { ...state.pullRequests };
+			let providerId = action.payload.providerId;
+			let id = action.payload.id;
+			newState[providerId] = newState[action.payload.providerId] || {};
+			newState[providerId][id] = {
+				...newState[providerId][id]
+			};
+			if (newState[providerId][id] && newState[providerId][id].conversations) {
+				const pr = newState[providerId][id].conversations.repository.pullRequest;
+				for (const directive of action.payload.data) {
+					if (directive.type === "addReaction") {
+						if (directive.data.subject.__typename === "PullRequest") {
+							pr.reactionGroups
+								.find(_ => _.content === directive.data.reaction.content)
+								.users.nodes.push(directive.data.reaction.user);
+						} else {
+							const node = pr.timelineItems.nodes.find(_ => _.id === directive.data.subject.id);
+							if (node) {
+								node.reactionGroups
+									.find(_ => _.content === directive.data.reaction.content)
+									.users.nodes.push(directive.data.reaction.user);
+							}
+						}
+					} else if (directive.type === "removeReaction") {
+						if (directive.data.subject.__typename === "PullRequest") {
+							pr.reactionGroups.find(
+								_ => _.content === directive.data.reaction.content
+							).users.nodes = pr.reactionGroups
+								.find(_ => _.content === directive.data.reaction.content)
+								.users.nodes.filter(_ => _.login !== directive.data.reaction.user.login);
+						} else {
+							const node = pr.timelineItems.nodes.find(_ => _.id === directive.data.subject.id);
+							if (node) {
+								node.reactionGroups.find(
+									_ => _.content === directive.data.reaction.content
+								).users.nodes = node.reactionGroups
+									.find(_ => _.content === directive.data.reaction.content)
+									.users.nodes.filter(_ => _.login !== directive.data.reaction.user.login);
+							}
+						}
+					} else if (directive.type === "removeNode") {
+						pr.timelineItems.nodes = pr.timelineItems.nodes.filter(_ => _.id !== directive.data.id);
+					} else if (directive.type === "updateNode") {
+						const node = pr.timelineItems.nodes.find(_ => _.id === directive.data.id);
+						if (node) {
+							for (const key in directive.data) {
+								node[key] = directive.data[key];
+							}
+						}
+					} else if (directive.type === "addNode") {
+						if (!directive.data.id) continue;
+						const node = pr.timelineItems.nodes.find(_ => _.id === directive.data.id);
+						if (!node) {
+							pr.timelineItems.nodes.push(directive.data);
+						}
+					} else if (directive.type === "addNodes") {
+						for (const newNode of directive.data) {
+							if (!newNode.id) continue;
+							const node = pr.timelineItems.nodes.find((_: any) => _.id === newNode.id);
+							if (!node) {
+								pr.timelineItems.nodes.push(newNode);
+							}
+						}
+					} else if (directive.type === "updatePullRequestReviewComment") {
+						let done = false;
+						for (const edge of pr.reviewThreads.edges) {
+							if (!edge.node.comments) continue;
+							for (const comment of edge.node.comments.nodes) {
+								if (comment.id === directive.data.id) {
+									for (const key in directive.data) {
+										comment[key] = directive.data[key];
+									}
+									done = true;
+								}
+								if (done) break;
+							}
+							if (done) break;
+						}
+					} else if (directive.type === "updatePullRequestReviewCommentNode") {
+						const node = pr.timelineItems.nodes.find(
+							_ => _.id === directive.data.pullRequestReview.id
+						);
+						if (node && node.comments) {
+							for (const comment of node.comments.nodes) {
+								if (comment.id !== directive.data.id) continue;
+								for (const key in directive.data) {
+									comment[key] = directive.data[key];
+								}
+								break;
+							}
+						}
+					} else if (directive.type === "updatePullRequestReview") {
+						const node = pr.timelineItems.nodes.find(_ => _.id === directive.data.id);
+						if (node) {
+							for (const key in directive.data) {
+								node[key] = directive.data[key];
+							}
+						}
+					} else if (directive.type === "updatePullRequestReviewers") {
+						pr.reviewRequests.nodes.length = 0;
+						for (const data of directive.data) {
+							pr.reviewRequests.nodes.push(data);
+						}
+					} else if (directive.type === "updatePullRequest") {
+						for (const key in directive.data) {
+							if (directive.data[key] && Array.isArray(directive.data[key].nodes)) {
+								// clear out the array, but keep its reference
+								pr[key].nodes.length = 0;
+								for (const n of directive.data[key].nodes) {
+									pr[key].nodes.push(n);
+								}
+							} else {
+								pr[key] = directive.data[key];
+							}
+						}
+					} else if (
+						directive.type === "resolveReviewThread" ||
+						directive.type === "unresolveReviewThread"
+					) {
+						const nodeWrapper = pr.reviewThreads.edges.find(
+							_ => _.node.id === directive.data.threadId
+						);
+						if (nodeWrapper && nodeWrapper.node) {
+							for (const key in directive.data) {
+								nodeWrapper.node[key] = directive.data[key];
+							}
+						}
+
+						const reviews = pr.timelineItems.nodes.filter(
+							_ => _.__typename === "PullRequestReview"
+						);
+						if (reviews) {
+							for (const review of reviews) {
+								for (const comment of review.comments.nodes) {
+									if (comment.threadId !== directive.data.threadId) continue;
+
+									for (const key in directive.data) {
+										comment[key] = directive.data[key];
+									}
+
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
 			return {
 				myPullRequests: { ...state.myPullRequests },
 				pullRequests: newState
@@ -114,8 +327,12 @@ export function reduceProviderPullRequests(
 	}
 }
 const getRepos = (state: CodeStreamState) => Object.values(state.repos);
-const getProviderPullRequests = (state: CodeStreamState) => state.providerPullRequests;
-const currentPullRequestId = (state: CodeStreamState) => state.context.currentPullRequestId;
+export const getProviderPullRequests = (state: CodeStreamState) => state.providerPullRequests;
+export const getMyPullRequests = (state: CodeStreamState) =>
+	state.providerPullRequests.myPullRequests;
+const currentPullRequest = (state: CodeStreamState) => state.context.currentPullRequest;
+const currentPullRequestId = (state: CodeStreamState) =>
+	state.context.currentPullRequest ? state.context.currentPullRequest.id : undefined;
 
 /**
  * Gets the PR object for the currentPullRequestId
@@ -135,7 +352,18 @@ export const getCurrentProviderPullRequest = createSelector(
 		return undefined;
 	}
 );
-
+export const getCurrentProviderPullRequestLastUpdated = createSelector(
+	getCurrentProviderPullRequest,
+	providerPullRequest => {
+		if (!providerPullRequest) return undefined;
+		return providerPullRequest &&
+			providerPullRequest.conversations &&
+			providerPullRequest.conversations.repository &&
+			providerPullRequest.conversations.repository.pullRequest
+			? providerPullRequest.conversations.repository.pullRequest.updatedAt
+			: undefined;
+	}
+);
 /**
  *  Attempts to get a CS repo for the current PR
  */
@@ -143,26 +371,53 @@ export const getProviderPullRequestRepo = createSelector(
 	getRepos,
 	getCurrentProviderPullRequest,
 	(repos, currentPr) => {
+		let currentRepo: CSRepository | undefined = undefined;
+
 		try {
 			if (!currentPr || !currentPr.conversations) return undefined;
 			const repoName = currentPr.conversations.repository.repoName.toLowerCase();
 			const repoUrl = currentPr.conversations.repository.url.toLowerCase();
-			let currentRepo: CSRepository | undefined = undefined;
-			let matchingRepos = repos.filter(_ => _.name && _.name.toLowerCase() === repoName);
-			if (matchingRepos.length != 1) {
-				matchingRepos = matchingRepos.filter(_ =>
-					_.remotes.some(r => repoUrl.indexOf(r.normalizedUrl.toLowerCase()) > -1)
-				);
-				if (matchingRepos.length === 1) {
-					currentRepo = matchingRepos[0];
-				} else {
-					console.warn(`Could not find repo for repoName=${repoName} repoUrl=${repoUrl}`);
-				}
-			} else {
+
+			let matchingRepos = repos.filter(_ =>
+				_.remotes.some(
+					r =>
+						r.normalizedUrl &&
+						r.normalizedUrl.length > 2 &&
+						r.normalizedUrl.match(/([a-zA-Z0-9]+)/) &&
+						repoUrl.indexOf(r.normalizedUrl.toLowerCase()) > -1
+				)
+			);
+			if (matchingRepos.length === 1) {
 				currentRepo = matchingRepos[0];
+			} else {
+				let matchingRepos2 = repos.filter(_ => _.name && _.name.toLowerCase() === repoName);
+				if (matchingRepos2.length != 1) {
+					matchingRepos2 = repos.filter(_ =>
+						_.remotes.some(r => repoUrl.indexOf(r.normalizedUrl.toLowerCase()) > -1)
+					);
+					if (matchingRepos2.length === 1) {
+						currentRepo = matchingRepos2[0];
+					} else {
+						console.error(`Could not find repo for repoName=${repoName} repoUrl=${repoUrl}`);
+					}
+				} else {
+					currentRepo = matchingRepos2[0];
+				}
 			}
-			return currentRepo;
-		} catch (error) {}
-		return undefined;
+		} catch (error) {
+			console.error(error);
+		}
+		return currentRepo;
 	}
 );
+
+export const getProviderPullRequestCollaborators = createSelector(
+	getCurrentProviderPullRequest,
+	currentPr => {
+		return currentPr ? currentPr.collaborators : [];
+	}
+);
+
+export const isAnHourOld = conversationsLastFetch => {
+	return conversationsLastFetch > 0 && Date.now() - conversationsLastFetch > 60 * 60 * 1000;
+};

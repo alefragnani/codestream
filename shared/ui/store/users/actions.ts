@@ -8,7 +8,7 @@ import {
 } from "@codestream/protocols/agent";
 import { CodeStreamState } from "../../store";
 import { HostApi } from "../../webview-api";
-import { isFeatureEnabled } from "../apiVersioning/reducer";
+import { debounce } from "lodash-es";
 
 export const reset = () => action("RESET");
 
@@ -18,7 +18,7 @@ export const updateUser = (user: CSUser) => action(UsersActionsType.Update, user
 
 export const addUsers = (users: CSUser[]) => action(UsersActionsType.Add, users);
 
-export const updateModifiedRepos = () => async (dispatch, getState: () => CodeStreamState) => {
+const updateModifiedRepos = () => async (dispatch, getState: () => CodeStreamState) => {
 	const state = getState();
 	const { users, session, context, teams } = state;
 	const teamId = context.currentTeamId;
@@ -61,11 +61,19 @@ const _updateModifiedRepos = (modifiedRepos: RepoScmStatus[], teamId: string) =>
 	dispatch,
 	getState: () => CodeStreamState
 ) => {
-	const response = await HostApi.instance.send(SetModifiedReposRequestType, {
+	return HostApi.instance.send(SetModifiedReposRequestType, {
 		modifiedRepos,
 		teamId
 	});
-	if (response && response.user) {
-		dispatch(updateUser(response.user));
-	}
 };
+
+export const updateModifiedReposDebounced = debounce(
+	dispatcher => {
+		dispatcher(updateModifiedRepos());
+	},
+	5000,
+	{
+		leading: false,
+		trailing: true
+	}
+);

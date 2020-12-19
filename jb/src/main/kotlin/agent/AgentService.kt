@@ -3,6 +3,7 @@ package com.codestream.agent
 import com.codestream.DEBUG
 import com.codestream.authenticationService
 import com.codestream.extensions.baseUri
+import com.codestream.extensions.workspaceFolders
 import com.codestream.gson
 import com.codestream.protocols.agent.CSUser
 import com.codestream.protocols.agent.CreatePermalinkParams
@@ -23,14 +24,18 @@ import com.codestream.protocols.agent.GetUserParams
 import com.codestream.protocols.agent.Ide
 import com.codestream.protocols.agent.InitializationOptions
 import com.codestream.protocols.agent.Post
+import com.codestream.protocols.agent.PullRequestFile
 import com.codestream.protocols.agent.Review
 import com.codestream.protocols.agent.SetServerUrlParams
 import com.codestream.protocols.agent.SetServerUrlResult
 import com.codestream.protocols.agent.Stream
+import com.codestream.protocols.agent.getPullRequestFilesChangedParams
+import com.codestream.protocols.agent.getPullRequestFilesParams
 import com.codestream.settings.ApplicationSettingsService
 import com.codestream.system.Platform
 import com.codestream.system.platform
 import com.github.salomonbrys.kotson.fromJson
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.openapi.Disposable
@@ -119,19 +124,25 @@ class AgentService(private val project: Project) : Disposable {
             launcher.startListening()
 
             if (!project.isDisposed) {
+                logger.info("Initializing language server")
                 this.initializeResult = agent.initialize(getInitializeParams()).await()
                 if (autoSignIn) {
                     project.authenticationService?.let {
                         val success = it.autoSignIn()
                         if (success) {
+                            logger.info("CodeStream LSP agent initialization complete (auto sign-in successful)")
                             initialization.complete(Unit)
                         } else {
+                            logger.info("CodeStream LSP agent restarting (auto sign-in failed)")
                             restart()
                         }
                     }
                 } else {
+                    logger.info("CodeStream LSP agent initialization complete (no auto sign-in)")
                     initialization.complete(Unit)
                 }
+            } else {
+                logger.info("Skipping language server initialization - project is disposed")
             }
         } catch (e: Exception) {
             logger.error(e)
@@ -281,7 +292,8 @@ class AgentService(private val project: Project) : Disposable {
             settings.serverUrl,
             settings.disableStrictSSL,
             settings.traceLevel.value,
-            gitPath
+            gitPath,
+            project.workspaceFolders
         )
     }
 
@@ -355,6 +367,15 @@ class AgentService(private val project: Project) : Disposable {
         val json = remoteEndpoint
             .request("codestream/review/contentsLocal", params)
             .await() as JsonObject
+        return gson.fromJson(json)
+    }
+
+    suspend fun getPullRequestFiles(prId: String, providerId: String): List<PullRequestFile> {
+        val json = remoteEndpoint
+            .request(
+                "codestream/provider/generic",
+                getPullRequestFilesParams("getPullRequestFilesChanged", providerId, getPullRequestFilesChangedParams(prId)))
+            .await() as JsonArray
         return gson.fromJson(json)
     }
 

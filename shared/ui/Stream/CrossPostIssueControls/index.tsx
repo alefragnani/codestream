@@ -13,6 +13,7 @@ import { SlackCardControls } from "./SlackCardControls";
 import { TrelloCardControls } from "./TrelloCardControls";
 import { YouTrackCardControls } from "./YouTrackCardControls";
 import { AzureDevOpsCardControls } from "./AzureDevOpsCardControls";
+import { ClubhouseCardControls } from "./ClubhouseCardControls";
 import { ProviderDisplay, PROVIDER_MAPPINGS } from "./types";
 import { ThirdPartyProviderConfig, ThirdPartyProviders } from "@codestream/protocols/agent";
 import { CSMe } from "@codestream/protocols/api";
@@ -21,6 +22,7 @@ import { CodeStreamState } from "@codestream/webview/store";
 import { getConnectedProviderNames } from "@codestream/webview/store/providers/reducer";
 import { updateForProvider } from "@codestream/webview/store/activeIntegrations/actions";
 import { CodeStreamIssueControls } from "./CodeStreamIssueControls";
+import { CSTeamSettings } from "@codestream/protocols/api";
 
 interface ProviderInfo {
 	provider: ThirdPartyProviderConfig;
@@ -33,6 +35,7 @@ interface ConnectedProps {
 	currentUser: CSMe;
 	issueProviderConfig?: ThirdPartyProviderConfig;
 	providers: ThirdPartyProviders;
+	teamSettings: CSTeamSettings;
 }
 
 interface Props extends ConnectedProps {
@@ -187,13 +190,21 @@ class CrossPostIssueControls extends React.Component<Props, State> {
 				);
 			}
 
+			case "clubhouse": {
+				return (
+					<ClubhouseCardControls provider={providerInfo.provider}>
+						{providerOptions}
+					</ClubhouseCardControls>
+				);
+			}
+
 			default:
 				return null;
 		}
 	}
 
 	render() {
-		const { issueProviderConfig } = this.props;
+		const { issueProviderConfig, teamSettings } = this.props;
 		const providerInfo = issueProviderConfig
 			? this.getProviderInfo(issueProviderConfig.id)
 			: undefined;
@@ -202,9 +213,14 @@ class CrossPostIssueControls extends React.Component<Props, State> {
 
 		if (!this.props.providers || !Object.keys(this.props.providers).length) return null;
 
+		const limitedProviders = teamSettings.issuesProviders || {};
 		const knownIssueProviders = Object.keys(this.props.providers).filter(providerId => {
 			const provider = this.props.providers![providerId];
-			return provider.hasIssues && !!PROVIDER_MAPPINGS[provider.name];
+			return (
+				provider.hasIssues &&
+				!!PROVIDER_MAPPINGS[provider.name] &&
+				(!teamSettings.limitIssues || limitedProviders[providerId])
+			);
 		});
 		if (knownIssueProviders.length === 0) {
 			return null;
@@ -372,17 +388,22 @@ class CrossPostIssueControls extends React.Component<Props, State> {
 	}
 }
 
+const EMPTY_HASH = {};
 const mapStateToProps = (state: CodeStreamState): ConnectedProps => {
-	const { users, session, context, providers } = state;
+	const { users, teams, session, context, providers } = state;
 	const currentIssueProviderConfig = context.issueProvider
 		? providers[context.issueProvider]
 		: undefined;
+	const team = teams[context.currentTeamId];
+	const teamSettings = team.settings || EMPTY_HASH;
+
 	return {
 		currentUser: users[session.userId!] as CSMe,
 		currentTeamId: context.currentTeamId,
 		providers,
 		issueProviderConfig: currentIssueProviderConfig,
-		connectedProviderNames: getConnectedProviderNames(state)
+		connectedProviderNames: getConnectedProviderNames(state),
+		teamSettings
 	};
 };
 

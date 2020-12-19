@@ -20,6 +20,7 @@ import Icon from "./Icon";
 import { Button } from "../src/components/Button";
 import { DropdownButton } from "./Review/DropdownButton";
 import { PrePRProviderInfoModal } from "./PrePRProviderInfoModal";
+import { Dialog } from "../src/components/Dialog";
 
 export const Provider = styled(Button)`
 	width: 100%;
@@ -50,25 +51,24 @@ const ProviderDropdown = styled(DropdownButton)`
 `;
 
 const IntegrationGroups = styled.div`
-	.title {
-		top: -16px !important;
-	}
 	h2 {
-		margin-top: 0;
+		margin-top: 15px;
 		font-size: 16px !important;
 		font-weight: 400;
-		padding-left: 20px;
+		padding: 0 0 0 20px;
+	}
+	p {
+		padding: 0 20px;
 	}
 `;
 
-export const IntegrationButtons = styled.div`
+export const IntegrationButtons = styled.div<{ noBorder?: boolean; noPadding?: boolean }>`
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(13em, 1fr));
 	column-gap: 15px;
 	row-gap: 10px;
-	margin-bottom: 15px;
-	padding: 0 20px 20px 20px;
-	border-bottom: 1px solid var(--base-border-color);
+	padding: ${props => (props.noPadding ? "0" : "0 20px 20px 20px")};
+	border-bottom: ${props => (props.noBorder ? "none" : "1px solid var(--base-border-color)")};
 	align-items: start;
 `;
 
@@ -77,6 +77,10 @@ export const IntegrationsPanel = () => {
 	const derivedState = useSelector((state: CodeStreamState) => {
 		const { providers, teams, context, session, users } = state;
 		const team = teams[context.currentTeamId];
+		const teamSettings = team.settings || {};
+		const teamCodeHostProviders = teamSettings.codeHostProviders || {};
+		const teamIssuesProviders = teamSettings.issuesProviders || {};
+		const teamMessagingProviders = teamSettings.messagingProviders || {};
 		const user = users[session.userId!];
 		const currentUserIsAdmin = (team.adminIds || []).includes(user.id);
 
@@ -92,12 +96,16 @@ export const IntegrationsPanel = () => {
 					"gitlab_enterprise"
 				].includes(providers[id].name)
 			)
-			.filter(id => !connectedProviders.includes(id));
+			.filter(id => !connectedProviders.includes(id))
+			.filter(id => !teamSettings.limitCodeHost || teamCodeHostProviders[id]);
 		const issueProviders = Object.keys(providers)
 			.filter(id => providers[id].hasIssues)
 			.filter(id => !codeHostProviders.includes(id))
-			.filter(id => !connectedProviders.includes(id));
-		const messagingProviders = Object.keys(providers).filter(id => providers[id].hasSharing);
+			.filter(id => !connectedProviders.includes(id))
+			.filter(id => !teamSettings.limitIssues || teamIssuesProviders[id]);
+		const messagingProviders = Object.keys(providers)
+			.filter(id => providers[id].hasSharing)
+			.filter(id => !teamSettings.limitMessaging || teamMessagingProviders[id]);
 		const sharingTargets = getConnectedSharingTargets(state);
 
 		return {
@@ -251,7 +259,10 @@ export const IntegrationsPanel = () => {
 			let elements = [] as any;
 			if (connectedProviders.includes(providerId)) {
 				elements.push(
-					<Provider onClick={() => dispatch(connectProvider(providerId, "Integrations Panel"))}>
+					<Provider
+						key={providerId}
+						onClick={() => dispatch(connectProvider(providerId, "Integrations Panel"))}
+					>
 						{display.icon && <Icon name={display.icon} />}
 						{`Add ${display.groupName}`}
 					</Provider>
@@ -280,48 +291,43 @@ export const IntegrationsPanel = () => {
 	}
 
 	return (
-		<div className="panel full-height activity-panel">
-			<PanelHeader title={<>&nbsp;</>}></PanelHeader>
-			<ScrollBox>
-				<div className="channel-list vscroll">
-					<IntegrationGroups>
-						{Object.keys(derivedState.providers).length === 0 && (
+		<Dialog wide noPadding onClose={() => dispatch(closePanel())}>
+			<IntegrationGroups>
+				{Object.keys(derivedState.providers).length === 0 && (
+					<>
+						<h2>HTTPS Required</h2>
+						<p>
+							CodeStream integrations require a secure connection to your CodeStream server. Please
+							contact your on-prem CodeStream administrator.
+						</p>
+						<div style={{ textAlign: "center", marginBottom: "20px" }}>
+							<Button onClick={() => dispatch(closePanel())}>OK</Button>
+						</div>
+					</>
+				)}
+				{Object.keys(derivedState.providers).length > 0 && (
+					<>
+						{derivedState.connectedProviders.length > 0 && (
 							<>
-								<h2>HTTPS Required</h2>
-								CodeStream integrations require a secure connection to your CodeStream server.
-								Please contact your on-prem CodeStream administrator.
-								<br />
-								<br />
-								<Button onClick={() => dispatch(closePanel())}>OK</Button>
+								<h2>Active Integrations</h2>
+								<IntegrationButtons>
+									{renderConnectedProviders(derivedState.connectedProviders)}
+								</IntegrationButtons>
 							</>
 						)}
-						{Object.keys(derivedState.providers).length > 0 && (
-							<>
-								{derivedState.connectedProviders.length > 0 && (
-									<>
-										<h2>Active Integrations</h2>
-										<IntegrationButtons>
-											{renderConnectedProviders(derivedState.connectedProviders)}
-										</IntegrationButtons>
-									</>
-								)}
-								<h2>Code Host &amp; Issue Providers</h2>
-								<IntegrationButtons>
-									{renderProviders(derivedState.codeHostProviders)}
-								</IntegrationButtons>
+						<h2>Code Host &amp; Issue Providers</h2>
+						<IntegrationButtons>
+							{renderProviders(derivedState.codeHostProviders)}
+						</IntegrationButtons>
 
-								<h2>Issue Providers</h2>
-								<IntegrationButtons>
-									{renderProviders(derivedState.issueProviders)}
-								</IntegrationButtons>
+						<h2>Issue Providers</h2>
+						<IntegrationButtons>{renderProviders(derivedState.issueProviders)}</IntegrationButtons>
 
-								<h2>Messaging Providers</h2>
-								<IntegrationButtons>{renderMessagingProviders()}</IntegrationButtons>
-							</>
-						)}
-					</IntegrationGroups>
-				</div>
-			</ScrollBox>
-		</div>
+						<h2>Messaging Providers</h2>
+						<IntegrationButtons noBorder>{renderMessagingProviders()}</IntegrationButtons>
+					</>
+				)}
+			</IntegrationGroups>
+		</Dialog>
 	);
 };

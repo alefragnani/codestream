@@ -5,8 +5,11 @@ import com.codestream.agentService
 import com.codestream.codeStream
 import com.codestream.protocols.agent.Codemark
 import com.codestream.protocols.agent.Post
+import com.codestream.protocols.agent.PullRequestNotification
 import com.codestream.protocols.agent.Review
+import com.codestream.protocols.agent.TelemetryParams
 import com.codestream.protocols.webview.CodemarkNotifications
+import com.codestream.protocols.webview.PullRequestNotifications
 import com.codestream.protocols.webview.ReviewNotifications
 import com.codestream.sessionService
 import com.codestream.settingsService
@@ -22,6 +25,8 @@ import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 
 const val CODESTREAM_NOTIFICATION_GROUP_ID = "CodeStream"
+const val CODESTREAM_PRIORITY_NOTIFICATION_GROUP_ID = "CodeStream priority"
+
 private val icon = IconLoader.getIcon("/images/codestream-unread.svg")
 private val notificationGroup =
     NotificationGroup(
@@ -32,11 +37,58 @@ private val notificationGroup =
         icon
     )
 
+private val priorityNotificationGroup =
+    NotificationGroup(
+        CODESTREAM_PRIORITY_NOTIFICATION_GROUP_ID,
+        NotificationDisplayType.STICKY_BALLOON,
+        false,
+        CODESTREAM_TOOL_WINDOW_ID,
+        icon
+    )
+
+
 class NotificationComponent(val project: Project) {
     private val logger = Logger.getInstance(NotificationComponent::class.java)
 
     init {
         project.sessionService?.onPostsChanged(this::didChangePosts)
+        project.sessionService?.onPullRequestsChanged(this::didChangePullRequests)
+    }
+
+    private fun didChangePullRequests(pullRequestNotifications: List<PullRequestNotification>) {
+        GlobalScope.launch {
+            pullRequestNotifications.forEach { didChangePullRequest(it) }
+        }
+    }
+
+    private fun didChangePullRequest(pullRequestNotification: PullRequestNotification) {
+        val session = project.sessionService ?: return
+        val userLoggedIn = session.userLoggedIn ?: return
+
+        if (!userLoggedIn.user.wantsToastNotifications()) {
+            return
+        }
+
+        val text = "Pull Request \"${pullRequestNotification.pullRequest.title}\" ${pullRequestNotification.queryName}"
+
+        val notification = priorityNotificationGroup.createNotification(
+            null, null, text, NotificationType.INFORMATION
+        )
+
+        notification.addAction(NotificationAction.createSimple("Open") {
+            project.codeStream?.show {
+                project.webViewService?.run {
+                    postNotification(PullRequestNotifications.Show(
+                        pullRequestNotification.pullRequest.providerId,
+                        pullRequestNotification.pullRequest.id
+                    ))
+                    notification.expire()
+                    telemetry(TelemetryEvent.TOAST_CLICKED, "PR")
+                }
+            }
+        })
+        notification.notify(project)
+        telemetry(TelemetryEvent.TOAST_NOTIFICATION, "PR")
     }
 
     private fun didChangePosts(posts: List<Post>) {
@@ -101,22 +153,40 @@ class NotificationComponent(val project: Project) {
             post.text
         }
 
+        val telemetryContent = when {
+            codemark != null -> "Codemark"
+            review != null -> "Review"
+            else -> "Unknown"
+        }
+
         val notification = notificationGroup.createNotification(
             null, sender, text, NotificationType.INFORMATION
         )
         notification.addAction(NotificationAction.createSimple("Open") {
             project.codeStream?.show {
                 project.webViewService?.run {
-                    if (codemark != null) {
+                    if (review != null) {
+                        postNotification(ReviewNotifications.Show(review.id, codemark?.id))
+                    } else if (codemark != null) {
                         postNotification(CodemarkNotifications.Show(codemark.id))
-                    } else if (review != null) {
-                        postNotification(ReviewNotifications.Show(review.id))
                     }
                     notification.expire()
+                    telemetry(TelemetryEvent.TOAST_CLICKED, telemetryContent)
                 }
             }
         })
         notification.notify(project)
+        telemetry(TelemetryEvent.TOAST_NOTIFICATION, telemetryContent)
+    }
+
+    private enum class TelemetryEvent(val value: String) {
+        TOAST_NOTIFICATION("Toast Notification"),
+        TOAST_CLICKED("Toast Clicked")
+    }
+
+    private fun telemetry(event: TelemetryEvent, content: String) {
+        val params = TelemetryParams(event.value, mapOf("Content" to content))
+        project.agentService?.agent?.telemetry(params)
     }
 }
 

@@ -24,3 +24,20 @@ export class ServerError extends AgentError {
 		this.statusCode = statusCode;
 	}
 }
+
+export enum ReportSuppressedMessages {
+	AccessTokenInvalid = "Access token invalid",	// for errors with access tokens, that are probably permanent
+	ConnectionError = "Connection error",			// for connection errors, probably related to the url
+	NetworkError = "Network error"					// for network errors that are probably temporary
+}
+
+export class InternalError extends AgentError {
+
+	public suppressReporting: boolean;
+
+	constructor(message: string, info: any = {}) {
+		super(message, info);
+		this.name = "InternalError";
+		this.suppressReporting = true;
+	}
+}

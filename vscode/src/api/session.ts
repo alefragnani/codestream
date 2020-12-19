@@ -6,6 +6,7 @@ import {
 	CodeStreamEnvironment,
 	DidChangeDataNotification,
 	DidChangeDocumentMarkersNotification,
+	DidChangePullRequestCommentsNotification,
 	isLoginFailResponse,
 	LoginSuccessResponse,
 	AgentOpenUrlRequest,
@@ -47,8 +48,10 @@ import {
 	SessionChangedEventType,
 	SessionStatusChangedEvent,
 	TextDocumentMarkersChangedEvent,
+	PullRequestCommentsChangedEvent,
 	UnreadsChangedEvent,
-	ReviewsChangedEvent
+	ReviewsChangedEvent,
+	PullRequestsChangedEvent
 } from "./sessionEvents";
 import { SessionState } from "./sessionState";
 import { TokenManager } from "./tokenManager";
@@ -103,6 +106,11 @@ export class CodeStreamSession implements Disposable {
 		return this._onDidChangeTextDocumentMarkers.event;
 	}
 
+	private _onDidChangePullRequestComments = new EventEmitter<PullRequestCommentsChangedEvent>();
+	get onDidChangePullRequestComments(): Event<PullRequestCommentsChangedEvent> {
+		return this._onDidChangePullRequestComments.event;
+	}
+
 	private _onDidChangePosts = new EventEmitter<PostsChangedEvent>();
 	get onDidChangePosts(): Event<PostsChangedEvent> {
 		return this._onDidChangePosts.event;
@@ -129,6 +137,12 @@ export class CodeStreamSession implements Disposable {
 		250,
 		{ maxWait: 1000 }
 	);
+
+	private _onDidChangePullRequests = new EventEmitter<PullRequestsChangedEvent>();
+	get onDidChangePullRequests(): Event<PullRequestsChangedEvent> {
+		return this._onDidChangePullRequests.event;
+	}
+	private fireDidChangePullRequests = createMergableDebouncedEvent(this._onDidChangePullRequests);
 
 	private _agentCapabilities: Capabilities | undefined;
 	get capabilities() {
@@ -178,20 +192,34 @@ export class CodeStreamSession implements Disposable {
 			}),
 			Container.agent.onOpenUrl(async (params: AgentOpenUrlRequest) => {
 				await openUrl(params.url);
+			}),
+			Container.agent.onDidRestart(async () => {
+				Logger.log("Agent restarted unexpectedly, waiting for it to reinitialize...");
+				delete this._loginPromise;
+				const disposable = Container.agent.onAgentInitialized(async () => {
+					Logger.log("Agent reinitialized, initiating auto-signin...");
+					await this.autoSignin();
+					disposable.dispose();
+				});
 			})
 		);
 
 		if (config.autoSignIn) {
 			this.setStatus(SessionStatus.SigningIn);
 			const disposable = Container.agent.onDidStart(async () => {
-				const token = await TokenManager.get(_serverUrl, config.email);
+				await this.autoSignin();
 				disposable.dispose();
-				if (token) {
-					this.login(config.email, token);
-				} else {
-					this.setStatus(SessionStatus.SignedOut);
-				}
 			});
+		}
+	}
+
+	async autoSignin() {
+		const config = Container.config;
+		const token = await TokenManager.get(this._serverUrl, config.email);
+		if (token) {
+			this.login(config.email, token);
+		} else {
+			this.setStatus(SessionStatus.SignedOut);
 		}
 	}
 
@@ -203,6 +231,12 @@ export class CodeStreamSession implements Disposable {
 	private onDocumentMarkersChanged(e: DidChangeDocumentMarkersNotification) {
 		this._onDidChangeTextDocumentMarkers.fire(
 			new TextDocumentMarkersChangedEvent(this, Uri.parse(e.textDocument.uri))
+		);
+	}
+
+	private onPullRequestCommentsChanged(_e: DidChangePullRequestCommentsNotification) {
+		this._onDidChangePullRequestComments.fire(
+			new PullRequestCommentsChangedEvent(this)
 		);
 	}
 
@@ -231,6 +265,9 @@ export class CodeStreamSession implements Disposable {
 				Container.diffContents.clearLocalContents(e.data.map(_ => _.id));
 				break;
 			}
+			case ChangeDataType.PullRequests:
+				this.fireDidChangePullRequests(new PullRequestsChangedEvent(this, e));
+				break;
 		}
 	}
 
@@ -632,6 +669,7 @@ export class CodeStreamSession implements Disposable {
 
 		this._disposableAuthenticated = Disposable.from(
 			Container.agent.onDidChangeDocumentMarkers(this.onDocumentMarkersChanged, this),
+			Container.agent.onDidChangePullRequestComments(this.onPullRequestCommentsChanged, this),
 			Container.agent.onDidChangeData(this.onDataChanged, this)
 		);
 
