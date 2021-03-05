@@ -59,15 +59,16 @@ import {
 } from "@codestream/webview/store/context/actions";
 import { DelayedRender } from "@codestream/webview/Container/DelayedRender";
 import { getReview } from "@codestream/webview/store/reviews/reducer";
-import MessageInput from "../MessageInput";
+import MessageInput, { AttachmentField } from "../MessageInput";
 import styled from "styled-components";
 import Button from "../Button";
 import {
 	getTeamMates,
 	findMentionedUserIds,
-	getTeamTagsHash
+	getTeamTagsHash,
+	getPreferences
 } from "@codestream/webview/store/users/reducer";
-import { createPost, setReviewStatus, setCodemarkStatus } from "../actions";
+import { createPost, setReviewStatus, setCodemarkStatus, setUserPreference } from "../actions";
 import { getThreadPosts } from "@codestream/webview/store/posts/reducer";
 import { DropdownButton } from "./DropdownButton";
 import Tag from "../Tag";
@@ -99,6 +100,9 @@ import { PROVIDER_MAPPINGS } from "../CrossPostIssueControls/types";
 import { isFeatureEnabled } from "@codestream/webview/store/apiVersioning/reducer";
 import { getPost } from "../../store/posts/reducer";
 import { AddReactionIcon, Reactions } from "../Reactions";
+import { Attachments } from "../Attachments";
+import { PRSelectorButtons } from "../PullRequestComponents";
+import { PRProgress, PRProgressFill, PRProgressLine } from "../PullRequestFilesChangedList";
 
 interface RepoMetadata {
 	repoName: string;
@@ -304,8 +308,11 @@ export const BaseReviewMenu = (props: BaseReviewMenuProps) => {
 				statusLabel = "Rejected";
 				break;
 		}
+		const post =
+			review && review.postId ? getPost(state.posts, review!.streamId, review.postId) : undefined;
 
 		return {
+			post,
 			currentUserId: state.session.userId!,
 			currentUser: state.users[state.session.userId!],
 			author: state.users[props.review.creatorId],
@@ -494,7 +501,13 @@ export const BaseReviewMenu = (props: BaseReviewMenuProps) => {
 	}, [review, collapsed]);
 
 	if (shareModalOpen)
-		return <SharingModal review={props.review!} onClose={() => setShareModalOpen(false)} />;
+		return (
+			<SharingModal
+				review={props.review!}
+				post={derivedState.post}
+				onClose={() => setShareModalOpen(false)}
+			/>
+		);
 
 	if (collapsed) {
 		return (
@@ -575,7 +588,7 @@ const BaseReview = (props: BaseReviewProps) => {
 			: "";
 	const { approvedBy = {} } = review;
 	const hasChangeRequests = props.changeRequests != null && props.changeRequests.length > 0;
-	const numFiles = review.reviewChangesets
+	const numFiles = (review.reviewChangesets || [])
 		.map(r => r.modifiedFiles.length)
 		.reduce((a, b) => a + b, 0);
 	const renderedFooter = props.renderFooter && props.renderFooter(CardFooter, ComposeWrapper);
@@ -608,7 +621,7 @@ const BaseReview = (props: BaseReviewProps) => {
 	const numCheckpoints =
 		Math.max.apply(
 			Math,
-			review.reviewChangesets.map(_ => (_.checkpoint === undefined ? 0 : _.checkpoint))
+			(review.reviewChangesets || []).map(_ => (_.checkpoint === undefined ? 0 : _.checkpoint))
 		) + 1;
 
 	const dropdownItems: any = [
@@ -748,7 +761,6 @@ const BaseReview = (props: BaseReviewProps) => {
 							{props.headerError.message}
 							{canLocateRepo && singleRepo && (
 								<>
-									<br />
 									<LocateRepoButton
 										repoId={singleRepo.id}
 										repoName={singleRepo.repoName}
@@ -781,6 +793,7 @@ const BaseReview = (props: BaseReviewProps) => {
 							<Reactions className="reactions no-pad-left" post={props.post} />
 						</div>
 					)}
+					{!props.collapsed && props.post && <Attachments post={props.post as CSPost} />}
 					{!props.collapsed && (hasTags || hasReviewers) && (
 						<MetaRow>
 							{hasTags && (
@@ -926,6 +939,7 @@ const BaseReview = (props: BaseReviewProps) => {
 										}
 										noOnClick={!props.canStartReview}
 										withTelemetry={true}
+										showViewOptions
 									/>
 								</MetaDescriptionForAssignees>
 							</Meta>
@@ -942,6 +956,26 @@ const BaseReview = (props: BaseReviewProps) => {
 						</Meta>
 					)}
 					{!props.collapsed && checkpoint === undefined && renderCommitList()}
+					{!props.collapsed && props.post && props.post.sharedTo && props.post.sharedTo.length > 0 && (
+						<Meta key="shared-to">
+							<MetaLabel>Shared To</MetaLabel>
+							<MetaDescriptionForAssignees>
+								{props.post.sharedTo.map(target => {
+									const providerDisplay = PROVIDER_MAPPINGS[target.providerId];
+									return (
+										<Link className="external-link" href={target.url}>
+											{providerDisplay && providerDisplay.icon && (
+												<span>
+													<Icon name={providerDisplay.icon} />
+												</span>
+											)}
+											{target.channelName}
+										</Link>
+									);
+								})}
+							</MetaDescriptionForAssignees>
+						</Meta>
+					)}
 				</MetaSection>
 				{props.collapsed && renderMetaSectionCollapsed(props)}
 			</CardBody>
@@ -975,6 +1009,13 @@ const renderMetaSectionCollapsed = (props: BaseReviewProps) => {
 							name="eye"
 						/>
 					</span>
+				)}
+				{props.post && props.post.files && props.post.files.length > 0 && (
+					<Tooltip title="Show attachments" placement="bottom">
+						<span className="detail-icon">
+							<Icon name="paperclip" /> {props.post.files.length}
+						</span>
+					</Tooltip>
 				)}
 				{props.review.numReplies > 0 && (
 					<Tooltip title="Show replies" placement="bottom">
@@ -1022,6 +1063,7 @@ const renderMetaSectionCollapsed = (props: BaseReviewProps) => {
 const ReplyInput = (props: { reviewId: string; parentPostId: string; streamId: string }) => {
 	const dispatch = useDispatch<Dispatch>();
 	const [text, setText] = React.useState("");
+	const [attachments, setAttachments] = React.useState<AttachmentField[]>([]);
 	const [isChangeRequest, setIsChangeRequest] = React.useState(false);
 	const [isLoading, setIsLoading] = React.useState(false);
 	const teamMates = useSelector((state: CodeStreamState) => getTeamMates(state));
@@ -1043,7 +1085,8 @@ const ReplyInput = (props: { reviewId: string; parentPostId: string; streamId: s
 					accessMemberIds: [],
 					isChangeRequest: true,
 					tags: [],
-					isPseudoCodemark: true
+					isPseudoCodemark: true,
+					files: attachments
 				})
 			);
 		} else {
@@ -1055,7 +1098,8 @@ const ReplyInput = (props: { reviewId: string; parentPostId: string; streamId: s
 					null,
 					findMentionedUserIds(teamMates, text),
 					{
-						entryPoint: "Review"
+						entryPoint: "Review",
+						files: attachments
 					}
 				)
 			);
@@ -1063,6 +1107,7 @@ const ReplyInput = (props: { reviewId: string; parentPostId: string; streamId: s
 		}
 		setIsLoading(false);
 		setText("");
+		setAttachments([]);
 	};
 
 	return (
@@ -1073,6 +1118,9 @@ const ReplyInput = (props: { reviewId: string; parentPostId: string; streamId: s
 				placeholder="Add Comment..."
 				onChange={setText}
 				onSubmit={submit}
+				attachments={attachments}
+				attachmentContainerType="reply"
+				setAttachments={setAttachments}
 			/>
 			<div style={{ display: "flex", flexWrap: "wrap" }}>
 				<div style={{ opacity: 0.7, paddingTop: "10px" }}>
@@ -1185,10 +1233,12 @@ const ReviewForReview = (props: PropsWithReview) => {
 	const repoInfoById = React.useMemo(() => {
 		const reviewRepos = new Map<string, any>();
 
-		for (let changeset of review.reviewChangesets) {
-			const repo = derivedState.repos[changeset.repoId];
-			if (repo && !reviewRepos.has(changeset.repoId))
-				reviewRepos.set(changeset.repoId, { repoName: repo.name, branch: changeset.branch });
+		if (review.reviewChangesets) {
+			for (let changeset of review.reviewChangesets) {
+				const repo = derivedState.repos[changeset.repoId];
+				if (repo && !reviewRepos.has(changeset.repoId))
+					reviewRepos.set(changeset.repoId, { repoName: repo.name, branch: changeset.branch });
+			}
 		}
 
 		return reviewRepos;
@@ -1290,7 +1340,13 @@ const ReviewForReview = (props: PropsWithReview) => {
 		});
 
 	if (shareModalOpen)
-		return <SharingModal review={props.review!} onClose={() => setShareModalOpen(false)} />;
+		return (
+			<SharingModal
+				review={props.review!}
+				post={derivedState.post}
+				onClose={() => setShareModalOpen(false)}
+			/>
+		);
 	if (isEditing && !props.isAmending) {
 		return (
 			<ReviewForm

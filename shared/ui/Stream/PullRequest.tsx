@@ -61,14 +61,14 @@ import {
 import {
 	getCurrentProviderPullRequest,
 	getCurrentProviderPullRequestLastUpdated,
-	getProviderPullRequestRepo,
-	isAnHourOld
+	getProviderPullRequestRepo
 } from "../store/providerPullRequests/reducer";
 import { confirmPopup } from "./Confirm";
 import { PullRequestFileComments } from "./PullRequestFileComments";
 import { InlineMenu } from "../src/components/controls/InlineMenu";
 import { getPreferences } from "../store/users/reducer";
 import { setUserPreference } from "./actions";
+import { GHOST } from "./PullRequestTimelineItems";
 
 const Root = styled.div`
 	@media only screen and (max-width: ${props => props.theme.breakpoint}) {
@@ -131,6 +131,9 @@ export const PullRequest = () => {
 				: undefined,
 			currentPullRequestCommentId: state.context.currentPullRequest
 				? state.context.currentPullRequest.commentId
+				: undefined,
+			currentPullRequestSource: state.context.currentPullRequest
+				? state.context.currentPullRequest.source
 				: undefined,
 			currentPullRequest: currentPullRequest,
 			currentPullRequestLastUpdated: providerPullRequestLastUpdated,
@@ -209,8 +212,9 @@ export const PullRequest = () => {
 		}
 	`;
 
-	const _assignState = pr => {
-		if (!pr) return;
+	const _assignState = (pr, src?: string) => {
+		if (!pr || !pr.repository) return;
+		console.warn("_assignState src", src);
 		setGhRepo(pr.repository);
 		setPr(pr.repository.pullRequest);
 		setTitle(pr.repository.pullRequest.title);
@@ -225,14 +229,8 @@ export const PullRequest = () => {
 			derivedState.providerPullRequests[derivedState.currentPullRequestProviderId!];
 		if (providerPullRequests) {
 			let data = providerPullRequests[derivedState.currentPullRequestId!];
-			if (data) {
-				if (isAnHourOld(data.conversationsLastFetch)) {
-					console.warn(`pr id=${derivedState.currentPullRequestId} is too old, resetting`);
-					// setPR to undefined to trigger loader
-					setPr(undefined);
-				} else {
-					_assignState(data.conversations);
-				}
+			if (data && data.conversations) {
+				_assignState(data.conversations, "useEffect");
 			}
 		}
 	}, [
@@ -250,15 +248,19 @@ export const PullRequest = () => {
 				derivedState.currentPullRequestProviderId!,
 				derivedState.currentPullRequestId!
 			)
-		)) as any;
+		)) as {
+			error?: {
+				message: string;
+			};
+		};
 		setGeneralError("");
-		if (response.error) {
-			// FIXME do something with it
+		if (response.error && response.error.message) {
 			setIsLoadingPR(false);
 			setIsLoadingMessage("");
-			setGeneralError(response.error);
+			setGeneralError(response.error.message);
+			console.error(response.error.message);
 		} else {
-			_assignState(response);
+			_assignState(response, "initialFetch");
 		}
 	};
 
@@ -271,9 +273,12 @@ export const PullRequest = () => {
 		setIsLoadingPR(true);
 
 		const response = (await dispatch(
-			getPullRequestConversationsFromProvider(pr!.providerId, derivedState.currentPullRequestId!)
+			getPullRequestConversationsFromProvider(
+				derivedState.currentPullRequestProviderId!,
+				derivedState.currentPullRequestId!
+			)
 		)) as any;
-		_assignState(response);
+		_assignState(response, "fetch");
 	};
 
 	/**
@@ -286,9 +291,12 @@ export const PullRequest = () => {
 		if (message) setIsLoadingMessage(message);
 		setIsLoadingPR(true);
 		const response = (await dispatch(
-			getPullRequestConversationsFromProvider(pr!.providerId, derivedState.currentPullRequestId!)
+			getPullRequestConversationsFromProvider(
+				derivedState.currentPullRequestProviderId!,
+				derivedState.currentPullRequestId!
+			)
 		)) as any;
-		_assignState(response);
+		_assignState(response, "reload");
 
 		// just clear the files and commits data -- it will be fetched if necessary (since it has its own api call)
 		dispatch(
@@ -458,7 +466,8 @@ export const PullRequest = () => {
 		getOpenRepos();
 		initialFetch().then(_ => {
 			HostApi.instance.track("PR Details Viewed", {
-				Host: derivedState.currentPullRequestProviderId
+				Host: derivedState.currentPullRequestProviderId,
+				Source: derivedState.currentPullRequestSource
 			});
 		});
 	});
@@ -570,7 +579,7 @@ export const PullRequest = () => {
 	]);
 
 	const iAmRequested = useMemo(() => {
-		if (pr) {
+		if (pr && pr.viewer) {
 			return pr.reviewRequests.nodes.find(
 				request => request.requestedReviewer && request.requestedReviewer.login === pr.viewer.login
 			);
@@ -588,13 +597,17 @@ export const PullRequest = () => {
 		breakpoint: breakpoints[derivedState.viewPreference]
 	});
 
-	console.warn("PR: ", pr);
-	// console.warn("REPO: ", ghRepo);
 	if (!pr) {
 		if (generalError) {
 			return (
 				<div style={{ display: "flex", height: "100vh", alignItems: "center" }}>
-					<div style={{ textAlign: "center" }}>Error: {generalError}</div>
+					<div style={{ textAlign: "left", width: "100%" }}>
+						Error Loading Pull Request:
+						<br />
+						<div style={{ overflow: "auto", width: "100%", height: "7vh" }}>
+							{generalError.replace(/\\t/g, "     ").replace(/\\n/g, "")}
+						</div>
+					</div>
 				</div>
 			);
 		} else {
@@ -608,8 +621,6 @@ export const PullRequest = () => {
 		const statusIcon = pr.state === "OPEN" || pr.state === "CLOSED" ? "pull-request" : "git-merge";
 		const action = pr.merged ? "merged " : "wants to merge ";
 
-		// console.log(pr.files);
-		// console.log(pr.commits);
 		return (
 			<ThemeProvider theme={addViewPreferencesToTheme}>
 				<Root className="panel full-height">
@@ -619,7 +630,7 @@ export const PullRequest = () => {
 						{iAmRequested && activeTab == 1 && (
 							<PRIAmRequested>
 								<div>
-									<b>{pr.author.login}</b> requested your review
+									<b>{(pr.author || GHOST).login}</b> requested your review
 									<span className="wide-text"> on this pull request</span>.
 								</div>
 								<Button
@@ -694,7 +705,7 @@ export const PullRequest = () => {
 								{pr.isDraft ? "Draft" : pr.state ? pr.state.toLowerCase() : ""}
 							</PRStatusButton>
 							<PRStatusMessage>
-								<PRAuthor>{pr.author.login}</PRAuthor>
+								<PRAuthor>{(pr.author || GHOST).login}</PRAuthor>
 								<PRAction>
 									{action} {pr.commits && pr.commits.totalCount} commits into{" "}
 									<Link href={`${pr.repoUrl}/tree/${pr.baseRefName}`}>
@@ -711,7 +722,7 @@ export const PullRequest = () => {
 										placement="bottom"
 										name="copy"
 										className="clickable"
-										onClick={e => copy(pr.baseRefName)}
+										onClick={e => copy(pr.headRefName)}
 									/>
 								</PRAction>
 								<Timestamp time={pr.createdAt} relative />

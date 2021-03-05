@@ -11,14 +11,12 @@ import {
 	GetReviewRequestType,
 	BlameAuthor,
 	GetShaDiffsRangesRequestType,
-	GetShaDiffsRangesResponse,
-	GetReposScmRequestType
+	GetShaDiffsRangesResponse
 } from "@codestream/protocols/agent";
 import {
 	CodemarkType,
 	CSChannelStream,
 	CSCodemark,
-	CSDirectStream,
 	CSStream,
 	CSUser,
 	StreamType,
@@ -50,18 +48,16 @@ import Tag from "./Tag";
 import Icon from "./Icon";
 import Menu from "./Menu";
 import Tooltip from "./Tooltip";
-import { sortBy as _sortBy, sortBy } from "lodash-es";
 import {
 	EditorSelectRangeRequestType,
 	EditorSelection,
 	EditorHighlightRangeRequestType,
-	WebviewPanels,
-	WebviewModals
+	WebviewPanels
 } from "@codestream/protocols/webview";
 import { getCurrentSelection } from "../store/editorContext/reducer";
 import Headshot from "./Headshot";
 import { getTeamMembers, getTeamTagsArray, getTeamMates } from "../store/users/reducer";
-import MessageInput from "./MessageInput";
+import MessageInput, { AttachmentField } from "./MessageInput";
 import { getCurrentTeamProvider } from "../store/teams/reducer";
 import { getCodemark } from "../store/codemarks/reducer";
 import { CodemarksState } from "../store/codemarks/types";
@@ -87,8 +83,6 @@ import CancelButton from "./CancelButton";
 import { VideoLink } from "./Flow";
 import { PanelHeader } from "../src/components/PanelHeader";
 import { ReposState } from "../store/repos/types";
-import * as path from "path-browserify";
-import { isOnPrem } from "../store/configs/reducer";
 import { getDocumentFromMarker } from "./api-functions";
 
 export interface ICrossPostIssueContext {
@@ -204,6 +198,7 @@ interface State {
 		[index: number]: boolean;
 	};
 	relatedCodemarkIds?: any;
+	attachments: AttachmentField[];
 	addingLocation?: boolean;
 	editingLocation: number;
 	liveLocation: number;
@@ -215,6 +210,7 @@ interface State {
 	isInsidePrChangeSet: boolean;
 	changedPrLines: GetShaDiffsRangesResponse[];
 	isPreviewing?: boolean;
+	isDragging: number;
 }
 
 function merge(defaults: Partial<State>, codemark: CSCodemark): State {
@@ -272,7 +268,9 @@ class CodemarkForm extends React.Component<Props, State> {
 			isReviewLoading: false,
 			isInsidePrChangeSet: false,
 			changedPrLines: [],
-			deleteMarkerLocations: {}
+			deleteMarkerLocations: {},
+			attachments: [],
+			isDragging: 0
 		};
 
 		const state = props.editingCodemark
@@ -717,9 +715,9 @@ class CodemarkForm extends React.Component<Props, State> {
 			text,
 			selectedChannelId,
 			selectedTags,
-			relatedCodemarkIds
+			relatedCodemarkIds,
+			attachments
 		} = this.state;
-
 		// FIXME
 		const codeBlock = codeBlocks[0];
 
@@ -831,7 +829,8 @@ class CodemarkForm extends React.Component<Props, State> {
 				const retVal = await this.props.onSubmit({
 					...baseAttributes,
 					sharingAttributes: this.props.shouldShare ? this._sharingAttributes : undefined,
-					accessMemberIds: this.state.privacyMembers.map(m => m.value)
+					accessMemberIds: this.state.privacyMembers.map(m => m.value),
+					files: attachments
 				});
 				// if you're making a markerless codemark it won't appear on spatial view, the form
 				// will just kind of disappear.  similarly, if you prior panel was *not* spatial view
@@ -1108,6 +1107,11 @@ class CodemarkForm extends React.Component<Props, State> {
 
 	pinLocation = (index: number, event?: React.SyntheticEvent) => {
 		this.insertTextAtCursor && this.insertTextAtCursor(`[#${index + 1}]`);
+	};
+
+	pinImage = (filename: string, url: string, event?: React.SyntheticEvent) => {
+		this.insertTextAtCursor &&
+			this.insertTextAtCursor(`![${filename}](${url.replace(/ /g, "%20")})`);
 	};
 
 	selectLocation = (action: "add" | "edit" | "delete") => {
@@ -1568,10 +1572,15 @@ class CodemarkForm extends React.Component<Props, State> {
 				setIsPreviewing={isPreviewing => this.setState({ isPreviewing })}
 				renderCodeBlock={this.renderCodeBlock}
 				renderCodeBlocks={this.renderCodeBlocks}
+				attachments={this.state.attachments}
+				attachmentContainerType="codemark"
+				setAttachments={this.setAttachments}
 				__onDidRender={__onDidRender}
 			/>
 		);
 	};
+
+	setAttachments = (attachments: AttachmentField[]) => this.setState({ attachments });
 
 	copyPermalink = (event: React.SyntheticEvent) => {
 		event.preventDefault();
@@ -2105,6 +2114,10 @@ class CodemarkForm extends React.Component<Props, State> {
 		});
 	};
 
+	handleDragEnter = () => this.setState({ isDragging: this.state.isDragging + 1 });
+	handleDragLeave = () => this.setState({ isDragging: this.state.isDragging - 1 });
+	handleDrop = () => this.setState({ isDragging: 0 });
+
 	renderCodemarkForm() {
 		const { editingCodemark, currentUser } = this.props;
 		const commentType = this.getCommentType();
@@ -2183,8 +2196,14 @@ class CodemarkForm extends React.Component<Props, State> {
 		return [
 			<form
 				id="code-comment-form"
-				className={cx("codemark-form", "standard-form", { "google-style": true })}
+				className={cx("codemark-form", "standard-form", {
+					"active-drag": this.state.isDragging > 0
+				})}
 				key="two"
+				onDragEnter={this.handleDragEnter}
+				onDrop={this.handleDrop}
+				onDragOver={e => e.preventDefault()}
+				onDragLeave={this.handleDragLeave}
 			>
 				<fieldset className="form-body">
 					{hasError && (
@@ -2319,6 +2338,7 @@ class CodemarkForm extends React.Component<Props, State> {
 							</Tooltip>
 						</div>
 					)}
+					<div style={{ clear: "both" }} />
 					{/* this.renderPrivacyControls() */}
 					{this.renderRelatedCodemarks()}
 					{this.renderTags()}

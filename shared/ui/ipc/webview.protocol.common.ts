@@ -1,5 +1,6 @@
 import { GetFileScmInfoResponse } from "@codestream/protocols/agent";
 import { Position, Range } from "vscode-languageserver-types";
+import { NewPullRequestBranch } from "./webview.protocol";
 
 export const MaxRangeValue = 2147483647;
 
@@ -62,7 +63,8 @@ export enum WebviewPanels {
 	OpenReviews = "open-reviews",
 	OpenPullRequests = "open-pull-requests",
 	WorkInProgress = "work-in-progress",
-	Onboard = "onboard"
+	Onboard = "onboard",
+	Commits = "commits"
 }
 
 // this is for mixpanel and maps the values from WebviewPanels to their
@@ -114,27 +116,38 @@ export interface WebviewContext {
 	};
 	currentCodemarkId?: string;
 	currentReviewId?: string;
+	currentReviewOptions?: {
+		includeLatestCommit?: boolean;
+		openFirstDiff?: boolean;
+	};
 	createPullRequestReviewId?: string;
+	createPullRequestOptions?: NewPullRequestBranch;
 	currentPullRequest?:
 		| {
 				providerId: string;
 				id: string;
 				commentId?: string;
+				/* defined if this was triggered by an external means (like an IDE button, etc.) */
+				source?: string;
 		  }
 		| undefined;
 	profileUserId?: string;
 	currentMarkerId?: string;
 	isRepositioning?: boolean;
 	hasFocus: boolean;
+	/** the first page seen after registration */
+	isFirstPageview?: boolean;
 	panelStack?: (WebviewPanels | string)[];
 	activePanel?: WebviewPanels;
 	startWorkCard?: any;
+	onboardStep: number;
 }
 
 export interface SessionState {
 	otc?: string;
 	userId?: string;
 	inMaintenanceMode?: boolean;
+	machineId?: string;
 }
 
 export interface EditorContext {

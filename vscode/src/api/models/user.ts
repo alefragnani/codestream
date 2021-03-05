@@ -1,5 +1,10 @@
 "use strict";
-import { CSMe, CSUser, CSNotificationDeliveryPreference } from "@codestream/protocols/api";
+import {
+	CSMe,
+	CSUser,
+	CSNotificationDeliveryPreference,
+	CSMePreferences
+} from "@codestream/protocols/api";
 import { CodeStreamSession } from "../session";
 import { CodeStreamItem } from "./item";
 
@@ -18,6 +23,14 @@ export class User extends CodeStreamItem<CSUser> {
 
 	get name() {
 		return this.entity.username || this.fullName;
+	}
+
+	get hasGitLens() {
+		return this.entity.hasGitLens;
+	}
+
+	get preferences(): CSMePreferences | undefined {
+		return this.entity.preferences;
 	}
 
 	hasMutedChannel(streamId: string) {

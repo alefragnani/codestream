@@ -16,9 +16,19 @@ import {
 	DiffBranchesRequest,
 	DiffBranchesRequestType,
 	DiffBranchesResponse,
+	FetchBranchCommitsStatusRequest,
+	FetchBranchCommitsStatusRequestType,
+	FetchBranchCommitsStatusResponse,
 	FetchForkPointRequest,
 	FetchForkPointRequestType,
 	FetchForkPointResponse,
+	FetchRemoteBranchRequest,
+	FetchRemoteBranchRequestType,
+	FetchRemoteBranchResponse,
+	FetchThirdPartyPullRequestFilesResponse,
+	GetCommitsFilesRequest,
+	GetCommitsFilesRequestType,
+	GetCommitsFilesResponse,
 	GetLatestCommitScmRequest,
 	GetLatestCommitScmRequestType,
 	GetLatestCommitScmResponse,
@@ -350,9 +360,11 @@ export class ScmManager {
 			includeStaged,
 			includeSaved,
 			startCommit,
+			endCommit,
 			reviewId,
 			currentUserEmail,
-			skipAuthorsCalculation
+			skipAuthorsCalculation,
+			includeLatestCommit
 		} = request;
 
 		if (reviewId) {
@@ -415,6 +427,10 @@ export class ScmManager {
 					const gitRemotes = await git.getRepoRemotes(repoPath);
 					remotes = [...Iterables.map(gitRemotes, r => ({ name: r.name, url: r.normalizedUrl }))];
 
+					if (commits && commits.length > 1 && !startCommit && includeLatestCommit) {
+						startCommit = commits[1].sha;
+					}
+
 					// if we don't have a starting point to diff against,
 					// assume that we want to diff against either the first
 					// commit that isn't mine, or failing that, the parent of
@@ -450,7 +466,13 @@ export class ScmManager {
 						}
 					}
 
-					modifiedFiles = await git.getNumStat(repoPath, startCommit, includeSaved, includeStaged);
+					modifiedFiles = await git.getNumStat(
+						repoPath,
+						startCommit,
+						endCommit,
+						includeSaved,
+						includeStaged
+					);
 					const ignoreFileHelper = await new IgnoreFilesHelper(repoPath).initialize();
 
 					if (modifiedFiles) {
@@ -521,6 +543,17 @@ export class ScmManager {
 								authorMap[author.email].stomped = author.hunks + authorMap[author.email].stomped;
 							})
 						);
+
+					if (Object.keys(authorMap).length < 3) {
+						const oneDay = 60 * 60 * 24;
+						const since = oneDay * 180; // six months
+						const lastCommitters = await git.getLastCommittersForRepo(repoPath, since);
+						lastCommitters.map(lastCommitter => {
+							if (!authorMap[lastCommitter.email]) {
+								authorMap[lastCommitter.email] = { stomped: 0, commits: 0 };
+							}
+						});
+					}
 				}
 				Object.keys(authorMap).forEach(email => {
 					authors.push({
@@ -638,6 +671,7 @@ export class ScmManager {
 		let numStatsFromNewestCommitShaInOrBeforeReview = await git.getNumStat(
 			repoPath,
 			newestCommitShaInOrBeforeReview,
+			undefined,
 			includeSaved,
 			includeStaged
 		);
@@ -721,6 +755,7 @@ export class ScmManager {
 					const numStatsFromLatestCommit = await git.getNumStat(
 						repoPath,
 						diff.latestCommitSha,
+						undefined,
 						includeSaved,
 						includeStaged
 					);
@@ -740,6 +775,7 @@ export class ScmManager {
 				const numStatsFromNewestCommitShaBeforeFirstCheckpoint = await git.getNumStat(
 					repoPath,
 					newestCommitShaBeforeFirstCheckpoint,
+					undefined,
 					includeSaved,
 					includeStaged
 				);
@@ -908,7 +944,7 @@ export class ScmManager {
 		}
 
 		return {
-			uri: uri.toString(),
+			uri: uri.toString(true),
 			scm:
 				repoPath !== undefined
 					? {
@@ -1349,6 +1385,59 @@ export class ScmManager {
 	}
 
 	@log()
+	@lspHandler(FetchRemoteBranchRequestType)
+	async fetchRemoteBranch(request: FetchRemoteBranchRequest): Promise<FetchRemoteBranchResponse> {
+		const { git } = SessionContainer.instance();
+
+		const repo = await git.getRepositoryById(request.repoId);
+		if (!repo) throw new Error(`fetchRemoteBranch: Could not load repo with ID ${request.repoId}`);
+
+		const remoteBranch = await git.getBranchRemote(repo.path, request.branchName);
+		if (!remoteBranch) {
+			throw new Error(
+				`fetchRemoteBranch: Couldn't find branchRemote for ${repo.path} and ${request.branchName}`
+			);
+		}
+
+		const { error } = await git.fetchRemoteBranch(repo.path, ".", remoteBranch, request.branchName);
+		if (error) {
+			throw new Error(error);
+		}
+		return true;
+	}
+
+	@log()
+	@lspHandler(FetchBranchCommitsStatusRequestType)
+	async fetchBranchCommitsStatus(
+		request: FetchBranchCommitsStatusRequest
+	): Promise<FetchBranchCommitsStatusResponse> {
+		const { git } = SessionContainer.instance();
+
+		const repo = await git.getRepositoryById(request.repoId);
+		let repoPath;
+		if (repo) {
+			repoPath = repo.path;
+		}
+
+		if (!repoPath) {
+			throw new Error(`getFileContentsAtRevision: Could not load repo with ID ${request.repoId}`);
+		}
+
+		await git.fetchAllRemotes(repoPath);
+
+		const baseBranchRemote = await git.getBranchRemote(repoPath, request.branchName);
+		const commitsBehindOrigin = await git.getBranchCommitsStatus(
+			repoPath,
+			baseBranchRemote!,
+			request.branchName
+		);
+
+		return {
+			commitsBehindOrigin
+		};
+	}
+
+	@log()
 	@lspHandler(GetFileContentsAtRevisionRequestType)
 	async getFileContentsAtRevision(
 		request: GetFileContentsAtRevisionRequest
@@ -1373,6 +1462,7 @@ export class ScmManager {
 		}
 		const contents = (await git.getFileContentForRevision(filePath, request.sha)) || "";
 		return {
+			repoRoot: repoPath,
 			content: contents
 		};
 	}
@@ -1423,6 +1513,9 @@ export class ScmManager {
 			};
 		}
 		try {
+			if (repo && request.ref) {
+				await git.fetchReference(repo, request.ref);
+			}
 			const shas = [request.baseSha, request.headSha];
 			const results = await Promise.all(
 				shas.map(sha => git.isValidReference(repoPath as string, sha))
@@ -1464,5 +1557,48 @@ export class ScmManager {
 			debugger;
 		}
 		return undefined;
+	}
+
+	@log()
+	@lspHandler(GetCommitsFilesRequestType)
+	async getCommitsFiles(request: GetCommitsFilesRequest): Promise<GetCommitsFilesResponse[]> {
+		const changedFiles: GetCommitsFilesResponse[] = [];
+		const { git, scm: scmManager, repositoryMappings } = SessionContainer.instance();
+
+		const repo = await git.getRepositoryById(request.repoId);
+		let repoPath: string | undefined;
+		if (repo) {
+			repoPath = repo.path;
+		} else {
+			repoPath = await repositoryMappings.getByRepoId(request.repoId);
+		}
+
+		if (!repoPath) {
+			throw new Error(`Could not load repo with ID ${request.repoId}`);
+		}
+
+		if (request.commits.length === 1) {
+			const commitChanges = await git.getCommitChanges(repoPath, request.commits[0]);
+			if (commitChanges) {
+				commitChanges.map(commitChange => {
+					const filename = commitChange.newFileName
+						? commitChange.newFileName.replace("b/", "")
+						: "";
+					commitChange.hunks.map(hunk => {
+						changedFiles.push({
+							sha: request.commits ? request.commits[0] : "",
+							filename,
+							status: "",
+							additions: hunk.additions,
+							changes: hunk.changes,
+							deletions: hunk.deletions,
+							patch: hunk.patch
+						});
+					});
+				});
+			}
+		}
+
+		return changedFiles;
 	}
 }

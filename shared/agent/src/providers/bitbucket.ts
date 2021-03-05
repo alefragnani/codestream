@@ -1,5 +1,6 @@
 "use strict";
 import { GitRemoteLike, GitRepository } from "git/gitService";
+import { toRepoName } from "../git/utils";
 import * as paths from "path";
 import * as qs from "querystring";
 import { URI } from "vscode-uri";
@@ -180,7 +181,8 @@ export class BitbucketProvider extends ThirdPartyIssueProviderBase<CSBitbucketPr
 		};
 	}
 
-	async onConnected() {
+	async onConnected(providerInfo?: CSBitbucketProviderInfo) {
+		super.onConnected(providerInfo);
 		this._bitbucketUserId = await this.getMemberId();
 		this._knownRepos = new Map<string, BitbucketRepo>();
 	}
@@ -401,7 +403,7 @@ export class BitbucketProvider extends ThirdPartyIssueProviderBase<CSBitbucketPr
 		const uri = URI.parse(remote);
 		const split = uri.path.split("/");
 		const owner = split[1];
-		const name = split[2].replace(".git", "");
+		const name = toRepoName(split[2]);
 		return {
 			owner,
 			name
@@ -524,6 +526,7 @@ export class BitbucketProvider extends ThirdPartyIssueProviderBase<CSBitbucketPr
 				// NOTE: Keep this await here, so any errors are caught here
 				return await cachedComments.comments;
 			}
+			super.invalidatePullRequestDocumentMarkersCache();
 
 			const remotePath = await getRemotePaths(
 				repo,

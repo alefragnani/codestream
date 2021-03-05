@@ -32,7 +32,11 @@ import {
 	UpdateTeamTagRequestType,
 	DeleteTeamTagRequestType,
 	UpdateStatusRequestType,
-	UpdateInvisibleRequestType
+	UpdateInvisibleRequestType,
+	SetCodemarkPinnedRequestType,
+	CodemarkPlus,
+	GetPostRequestType,
+	CreateThirdPartyPostRequestType
 } from "@codestream/protocols/agent";
 import { CSPost, StreamType, CSReviewStatus } from "@codestream/protocols/api";
 import { logError } from "../logger";
@@ -73,6 +77,7 @@ import { getFileScmError } from "../store/editorContext/reducer";
 import { PostEntryPoint } from "../store/context/types";
 import { middlewareInjector } from "../store/middleware-injector";
 import { PostsActionsType } from "../store/posts/types";
+import { getPost } from "../store/posts/reducer";
 
 export {
 	openPanel,
@@ -289,7 +294,8 @@ export const createPost = (
 				codemark,
 				creatorId: session.userId!,
 				createdAt: new Date().getTime(),
-				pending: true
+				pending: true,
+				files: extra.files
 			})
 		);
 	}
@@ -354,7 +360,8 @@ export const createPost = (
 				parentPostId,
 				mentionedUserIds: mentions,
 				entryPoint: extra.entryPoint,
-				reviewCheckpoint: extra.reviewCheckpoint
+				reviewCheckpoint: extra.reviewCheckpoint,
+				files: extra.files
 			});
 		}
 		const response = await responsePromise;
@@ -724,7 +731,11 @@ export const archiveStream = (streamId: string, archive = true) => async dispatc
 	}
 };
 
-export const invite = (attributes: { email: string; fullName?: string }) => async dispatch => {
+export const invite = (attributes: {
+	email: string;
+	fullName?: string;
+	inviteType?: string;
+}) => async dispatch => {
 	try {
 		const response = await HostApi.instance.send(InviteUserRequestType, attributes);
 		return dispatch(addUsers([response.user]));
@@ -835,13 +846,48 @@ export const setCodemarkStatus = (
 			createPost(
 				response.codemark.streamId,
 				response.codemark.postId,
-				`/me ${describeIssueStatusChange(status)} this issue ${extraText || ""}`
+				`/me ${describeIssueStatusChange(status)} this codemark ${extraText || ""}`
 			)
 		);
 
 		return dispatch(updateCodemarks([response.codemark]));
 	} catch (error) {
 		logError(`failed to change codemark status: ${error}`, { codemarkId });
+		return undefined;
+	}
+};
+
+const describePinnedChange = (value: boolean) => {
+	switch (value) {
+		case true:
+			return "unarchived";
+		case false:
+			return "archived";
+	}
+};
+
+export const setCodemarkPinned = (
+	codemark: CodemarkPlus,
+	value: boolean,
+	extraText?: string
+) => async dispatch => {
+	try {
+		const response = await HostApi.instance.send(SetCodemarkPinnedRequestType, {
+			codemarkId: codemark.id,
+			value
+		});
+
+		await dispatch(
+			createPost(
+				codemark.streamId,
+				codemark.postId,
+				`/me ${describePinnedChange(value)} this codemark ${extraText || ""}`
+			)
+		);
+
+		return dispatch(updateCodemarks([response.codemark]));
+	} catch (error) {
+		logError(`failed to change codemark pinned: ${error}`, { codemarkId: codemark.id });
 		return undefined;
 	}
 };
@@ -879,7 +925,7 @@ export const setReviewStatus = (reviewId: string, status: CSReviewStatus) => asy
 			createPost(
 				response.review.streamId,
 				response.review.postId,
-				`/me ${describeStatusChange(status)} this review`
+				`/me ${describeStatusChange(status)} this feedback request`
 			)
 		);
 		try {
@@ -889,6 +935,24 @@ export const setReviewStatus = (reviewId: string, status: CSReviewStatus) => asy
 			});
 		} catch (err) {
 			logError(`failed to track review status change: ${err}`, { reviewId, status });
+		}
+
+		const message = `_${describeStatusChange(status)} this feedback request_`;
+
+		const { post } = await HostApi.instance.send(GetPostRequestType, {
+			postId: response.review.postId,
+			streamId: response.review.streamId
+		});
+		if (post && post.sharedTo && post.sharedTo.length > 0) {
+			for (const target of post.sharedTo) {
+				await HostApi.instance.send(CreateThirdPartyPostRequestType, {
+					providerId: target.providerId,
+					channelId: target.channelId,
+					providerTeamId: target.teamId,
+					parentPostId: target.postId,
+					text: message
+				});
+			}
 		}
 
 		return dispatch(updateReviews([response.review]));

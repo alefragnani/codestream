@@ -8,7 +8,7 @@ import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/age
 import MessageInput from "./MessageInput";
 import { ButtonRow } from "../src/components/Dialog";
 import { Button } from "../src/components/Button";
-import { api, removeFromMyPullRequests } from "../store/providerPullRequests/actions";
+import { api } from "../store/providerPullRequests/actions";
 import { replaceHtml } from "../utils";
 
 interface Props {
@@ -36,15 +36,7 @@ export const PullRequestInlineComment = styled((props: Props) => {
 	const trackComment = type => {
 		HostApi.instance.track("PR Comment Added", {
 			Host: pr.providerId,
-			"Comment Type": type,
-			"Diff View":
-				props.mode === "files"
-					? "List View"
-					: props.mode === "hunks"
-					? "Diff Hunks"
-					: props.mode === "tree"
-					? "Tree View"
-					: "Unknown"
+			"Comment Type": type
 		});
 	};
 
@@ -72,7 +64,7 @@ export const PullRequestInlineComment = styled((props: Props) => {
 	const startReview = async e => {
 		setIsLoadingMessage("Starting Review...");
 		setIsLoadingStartReview(true);
-		trackComment("Inline Start Review");
+		trackComment("Inline Review Comment");
 
 		await dispatch(
 			api("createPullRequestInlineReviewComment", {

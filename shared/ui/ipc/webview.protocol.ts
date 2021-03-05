@@ -25,6 +25,7 @@ export const ShowCodemarkNotificationType = new NotificationType<ShowCodemarkNot
 // TODO: This should be a request to the webview -- not a notification
 export interface ShowReviewNotification {
 	reviewId: string;
+	openFirstDiff?: boolean;
 	sourceUri?: string;
 }
 export const ShowReviewNotificationType = new NotificationType<ShowReviewNotification, void>(
@@ -36,6 +37,9 @@ export interface ShowPullRequestwNotification {
 	providerId: string;
 	id: string;
 	commentId?: string;
+	/* Either a providerId && id are used, OR a url */
+	url?: string;
+	source?: string;
 }
 export const ShowPullRequestNotificationType = new NotificationType<
 	ShowPullRequestwNotification,
@@ -68,12 +72,28 @@ export interface NewReviewNotification {
 	uri?: string;
 	range?: Range;
 	source?: string;
+	includeLatestCommit?: boolean;
+}
+
+export interface NewPullRequestBranch {
+	name: string;
+	remote?: {
+		name: string;
+		provider?: {
+			id: string;
+			name: string;
+			domain: string;
+		};
+		url?: string;
+	};
+	repoPath: string;
 }
 
 export interface NewPullRequestNotification {
 	uri?: string;
 	range?: Range;
 	source?: string;
+	branch?: NewPullRequestBranch;
 }
 
 export const NewReviewNotificationType = new NotificationType<NewReviewNotification, void>(

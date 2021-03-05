@@ -7,7 +7,7 @@ export enum GitRemoteType {
 	Push = "push"
 }
 
-export class GitRemote {
+export class GitRemote implements GitRemoteLike {
 	readonly uri: URI;
 
 	constructor(
@@ -38,8 +38,21 @@ export class GitRemote {
 	get normalizedUrl(): string {
 		return `${this.domain}/${this.path}`.toLocaleLowerCase();
 	}
+
+	/**
+	 * Returns a protocol relative URL (//) for browser use.
+	 * see: https://en.wikipedia.org/wiki/URL#prurl
+	 *
+	 * @readonly
+	 * @type {string}
+	 * @memberof GitRemote
+	 */
+	get webUrl(): string {
+		return `//${this.domain}/${this.path}`;
+	}
 }
 
 export interface GitRemoteLike {
 	domain: string;
+	uri: URI;
 }

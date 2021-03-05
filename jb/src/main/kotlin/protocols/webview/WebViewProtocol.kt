@@ -60,6 +60,7 @@ object ReviewNotifications {
     class Show(
         val reviewId: String,
         val codemarkId: String? = null,
+        val openFirstDiff: Boolean? = null,
         val sourceUri: String? = null,
         val simulated: Boolean? = null
     ) : WebViewNotification {
@@ -69,7 +70,8 @@ object ReviewNotifications {
     class New(
         val uri: String?,
         val range: Range,
-        val source: String?
+        val source: String?,
+        val includeLatestCommit: Boolean = false
     ) : WebViewNotification {
         override fun getMethod() = "webview/review/new"
     }

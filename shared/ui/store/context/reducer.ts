@@ -6,6 +6,7 @@ import * as actions from "./actions";
 import { ContextActionsType, ContextState, Route } from "./types";
 import { WebviewPanels } from "@codestream/protocols/webview";
 import { SessionActionType } from "../session/types";
+import { CodeStreamState } from "..";
 
 type ContextActions = ActionType<typeof actions>;
 type PreferencesActions = ActionType<typeof preferencesActions>;
@@ -20,10 +21,12 @@ const initialState: ContextState = {
 	createPullRequestReviewId: undefined,
 	currentPullRequest: undefined,
 	pullRequestCheckoutBranch: false,
+	newPullRequestOptions: undefined,
 	isRepositioning: false,
 	issueProvider: undefined,
 	threadId: undefined,
 	currentRepo: undefined,
+	onboardStep: 0,
 
 	panelStack: [WebviewPanels.LandingRedirect],
 
@@ -95,6 +98,8 @@ export function reduceContext(
 			return { ...state, hasFocus: action.payload };
 		case ContextActionsType.SetChannelsMuteAll:
 			return { ...state, channelsMuteAll: action.payload };
+		case ContextActionsType.SetIsFirstPageview:
+			return { ...state, isFirstPageview: action.payload };
 		case ContextActionsType.SetChannelFilter:
 			return { ...state, channelFilter: action.payload };
 		case ContextActionsType.SetCodemarkTagFilter:
@@ -117,6 +122,8 @@ export function reduceContext(
 			return { ...state, codemarksWrapComments: action.payload };
 		case ContextActionsType.SetCurrentReview:
 			return { ...state, currentReviewId: action.payload.reviewId };
+		case ContextActionsType.SetCurrentReviewOptions:
+			return { ...state, currentReviewOptions: action.payload.options };
 		case ContextActionsType.SetCurrentRepo:
 			return {
 				...state,
@@ -138,7 +145,8 @@ export function reduceContext(
 						? {
 								providerId: action.payload.providerId,
 								id: action.payload.id,
-								commentId: action.payload.commentId
+								commentId: action.payload.commentId,
+								source: action.payload.source
 						  }
 						: undefined,
 				pullRequestCheckoutBranch: false
@@ -149,8 +157,16 @@ export function reduceContext(
 				currentPullRequestId: action.payload.prId,
 				pullRequestCheckoutBranch: true
 			};
+		case ContextActionsType.SetNewPullRequestOptions: {
+			return {
+				...state,
+				newPullRequestOptions: action.payload.options
+			};
+		}
 		case ContextActionsType.SetStartWorkCard:
 			return { ...state, startWorkCard: action.payload.card };
+		case ContextActionsType.SetOnboardStep:
+			return { ...state, onboardStep: action.payload.step };
 		case ContextActionsType.SetProfileUser:
 			return { ...state, profileUserId: action.payload };
 		case ContextActionsType.SetShowFeedbackSmiley:
@@ -189,3 +205,8 @@ export function reduceContext(
 			return { ...initialState, ...state };
 	}
 }
+
+export const getTestGroup = (state: CodeStreamState, testName: string): string | undefined => {
+	const company = state.companies[state.teams[state.context.currentTeamId].companyId];
+	return company && company.testGroups ? company.testGroups[testName] : undefined;
+};

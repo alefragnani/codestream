@@ -14,6 +14,7 @@ import { TrelloCardControls } from "./TrelloCardControls";
 import { YouTrackCardControls } from "./YouTrackCardControls";
 import { AzureDevOpsCardControls } from "./AzureDevOpsCardControls";
 import { ClubhouseCardControls } from "./ClubhouseCardControls";
+import { LinearCardControls } from "./LinearCardControls";
 import { ProviderDisplay, PROVIDER_MAPPINGS } from "./types";
 import { ThirdPartyProviderConfig, ThirdPartyProviders } from "@codestream/protocols/agent";
 import { CSMe } from "@codestream/protocols/api";
@@ -23,6 +24,7 @@ import { getConnectedProviderNames } from "@codestream/webview/store/providers/r
 import { updateForProvider } from "@codestream/webview/store/activeIntegrations/actions";
 import { CodeStreamIssueControls } from "./CodeStreamIssueControls";
 import { CSTeamSettings } from "@codestream/protocols/api";
+import { isOnPrem } from "../../store/configs/reducer";
 
 interface ProviderInfo {
 	provider: ThirdPartyProviderConfig;
@@ -36,6 +38,7 @@ interface ConnectedProps {
 	issueProviderConfig?: ThirdPartyProviderConfig;
 	providers: ThirdPartyProviders;
 	teamSettings: CSTeamSettings;
+	isOnPrem: boolean;
 }
 
 interface Props extends ConnectedProps {
@@ -198,6 +201,14 @@ class CrossPostIssueControls extends React.Component<Props, State> {
 				);
 			}
 
+			case "linear": {
+				return (
+					<LinearCardControls provider={providerInfo.provider}>
+						{providerOptions}
+					</LinearCardControls>
+				);
+			}
+
 			default:
 				return null;
 		}
@@ -303,7 +314,8 @@ class CrossPostIssueControls extends React.Component<Props, State> {
 
 	async onChangeProvider(providerInfo: ProviderInfo) {
 		if (
-			providerInfo.provider.needsConfigure &&
+			(providerInfo.provider.needsConfigure ||
+				(providerInfo.provider.needsConfigureForOnPrem && this.props.isOnPrem)) &&
 			!this.providerIsConnected(providerInfo.provider.id)
 		) {
 			const { name, id } = providerInfo.provider;
@@ -384,13 +396,13 @@ class CrossPostIssueControls extends React.Component<Props, State> {
 		if (!provider.isEnterprise) return false;
 		if (!providerInfo.hosts) return false;
 		providerInfo = providerInfo.hosts[provider.id];
-		return providerInfo && !!providerInfo.accessToken;
+		return providerInfo && providerInfo.accessToken ? true : false;
 	}
 }
 
 const EMPTY_HASH = {};
 const mapStateToProps = (state: CodeStreamState): ConnectedProps => {
-	const { users, teams, session, context, providers } = state;
+	const { users, teams, session, context, providers, configs } = state;
 	const currentIssueProviderConfig = context.issueProvider
 		? providers[context.issueProvider]
 		: undefined;
@@ -403,7 +415,8 @@ const mapStateToProps = (state: CodeStreamState): ConnectedProps => {
 		providers,
 		issueProviderConfig: currentIssueProviderConfig,
 		connectedProviderNames: getConnectedProviderNames(state),
-		teamSettings
+		teamSettings,
+		isOnPrem: isOnPrem(configs) || false
 	};
 };
 

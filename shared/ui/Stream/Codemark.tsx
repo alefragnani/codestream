@@ -2,14 +2,19 @@ import cx from "classnames";
 import React from "react";
 import { connect } from "react-redux";
 import { Range } from "vscode-languageserver-protocol";
-import { fetchThread, setCodemarkStatus, setUserPreference, createPost } from "./actions";
+import {
+	fetchThread,
+	setCodemarkStatus,
+	setCodemarkPinned,
+	setUserPreference,
+	createPost
+} from "./actions";
 import Headshot from "./Headshot";
 import Tag from "./Tag";
 import Icon from "./Icon";
 import Menu from "./Menu";
 import { InjectAsComment } from "./InjectAsComment";
 import { RepositionCodemark } from "./RepositionCodemark";
-import { markdownify } from "./Markdowner";
 import Timestamp from "./Timestamp";
 import CodemarkDetails from "./CodemarkDetails";
 import {
@@ -27,10 +32,7 @@ import {
 	CodemarkStatus
 } from "@codestream/protocols/api";
 import { HostApi } from "../webview-api";
-import {
-	FollowCodemarkRequestType,
-	SetCodemarkPinnedRequestType
-} from "@codestream/protocols/agent";
+import { FollowCodemarkRequestType } from "@codestream/protocols/agent";
 import { range, emptyArray, emptyObject } from "../utils";
 import {
 	getUserByCsId,
@@ -81,6 +83,7 @@ import { PullRequestPatch } from "./PullRequestPatch";
 import MarkerActions from "./MarkerActions";
 import { MarkdownText } from "./MarkdownText";
 import { AddReactionIcon, Reactions } from "./Reactions";
+import { Attachments } from "./Attachments";
 
 interface State {
 	hover: boolean;
@@ -99,6 +102,7 @@ interface DispatchProps {
 	editCodemark: typeof editCodemark;
 	fetchThread: typeof fetchThread;
 	setCodemarkStatus: typeof setCodemarkStatus;
+	setCodemarkPinned: typeof setCodemarkPinned;
 	setUserPreference: typeof setUserPreference;
 	getPosts: typeof getPosts;
 	setCurrentCodemark: typeof setCurrentCodemark;
@@ -151,6 +155,7 @@ interface InheritedProps {
 	hidden?: boolean;
 	deselectCodemarks?: Function;
 	wrap?: boolean;
+	hideTags?: boolean;
 }
 
 type Props = InheritedProps & DispatchProps & ConnectedProps;
@@ -272,6 +277,7 @@ export class Codemark extends React.Component<Props, State> {
 			return (
 				<SharingModal
 					codemark={this.props.codemark!}
+					post={this.props.post}
 					onClose={() => this.setState({ shareModalOpen: false })}
 				/>
 			);
@@ -369,17 +375,8 @@ export class Codemark extends React.Component<Props, State> {
 		return <>{blocks}</>;
 	};
 
-	renderTypeIcon() {
-		const { codemark } = this.props;
-		if (!codemark) return null;
-
-		const { externalProvider } = codemark;
-		if (externalProvider) {
-			const providerDisplay = PROVIDER_MAPPINGS[externalProvider];
-			if (providerDisplay && providerDisplay.icon)
-				return <Icon name={providerDisplay.icon} className="type-icon" />;
-		}
-		switch (codemark.type) {
+	renderTypeIcon(type) {
+		switch (type) {
 			case "question":
 				return <Icon name="question" className="type-icon" />;
 			case "bookmark":
@@ -388,6 +385,8 @@ export class Codemark extends React.Component<Props, State> {
 				return <Icon name="trap" className="type-icon" />;
 			case "issue":
 				return <Icon name="issue" className="type-icon" />;
+			case "prcomment":
+				return <Icon name="pull-request" className="type-icon" />;
 			default:
 				return <Icon name="comment" className="type-icon" />;
 		}
@@ -531,6 +530,9 @@ export class Codemark extends React.Component<Props, State> {
 	renderStatus(codemark, menuItems = [] as any[]) {
 		const { isChangeRequest, type, status = "open" } = codemark;
 
+		// resolving codemarks down done under reply box
+		return null;
+
 		if (this.state.isInjecting) return null;
 
 		const resolveItem = { label: "Resolve", action: this.toggleStatus };
@@ -590,7 +592,8 @@ export class Codemark extends React.Component<Props, State> {
 			if (
 				target.tagName === "A" ||
 				target.closest(".post.reply") ||
-				target.closest(".external-provider")
+				target.closest(".external-provider") ||
+				target.closest(".icon-wrapper")
 			)
 				return false;
 		}
@@ -827,10 +830,11 @@ export class Codemark extends React.Component<Props, State> {
 		}
 		this.props.addCodemarks([updatedCodemark]);
 
-		HostApi.instance.send(SetCodemarkPinnedRequestType, {
-			codemarkId: codemark.id,
-			value
-		});
+		this.props.setCodemarkPinned(codemark, value);
+		// HostApi.instance.send(SetCodemarkPinnedRequestType, {
+		// 	codemarkId: codemark.id,
+		// 	value
+		// });
 	};
 
 	toggleLabelIndicators = (_event: React.SyntheticEvent) => {
@@ -866,8 +870,25 @@ export class Codemark extends React.Component<Props, State> {
 		});
 	};
 
+	renderPinnedTooltip() {
+		const { pinnedReplies, pinnedAuthors } = this.props;
+		if (!pinnedReplies) return null;
+		return (
+			<>
+				{pinnedReplies.map((reply, i) => {
+					return (
+						<div key={reply.id}>
+							<HeadshotName size={16} person={pinnedAuthors[i]} />
+							<MarkdownText text={reply.text} />
+						</div>
+					);
+				})}
+			</>
+		);
+	}
+
 	renderCollapsedCodemark() {
-		const { codemark, marker } = this.props;
+		const { codemark, marker, wrap, hideTags, pinnedReplies, pinnedAuthors } = this.props;
 
 		const lines: string | undefined = (() => {
 			if (!marker) return;
@@ -887,11 +908,12 @@ export class Codemark extends React.Component<Props, State> {
 			return null;
 		}
 
-		const renderedTags = this.renderTags(codemark);
+		const color = codemark.pinned ? (codemark.status === "closed" ? "purple" : "green") : "gray";
+		const renderedTags = hideTags ? null : this.renderTags(codemark);
 		return (
 			<div
 				id={`codemark-${codemark.id}`}
-				className={cx("codemark", { collapsed: !this.props.wrap, wrap: this.props.wrap })}
+				className={cx("codemark", { collapsed: !wrap, wrap: wrap })}
 				onClick={this.handleClickCodemark}
 				onMouseEnter={this.handleMouseEnterCodemark}
 				onMouseLeave={this.handleMouseLeaveCodemark}
@@ -899,13 +921,21 @@ export class Codemark extends React.Component<Props, State> {
 				<div className="contents">
 					{this.renderStatus(codemark)}
 					<div style={{ display: "flex", alignItems: "flex-start" }}>
-						<span style={{ flexGrow: 0, flexShrink: 0 }} className={codemark.color}>
-							{this.renderTypeIcon()}
+						<span style={{ flexGrow: 0, flexShrink: 0 }} className={color}>
+							{this.renderTypeIcon(codemark.type)}
 						</span>
 						<div className="body" style={{ flexGrow: 10 }}>
 							<MarkdownText text={codemark.title || codemark.text} inline={true} />
 							{renderedTags && <span className="cs-tag-container">{renderedTags}</span>}
 						</div>
+						{pinnedReplies && pinnedReplies.length > 0 && (
+							<Icon
+								title={this.renderPinnedTooltip()}
+								placement="topRight"
+								name="star"
+								className="subtle"
+							/>
+						)}
 						{codemark.numReplies > 0 && (
 							<span className="badge" style={{ marginLeft: "10px", flexGrow: 0, flexShrink: 0 }}>
 								{codemark.numReplies}
@@ -961,40 +991,6 @@ export class Codemark extends React.Component<Props, State> {
 
 		return null;
 	}
-
-	renderAttachments = post => {
-		if (post.files && post.files.length) {
-			return post.files.map(file => {
-				// console.log(file);
-				//<img src={preview.url} width={preview.width} height={preview.height} />
-				const { type, url, name, title, preview } = file;
-				if (type === "image") {
-					return (
-						<div className="thumbnail">
-							<a href={url}>{title}</a>
-						</div>
-					);
-				} else if (type === "post") {
-					return (
-						<div className="external-post">
-							<a href={url}>{title}</a>
-							<div className="preview" dangerouslySetInnerHTML={{ __html: preview }} />
-						</div>
-					);
-				} else {
-					return (
-						<div className="attachment">
-							<a href={url}>{title}</a>
-							<pre>
-								<code>{preview}</code>
-							</pre>
-						</div>
-					);
-				}
-			});
-		}
-		return null;
-	};
 
 	renderReplyCount = post => {
 		let message = "";
@@ -1080,6 +1076,32 @@ export class Codemark extends React.Component<Props, State> {
 						{providerDisplay.displayName}
 						<span className="external-url">{codemark.externalProviderUrl}</span>
 					</Link>
+				</div>
+			);
+		}
+		return null;
+	};
+
+	renderShares = () => {
+		const { post } = this.props;
+
+		if (post && post.sharedTo && post.sharedTo.length > 0) {
+			return (
+				<div className="related">
+					<div className="related-label">Shared To</div>
+					{post.sharedTo.map(target => {
+						const providerDisplay = PROVIDER_MAPPINGS[target.providerId];
+						return (
+							<Link className="external-link" href={target.url}>
+								{providerDisplay && providerDisplay.icon && (
+									<span>
+										<Icon name={providerDisplay.icon} />
+									</span>
+								)}
+								{target.channelName}
+							</Link>
+						);
+					})}
 				</div>
 			);
 		}
@@ -1303,6 +1325,13 @@ export class Codemark extends React.Component<Props, State> {
 
 		menuItems.push({ label: "Copy link", action: this.copyPermalink });
 
+		if (codemark.status === "closed") {
+			menuItems.push({
+				label: "Reopen",
+				action: () => this.openIssue()
+			});
+		}
+
 		if (codemark.pinned) {
 			menuItems.push({
 				label: "Archive",
@@ -1489,7 +1518,7 @@ export class Codemark extends React.Component<Props, State> {
 						<div className="header">
 							{!renderExpandedBody && type === "bookmark" ? (
 								<>
-									<span className={codemark.color}>{this.renderTypeIcon()}</span>
+									<span className={codemark.color}>{this.renderTypeIcon(codemark.type)}</span>
 									<MarkdownText text={codemark.title || codemark.text} inline={true} />
 									<div className="right">
 										<span onClick={this.handleMenuClick}>
@@ -1515,11 +1544,9 @@ export class Codemark extends React.Component<Props, State> {
 										<Timestamp relative time={codemark.createdAt} />
 									</div>
 									<div className="right" style={{ alignItems: "center" }}>
-										{type !== CodemarkType.Issue && (
-											<span onClick={this.handleMenuClick}>
-												<Icon name="kebab-vertical" className="kebab-vertical clickable" />
-											</span>
-										)}
+										<span onClick={this.handleMenuClick}>
+											<Icon name="kebab-vertical" className="kebab-vertical clickable" />
+										</span>
 										{this.renderStatus(codemark, menuItems)}
 										{this.props.post && <AddReactionIcon post={this.props.post} />}
 										{/* this.renderKeybinding(codemark) */}
@@ -1568,6 +1595,7 @@ export class Codemark extends React.Component<Props, State> {
 							postAction={this.props.postAction}
 							displayType={this.props.displayType}
 							skipMarkers={this.skipMarkers}
+							post={this.props.post}
 						>
 							<div className="description">
 								{/* this.renderVisibilitySelected() */}
@@ -1589,6 +1617,7 @@ export class Codemark extends React.Component<Props, State> {
 									</div>
 								)}
 								{this.renderTagsAndAssigneesSelected(codemark)}
+								{this.props.post && <Attachments post={this.props.post} />}
 								{description && (
 									<div className="related">
 										<div className="related-label">Description</div>
@@ -1603,6 +1632,7 @@ export class Codemark extends React.Component<Props, State> {
 								{this.props.post && <Reactions className="no-pad-left" post={this.props.post} />}
 								{this.renderExternalLink(codemark)}
 								{this.renderRelatedCodemarks()}
+								{this.renderShares()}
 								{this.renderPinnedRepliesSelected()}
 							</div>
 						</CodemarkDetails>
@@ -1730,10 +1760,6 @@ export class Codemark extends React.Component<Props, State> {
 											onClick={e => {
 												e.preventDefault();
 												HostApi.instance.send(OpenUrlRequestType, { url: action.uri });
-												HostApi.instance.track("PR Comment Action", {
-													Host: marker.externalContent!.provider.name,
-													"Action Label": action.label
-												});
 											}}
 										>
 											{action.label}
@@ -1798,8 +1824,8 @@ export class Codemark extends React.Component<Props, State> {
 			//@ts-ignore
 			const range = marker.range;
 			if (range) {
-				if (range.start.line == range.end.line) return `Line ${range.start.line}`;
-				else return `Lines ${range.start.line}-${range.end.line}`;
+				if (range.start.line == range.end.line) return `Line ${range.start.line + 1}`;
+				else return `Lines ${range.start.line + 1}-${range.end.line + 1}`;
 			} else return;
 		})();
 
@@ -1829,8 +1855,8 @@ export class Codemark extends React.Component<Props, State> {
 			>
 				<div className="contents">
 					<div className="body" style={{ display: "flex", alignItems: "flex-start" }}>
-						<span style={{ flexGrow: 0, flexShrink: 0 }}>
-							<Icon name={externalContent.provider.icon || "codestream"} className="margin-right" />
+						<span style={{ flexGrow: 0, flexShrink: 0 }} className="gray">
+							{this.renderTypeIcon(marker["type"])}
 						</span>
 						<div>
 							<MarkdownText text={marker.summary} inline={true} />
@@ -2115,6 +2141,7 @@ export default connect(
 	mapStateToProps,
 	{
 		setCodemarkStatus,
+		setCodemarkPinned,
 		setUserPreference,
 		deleteCodemark,
 		editCodemark,

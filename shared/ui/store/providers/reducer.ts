@@ -3,7 +3,12 @@ import * as actions from "./actions";
 import { getUserProviderInfo } from "./actions";
 import { ProvidersState, ProvidersActionsType } from "./types";
 import { CodeStreamState } from "..";
-import { CSMe, CSProviderInfos } from "@codestream/protocols/api";
+import {
+	CSMe,
+	CSMSTeamsProviderInfo,
+	CSProviderInfos,
+	CSSlackProviderInfo
+} from "@codestream/protocols/api";
 import { mapFilter, safe } from "@codestream/webview/utils";
 import { ThirdPartyProviderConfig } from "@codestream/protocols/agent";
 import { createSelector } from "reselect";
@@ -39,27 +44,35 @@ function isNameOption(o: ProviderPropertyOption): o is { name: string } {
 	return (o as any).name != undefined;
 }
 
-interface LabelHash {
+export interface LabelHash {
 	PullRequest: string;
+	PullRequests: string;
 	Pullrequest: string;
 	pullrequest: string;
 	PR: string;
+	PRs: string;
 	pr: string;
 }
 
 const MRLabel = {
 	PullRequest: "Merge Request",
+	PullRequests: "Merge Requests",
 	Pullrequest: "Merge request",
 	pullrequest: "merge request",
+	pullrequests: "merge requests",
 	PR: "MR",
+	PRs: "MRs",
 	pr: "mr"
 };
 
 const PRLabel = {
 	PullRequest: "Pull Request",
+	PullRequests: "Pull Requests",
 	Pullrequest: "Pull request",
 	pullrequest: "pull request",
+	pullrequests: "pull requests",
 	PR: "PR",
+	PRs: "PRs",
 	pr: "pr"
 };
 
@@ -121,11 +134,22 @@ export const isConnectedSelectorFriendly = (
 		const providerName = option.name;
 		const info = getUserProviderInfo(currentUser, providerName, currentTeamId);
 		switch (providerName) {
-			case "jiraserver":
 			case "github_enterprise":
 			case "gitlab_enterprise":
 			case "bitbucket_server": {
-				// enterprise/on-prem providers need the `hosts` validated
+				// these providers now only depend on having a personal access token
+				if (info != undefined) {
+					const isConnected = info.accessToken != undefined;
+					if (isConnected && accessTokenError) {
+						// see comment on accessTokenError in the method parameters, above
+						accessTokenError.accessTokenError = info.tokenError;
+					}
+					return isConnected;
+				}
+				return false;
+			}
+			case "jiraserver": {
+				// jiraserver is now the only enterprise/on-prem provider that actually uses hosts
 				return (
 					info != undefined &&
 					info.hosts != undefined &&
@@ -244,12 +268,16 @@ export const getConnectedSharingTargets = (state: CodeStreamState) => {
 
 	if (currentUser.providerInfo == undefined) return [];
 
-	const slackProviderInfo = getUserProviderInfo(currentUser, "slack", state.context.currentTeamId);
+	const slackProviderInfo = getUserProviderInfo(
+		currentUser,
+		"slack",
+		state.context.currentTeamId
+	) as CSSlackProviderInfo;
 	const msteamsProviderInfo = getUserProviderInfo(
 		currentUser,
 		"msteams",
 		state.context.currentTeamId
-	);
+	) as CSMSTeamsProviderInfo;
 
 	let teams: ThirdPartyTeam[] = [];
 

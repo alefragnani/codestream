@@ -61,7 +61,10 @@ import {
 	ReactToPostRequestType,
 	ReactToPostResponse,
 	ReportingMessageType,
-	ReviewPlus
+	ReviewPlus,
+	UpdatePostSharingDataRequest,
+	UpdatePostSharingDataRequestType,
+	UpdatePostSharingDataResponse
 } from "../protocol/agent.protocol";
 import {
 	CodemarkType,
@@ -572,7 +575,7 @@ function trackPostCreation(
 	});
 }
 
-function trackReviewPostCreation(
+export function trackReviewPostCreation(
 	review: ReviewPlus,
 	totalExcludedFilesCount: number,
 	reviewChangesetsSizeInBytes: number,
@@ -1111,7 +1114,8 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 			parentPostId: request.parentPostId,
 			dontSendEmail: !!request.attributes.crossPostIssueValues,
 			mentionedUserIds: request.mentionedUserIds,
-			addedUsers: request.addedUsers
+			addedUsers: request.addedUsers,
+			files: request.files
 		});
 
 		const { markers } = response!;
@@ -1127,7 +1131,8 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 						permalink: codemark.permalink
 					}
 				},
-				request.attributes.crossPostIssueValues
+				request.attributes.crossPostIssueValues,
+				request.ideName
 			);
 
 			if (cardResponse != undefined) {
@@ -1189,7 +1194,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 			const changeset = await this.buildChangeset(repoChange);
 
 			// WTF typescript, this is defined above
-			if (reviewRequest.reviewChangesets && changeset) {
+			if (reviewRequest.reviewChangesets) {
 				reviewRequest.reviewChangesets.push(changeset);
 			}
 			/*for (const patch of localDiffs) {
@@ -1265,7 +1270,8 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 			streamId: stream.id,
 			dontSendEmail: false,
 			mentionedUserIds: request.mentionedUserIds,
-			addedUsers: request.addedUsers
+			addedUsers: request.addedUsers,
+			files: request.attributes.files
 		});
 
 		review = response.review!;
@@ -1288,11 +1294,14 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 	async buildChangeset(
 		repoChange: CSRepoChange,
 		amendingReviewId?: string
-	): Promise<CSTransformedReviewChangeset | undefined> {
+	): Promise<CSTransformedReviewChangeset> {
 		// FIXME the logic for amendments became significantly different, so it should be a separate method
 		//  or a builder class similar to MarkersBuilder
 		const { scm, includeSaved, includeStaged, excludedFiles, newFiles } = repoChange;
-		if (!scm || !scm.repoId || !scm.branch || !scm.commits) return undefined;
+		if (!scm) throw new Error("Unable to create review: SCM info not found");
+		if (!scm.repoId) throw new Error("Unable to create review: git repository not found");
+		if (!scm.branch) throw new Error("Unable to create review: branch not found");
+		if (!scm.commits) throw new Error("Unable to create review: commit history not found");
 		const { git, reviews, scm: scmManager } = SessionContainer.instance();
 
 		let checkpoint = 0;
@@ -1784,6 +1793,11 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 		return this.session.api.editPost(request);
 	}
 
+	@lspHandler(UpdatePostSharingDataRequestType)
+	sharePost(request: UpdatePostSharingDataRequest): Promise<UpdatePostSharingDataResponse> {
+		return this.session.api.updatePostSharingData(request);
+	}
+
 	@lspHandler(MarkPostUnreadRequestType)
 	markPostUnread(request: MarkPostUnreadRequest): Promise<MarkPostUnreadResponse> {
 		return this.session.api.markPostUnread(request);
@@ -1836,6 +1850,13 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					linefeed: "\n",
 					anchorFormat: "${text} ${url}"
 				};
+			case CodeDelimiterStyles.HTML_LIGHT_MARKUP:
+				return {
+					start: "",
+					end: "",
+					linefeed: "\n",
+					anchorFormat: '<a href="${url}">${text}</a>'
+				};
 			// https://docs.microsoft.com/en-us/azure/devops/project/wiki/markdown-guidance?view=azure-devops
 			case CodeDelimiterStyles.HTML_MARKUP:
 				return {
@@ -1884,7 +1905,8 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 			};
 			remotes?: string[];
 		},
-		attributes: CrossPostIssueValues
+		attributes: CrossPostIssueValues,
+		ideName?: string
 	) => {
 		const delimiters = this.getCodeDelimiters(attributes.codeDelimiterStyle);
 		const { linefeed, start, end } = delimiters;
@@ -1970,7 +1992,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					}
 				}
 				if (links.length) {
-					description += links.join(" · ") + linefeed + linefeed;
+					description += links.join(" · ") + linefeed;
 					createdAtLeastOne = true;
 				}
 			}
@@ -1982,13 +2004,30 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 		try {
 			let response;
 			const { providerRegistry } = SessionContainer.instance();
+
+			const codeStreamLink = "https://codestream.com/?utm_source=cs&utm_medium=issue&utm_campaign=";
+			let createdFrom = "";
+			switch (ideName) {
+				case "VSC":
+					createdFrom = "from VS Code";
+					break;
+				case "JETBRAINS":
+					createdFrom = "from JetBrains";
+					break;
+				case "VS":
+					createdFrom = "from Visual Studio";
+					break;
+				case "ATOM":
+					createdFrom = "from Atom";
+					break;
+			}
 			switch (attributes.issueProvider.name) {
 				case "jira":
 				case "jiraserver": {
 					response = await providerRegistry.createCard({
 						providerId: attributes.issueProvider.id,
 						data: {
-							description,
+							description: `${description}\n~Created ${createdFrom} using [CodeStream|${codeStreamLink}jira]~`,
 							summary: providerCardRequest.codemark.title,
 							issueType: attributes.issueType,
 							project: attributes.boardId,
@@ -2004,7 +2043,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 							listId: attributes.listId,
 							name: providerCardRequest.codemark.title,
 							assignees: attributes.assignees,
-							description
+							description: `${description}\nCreated ${createdFrom} using [CodeStream](${codeStreamLink}trello)`
 						}
 					});
 					break;
@@ -2014,7 +2053,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					response = await providerRegistry.createCard({
 						providerId: attributes.issueProvider.id,
 						data: {
-							description,
+							description: `${description}\n<sup>Created ${createdFrom} using [CodeStream](${codeStreamLink}github)</sup>`,
 							title: providerCardRequest.codemark.title,
 							repoName: attributes.boardName,
 							assignees: attributes.assignees
@@ -2027,7 +2066,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					response = await providerRegistry.createCard({
 						providerId: attributes.issueProvider.id,
 						data: {
-							description,
+							description: `${description}\n<sup>Created ${createdFrom} using [CodeStream](${codeStreamLink}gitlab)</sup>`,
 							title: providerCardRequest.codemark.title,
 							repoName: attributes.boardName,
 							assignee: attributes.assignees && attributes.assignees[0]
@@ -2039,7 +2078,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					response = await providerRegistry.createCard({
 						providerId: attributes.issueProvider.id,
 						data: {
-							description,
+							description: `${description}\n<sup>Created ${createdFrom} using [CodeStream](${codeStreamLink}youtrack)</sup>`,
 							name: providerCardRequest.codemark.title,
 							boardId: attributes.board.id,
 							assignee: attributes.assignees && attributes.assignees[0]
@@ -2051,7 +2090,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					response = await providerRegistry.createCard({
 						providerId: attributes.issueProvider.id,
 						data: {
-							description,
+							description: `<body>${description}\nCreated ${createdFrom} using <a href="${codeStreamLink}asana">CodeStream</a></body>`,
 							boardId: attributes.boardId,
 							listId: attributes.listId,
 							name: providerCardRequest.codemark.title,
@@ -2064,7 +2103,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					response = await providerRegistry.createCard({
 						providerId: attributes.issueProvider.id,
 						data: {
-							description,
+							description: `${description}\nCreated ${createdFrom} using [CodeStream](${codeStreamLink}bitbucket)`,
 							title: providerCardRequest.codemark.title,
 							repoName: attributes.boardName,
 							assignee: attributes.assignees && attributes.assignees[0]
@@ -2076,7 +2115,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					response = await providerRegistry.createCard({
 						providerId: attributes.issueProvider.id,
 						data: {
-							description,
+							description: `${description}\n<sup>Created ${createdFrom} using <a href="${codeStreamLink}azuredevops">CodeStream</a></sup>`,
 							title: providerCardRequest.codemark.title,
 							boardId: attributes.board.id,
 							assignee: attributes.assignees && attributes.assignees[0]
@@ -2089,7 +2128,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					response = await providerRegistry.createCard({
 						providerId: attributes.issueProvider.id,
 						data: {
-							description,
+							description: `${description}\n\n <sup>Created ${createdFrom} using [CodeStream](${codeStreamLink}clubhouse)</sup>`,
 							name: providerCardRequest.codemark.title,
 							projectId: attributes.projectId,
 							assignees: attributes.assignees
@@ -2097,6 +2136,21 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					});
 					break;
 				}
+
+				case "linear": {
+					response = await providerRegistry.createCard({
+						providerId: attributes.issueProvider.id,
+						data: {
+							description: `${description}\n\n Created ${createdFrom} using [CodeStream](${codeStreamLink}linear)`,
+							name: providerCardRequest.codemark.title,
+							projectId: attributes.projectId,
+							assignees: attributes.assignees
+						}
+					});
+					Logger.log("GOT RESPONSE: " + JSON.stringify(response, null, 4));
+					break;
+				}
+
 				default:
 					return undefined;
 			}
@@ -2114,7 +2168,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 	};
 }
 
-async function resolveCreatePostResponse(response: CreatePostResponse) {
+export async function resolveCreatePostResponse(response: CreatePostResponse) {
 	const container = SessionContainer.instance();
 	if (response.codemark) {
 		await container.codemarks.resolve({

@@ -35,6 +35,7 @@ import OfflineBanner from "./OfflineBanner";
 import { PRProviderErrorBanner } from "./PRProviderErrorBanner";
 import ConfigureAzureDevOpsPanel from "./ConfigureAzureDevOpsPanel";
 import ConfigureYouTrackPanel from "./ConfigureYouTrackPanel";
+import ConfigureJiraPanel from "./ConfigureJiraPanel";
 import ConfigureJiraServerPanel from "./ConfigureJiraServerPanel";
 import ConfigureEnterprisePanel from "./ConfigureEnterprisePanel";
 import ConfigureTokenProviderPanel from "./ConfigureTokenProviderPanel";
@@ -42,7 +43,6 @@ import { PrePRProviderInfoModal } from "./PrePRProviderInfoModal";
 import * as actions from "./actions";
 import { canCreateCodemark, editCodemark } from "../store/codemarks/actions";
 import { ComponentUpdateEmitter, safe, toMapBy, isNotOnDisk, uriToFilePath } from "../utils";
-import { confirmPopup } from "./Confirm";
 import { ModalRoot, Modal } from "./Modal";
 import { getPostsForStream, getPost } from "../store/posts/reducer";
 import { isFeatureEnabled } from "../store/apiVersioning/reducer";
@@ -69,12 +69,14 @@ import { getFileScmError } from "../store/editorContext/reducer";
 import { CodemarkView } from "./CodemarkView";
 import { Review } from "./Review";
 import { Link } from "./Link";
-
 import {
 	setCurrentStream,
 	setNewPostEntry,
+	setIsFirstPageview,
 	setCurrentReview,
+	setCurrentReviewOptions,
 	setCurrentPullRequest,
+	setNewPullRequestOptions,
 	setCurrentCodemark
 } from "../store/context/actions";
 import { last as _last, findLastIndex } from "lodash-es";
@@ -84,6 +86,7 @@ import { PRInfoModal } from "./SpatialView/PRInfoModal";
 import { GlobalNav } from "./GlobalNav";
 import { CheckEmailVsGit } from "./CheckEmailVsGit";
 import { EnjoyingCodeStream } from "./EnjoyingCodeStream";
+import { getTestGroup } from "../store/context/reducer";
 
 const EMAIL_MATCH_REGEX = new RegExp(
 	"[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*",
@@ -102,6 +105,13 @@ export class SimpleStream extends PureComponent {
 	};
 
 	componentDidMount() {
+		const { isFirstPageview, onboardingTestGroup } = this.props;
+
+		if (isFirstPageview && (onboardingTestGroup === "tour" || onboardingTestGroup === "educate")) {
+			this.props.openPanel(WebviewPanels.Onboard);
+		}
+		this.props.setIsFirstPageview(false);
+
 		if (this.props.activePanel === "main" && this.props.postStreamId != undefined) {
 			HostApi.instance.track("Page Viewed", { "Page Name": "Stream" });
 		}
@@ -146,6 +156,12 @@ export class SimpleStream extends PureComponent {
 		}
 		this.props.setCurrentReview("");
 		this.props.setCurrentPullRequest("");
+		this.props.setNewPullRequestOptions(undefined);
+		if (e) {
+			this.props.setCurrentReviewOptions({
+				includeLatestCommit: e.includeLatestCommit
+			});
+		}
 		this.props.openPanel(WebviewPanels.NewReview);
 	}
 
@@ -156,6 +172,7 @@ export class SimpleStream extends PureComponent {
 		}
 		this.props.setCurrentReview("");
 		this.props.setCurrentPullRequest("");
+		this.props.setNewPullRequestOptions({ branch: e.branch });
 		this.props.openPanel(WebviewPanels.NewPullRequest);
 	}
 
@@ -214,12 +231,13 @@ export class SimpleStream extends PureComponent {
 	}
 
 	render() {
-		const { showHeadshots } = this.props;
+		const { showHeadshots, isFirstPageview } = this.props;
 		let { activePanel, activeModal } = this.props;
 		const { q } = this.state;
 
-		// console.warn("RENDERING STREAM");
 		if (activePanel === WebviewPanels.LandingRedirect) activePanel = WebviewPanels.Sidebar;
+
+		if (isFirstPageview) return null;
 
 		const isConfigurationPanel =
 			activePanel && activePanel.match(/^configure\-(provider|enterprise)-/);
@@ -282,7 +300,7 @@ export class SimpleStream extends PureComponent {
 		const enterpriseProvider = activePanel.startsWith("configure-enterprise-");
 		const [, , providerName, providerId, origin] = configureProviderInfo || [];
 		const customConfigureProvider = providerName
-			? ["azuredevops", "youtrack", "jiraserver"].find(name => name === providerName)
+			? ["azuredevops", "youtrack", "jiraserver", "jira"].find(name => name === providerName)
 			: null;
 
 		// console.warn("ACTIVE: ", activePanel);
@@ -292,14 +310,22 @@ export class SimpleStream extends PureComponent {
 				<OfflineBanner />
 				<PRProviderErrorBanner />
 				<ModalRoot />
-				<CheckEmailVsGit />
+
+				{/* don't want to show the check email if you're onboarding */}
+				{activePanel === WebviewPanels.Sidebar && <CheckEmailVsGit />}
+
 				{/*<EnjoyingCodeStream />*/}
+
 				{this.state.propsForPrePRProviderInfoModal && (
 					<PrePRProviderInfoModal {...this.state.propsForPrePRProviderInfoModal} />
 				)}
 				<div id="confirm-root" />
-				<GlobalNav />
-				{activePanel === WebviewPanels.Onboard ? <Onboard /> : <Sidebar />}
+				{activePanel !== WebviewPanels.Onboard && <GlobalNav />}
+				{activePanel === WebviewPanels.Onboard ? (
+					<Onboard type={this.props.onboardingTestGroup} />
+				) : (
+					<Sidebar />
+				)}
 				{activeModal && (
 					<Modal translucent>
 						{activeModal === WebviewModals.CreateTeam && <CreateTeamPage />}
@@ -397,6 +423,9 @@ export class SimpleStream extends PureComponent {
 							{configureProviderInfo && !enterpriseProvider && !customConfigureProvider && (
 								<ConfigureTokenProviderPanel providerId={providerId} originLocation={origin} />
 							)}
+							{customConfigureProvider === "jira" && (
+								<ConfigureJiraPanel providerId={providerId} originLocation={origin} />
+							)}
 							{customConfigureProvider === "youtrack" && (
 								<ConfigureYouTrackPanel providerId={providerId} originLocation={origin} />
 							)}
@@ -424,6 +453,7 @@ export class SimpleStream extends PureComponent {
 		this.setActivePanel(WebviewPanels.Sidebar);
 		this.setActiveModal();
 		this.setCurrentPullRequest();
+		this.props.setNewPullRequestOptions(undefined);
 		this.setCurrentReview();
 	};
 
@@ -500,7 +530,6 @@ export class SimpleStream extends PureComponent {
 		}
 	};
 
-	// dead code
 	setActivePanel = panel => {
 		this.props.openPanel(panel);
 	};
@@ -633,7 +662,7 @@ export class SimpleStream extends PureComponent {
  * @param {Object} state.teams
  **/
 const mapStateToProps = state => {
-	const { configs, context, session, streams, teams } = state;
+	const { configs, context, session, streams, companies } = state;
 
 	// FIXME -- eventually we'll allow the user to switch to other streams, like DMs and channels
 	const teamStream = getStreamForTeam(streams, context.currentTeamId) || {};
@@ -644,6 +673,7 @@ const mapStateToProps = state => {
 	// rely on it here
 	// const { scmInfo } = state.editorContext;
 
+	// console.warn("COMP: ", companies);
 	return {
 		currentCodemarkId: context.currentCodemarkId,
 		currentMarkerId: context.currentMarkerId,
@@ -658,16 +688,21 @@ const mapStateToProps = state => {
 		showHeadshots: configs.showHeadshots,
 		postStream,
 		postStreamId: postStream.id,
-		composeCodemarkActive: context.composeCodemarkActive
+		composeCodemarkActive: context.composeCodemarkActive,
+		isFirstPageview: context.isFirstPageview,
+		onboardingTestGroup: getTestGroup(state, "onboard-edu")
 	};
 };
 
 export default connect(mapStateToProps, {
 	...actions,
 	setCurrentReview,
+	setCurrentReviewOptions,
 	setCurrentPullRequest,
+	setNewPullRequestOptions,
 	setCurrentStream,
 	setCurrentCodemark,
 	editCodemark,
-	setNewPostEntry
+	setNewPostEntry,
+	setIsFirstPageview
 })(injectIntl(SimpleStream));

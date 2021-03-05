@@ -1,5 +1,179 @@
 # Change Log
 
+## [10.6.2] - 2021-2-26
+
+### Added
+
+- Addresses [#411](https://github.com/TeamCodeStream/CodeStream/issues/411) &mdash; Case sensitive branch names
+
+### Changed
+
+- Even if Line Number is the selected sort, the sorting of the Codemarks section is always Date unless Current File is the selected filter
+
+### Fixed
+
+- Fixes an issue with connecting on on-prem services, such as GitHub Entperise and Bitbucket Server
+- Addresses [#408](https://github.com/TeamCodeStream/CodeStream/issues/408) &mdash; Codemark not showing code block with Russian characters
+- Fixes an issue when clicking on icons in the editor gutter for pull request comments from Bitbucket or GitLab
+- Fixes an issue with viewing diffs for pull requests from forks
+- Fixes an issue where manually entering triple backticks when adding a code block to a post breaks the formatting of the post
+- Fixes an issue where the contents of the Codemarks section would unecessarily reload when switching files within the same repo
+- Fixes an issue when clicking to see git diff in review window would trigger an undefined error
+
+## [10.6.1] - 2021-2-19
+
+- Fixes an issue where a codemark is being created against the wrong file/location when the panel is not pinned
+
+## [10.6.0] - 2021-2-19
+
+### Added
+
+- Adds the ability to review a pull request by a specific commit
+- Adds a new onboarding tour focussed on educating new users on CodeStream's key features
+- Adds a "Shared To" section to codemarks and feedback requests indicating when the item was shared to Slack
+- Adds an [automated post to Slack](https://www.codestream.com/blog/codestream-10-6-discussion-resolutions-published-to-slack) when a shared codemark or feedback request has been resolved- Adds the feedback request title to the toast notification when the request is approved, rejected ot reopened
+
+### Fixed
+
+- Fixes an issue with “disable strict SSL” setting not working for self-hosted services
+- Fixes an issue with an HTTPS-Required popup incorrectly showing for new on-prem installations
+- Addresses [#388](https://github.com/TeamCodeStream/CodeStream/issues/388) &mdash; Codemark issue with filenames containing "+" char
+- Fixes an unexpected error when clicking on a pull request
+- Fixes an issue with the count in the heading of the Coedmarks section being incorrect when filter isn't set to the current file
+- Fixes an issue commenting in a pull request in a file in a folder that doesn't exist in your current branch 
+- Fixes an issue with the Slack integration not appearing as a green tile on the Integrations page immediately after connecting
+- Fixes an issue with the Locate button not working in a feedback request when you don't have the given repo open
+- Fixes an issue with commenting on code in files that are symlinks
+- Fixes an issue where a codemark is being created against the wrong file/location when the panel is not pinned
+
+## [10.5.1] - 2021-2-10
+
+### Fixed
+
+- Fixes an issue that caused an 'Unexpected Error' screen on sign-in
+
+## [10.5.0] - 2021-2-9
+
+### Added
+
+- Adds checkbox to the Notifications page to control the new Feedback Request Reminder email notification
+
+### Changed
+
+- Comment codemarks can now be resolved
+- The Codemarks section of the sidebar breaks out codemarks by status (open, resolved, archived) with new colors for each
+- Default filters on the Search page are now Open Issues, Open Code Comments, and Open Feedback Requests, and is:open / is:closed advanced syntax now includes comment codemarks
+- CodeStream on-prem customers can now connect to Jira's cloud service using API tokens instead of OAuth
+
+### Fixed
+
+- Fixes issue that prevented pull request creation on github.io repositories
+- Fixes an issue with invitation codes for on-prem customers not correctly setting the CodeStream server URL for the invitee
+- Fixes an issue when commenting on a pull request that has been sitting open for more than an hour
+- Fixes a formatting issue with issues created on Asana
+
+## [10.4.3] - 2021-2-6
+
+### Fixed
+
+- Addresses [#392](https://github.com/TeamCodeStream/CodeStream/issues/392) &mdash; Codemark not showing code block when created from Windows 
+
+## [10.4.2] - 2021-1-29
+
+### Added
+
+- Adds a new tree view in the Changed Files section of feedback requests
+
+### Changed
+
+- Stop sending toast notifications for closed pull requests
+
+### Fixed
+
+- Fixes an issue with commenting in a feedback request in a file with an @ in the name
+- Fixes an issue preventing you from being able to edit a feedback request
+- Fixes an issue creating an issue codemark on GitLab cloud
+
+## [10.4.1] - 2021-1-26
+
+### Added
+
+- Adds the ability to attach files to a feedback request, or to a reply
+- Adds support for custom queries for Jira Server in the Issues section
+
+### Changed
+
+- Automatically populate all reviewer slots in a feedback request, going to recent committers if necessary, if one of the "authorship" assignment options is selected
+
+### Fixed
+
+- Addresses [#380](https://github.com/TeamCodeStream/CodeStream/issues/380) &mdash; Viewing a PR with status checks on GitHub Enterprise generates an error 
+- Addresses [#378](https://github.com/TeamCodeStream/CodeStream/issues/378) &mdash; AggregateException thrown in VS 2019 with CodeStream installed when trying to activate IntelliSense
+- Addresses [#376](https://github.com/TeamCodeStream/CodeStream/issues/376) &mdash; Can't exit preview mode when creating a feedback request
+- Fixes an issue where you'd end up in an infinite "Fetching repo..." loop trying to create an issue on Bitbucket
+- Fixes an issue creating a permalink when in a WSL environment
+
+## [10.4.0] - 2021-1-19
+
+### Added
+
+- Adds support for [file attachments](https://www.codestream.com/blog/codestream-10-4-file-attachments-github-status-checks) when creating comment or issue codemarks
+- Adds support for GitHub status checks in pull requests rendered in CodeStream
+- When selecting a Linear issue to start work, the branch name associated with the issue is used
+- Adds the ability to pull the latest, if the base branch is behind origin, when previewing diffs while creating a pull request
+
+### Changed
+
+- Prevent the creation of codemarks when in a preview diff while submitting a feedback request
+
+### Fixed
+
+- Addresses [#353](https://github.com/TeamCodeStream/CodeStream/issues/353) &mdash; Codemark glyphs do not show up in WSL environment
+- Fixes an issue where starting work on an issue creates a feature branch against the wrong base
+- Fixes a data integrity issue that led to a small group of users getting an error clicking on a codemark
+- Fixes with the fetching of too much history data from PubNub if client clock is inaccurately set
+- Performance improvements
+- Fixes an issue with feedback requests assigned to you not appearing in the Approved or Needs Work sections without a reload
+
+## [10.3.0] - 2021-1-8
+
+### Added
+
+- Adds a new integration with the Linear issue-tracking service
+- Adds an [integration with GitLens](https://medium.com/teamcodestream/how-we-extended-gitlens-pull-request-functionality-in-visual-studio-code-f4dbecbea4c2) which allows you to create and view pull requests using CodeStream
+
+### Fixed
+
+- Addresses [#364](https://github.com/TeamCodeStream/CodeStream/issues/364) &mdash; Copy button in PR is copying the base branch name instead of the compare branch
+- Fixes an issue where the Open File button in the Tree View of the list of files in a PR wouldn't open the correct file if sections of the tree were collapsed
+
+## [10.2.2] - 2020-12-30
+
+### Added
+
+- Split the Feedback Requests section of the sidebar into sections for Open, Approved and Needs Work 
+- When selecting a ticket to start work, added an option to pull latest if base branch is behind origin
+- Added the ability to set a default base branch per repo when creating a feature branch  
+
+## [10.2.1] - 2020-12-23
+
+### Added
+
+- Adds a new onboarding flow for some users that guides them through the setup of integrations and creating their first code comment
+- Adds support for remotes using SSH aliases
+
+### Changed
+
+- When creating a feedback request only commits from current user are checked by default, and only if they include the most recent commit
+- The list in the Pull Requests section automatically updates when you open, close or merge a pull request from CodeStream
+- The hovers for icons in the editor gutter now make it clear if the discussion was a comment, issue, feedback request or pull request
+- Optimization of git operations to gather commits when creating a feedback request
+
+### Fixed
+
+- Fixes an issue where CodeStream would repeatedly reload
+- Fixes an issue that would create an error when clicking on a feedback request due to bad data
+
 ## [10.2.0] - 2020-12-17
 
 ### Added

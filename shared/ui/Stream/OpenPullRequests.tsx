@@ -12,13 +12,10 @@ import {
 } from "../store/context/actions";
 import Tooltip from "./Tooltip";
 import Timestamp from "./Timestamp";
-import { isConnected } from "../store/providers/reducer";
 import { HostApi } from "../webview-api";
 import {
 	ReposScm,
 	GetMyPullRequestsResponse,
-	ExecuteThirdPartyRequestUntypedType,
-	QueryThirdPartyRequestType,
 	DidChangeDataNotificationType,
 	ChangeDataType,
 	ThirdPartyProviderConfig
@@ -35,7 +32,6 @@ import { PROVIDER_MAPPINGS } from "./CrossPostIssueControls/types";
 import { confirmPopup } from "./Confirm";
 import { ConfigurePullRequestQuery } from "./ConfigurePullRequestQuery";
 import { DEFAULT_QUERIES, getSavedPullRequestQueries } from "../store/preferences/reducer";
-import { ConfigurePullRequestQuerySettings } from "./ConfigurePullRequestQuerySettings";
 import { PullRequestQuery } from "@codestream/protocols/api";
 import { configureAndConnectProvider } from "../store/providers/actions";
 import {
@@ -49,6 +45,7 @@ import {
 import { Provider, IntegrationButtons } from "./IntegrationsPanel";
 import { usePrevious } from "../utilities/hooks";
 import { getMyPullRequests as getMyPullRequestsSelector } from "../store/providerPullRequests/reducer";
+import { InlineMenu } from "../src/components/controls/InlineMenu";
 const Root = styled.div`
 	height: 100%;
 	.pr-row {
@@ -119,12 +116,23 @@ export const PullRequestTooltip = (props: { pr: GetMyPullRequestsResponse }) => 
 	);
 };
 
-const ConnectToCodeHost = styled.div`
-	// margin: 10px 20px 0 20px;
-	button {
-		margin: 0 10px 10px 0;
-	}
-`;
+export const PullRequestIcon = (props: { pr: GetMyPullRequestsResponse }) => {
+	const { pr } = props;
+	const statusIcon =
+		pr.isDraft || pr.state === "OPEN" || pr.state === "CLOSED" ? "pull-request" : "git-merge";
+
+	const color = pr.isDraft
+		? "gray"
+		: pr.state === "OPEN"
+		? "green"
+		: pr.state === "MERGED"
+		? "purple"
+		: pr.state === "CLOSED"
+		? "red"
+		: "blue";
+
+	return <Icon name={statusIcon} className={`${color}-color`} style={{ marginRight: "5px" }} />;
+};
 
 interface Props {
 	openRepos: ReposScm[];
@@ -154,6 +162,7 @@ export const OpenPullRequests = React.memo((props: Props) => {
 		const prConnectedProvidersWithErrors = prConnectedProviders.filter(_ => _.hasAccessTokenError);
 
 		const myPullRequests = getMyPullRequestsSelector(state);
+
 		return {
 			repos,
 			teamSettings,
@@ -164,11 +173,11 @@ export const OpenPullRequests = React.memo((props: Props) => {
 			PRConnectedProviders: prConnectedProviders,
 			PRConnectedProvidersWithErrors: prConnectedProvidersWithErrors,
 			PRConnectedProvidersWithErrorsCount: prConnectedProvidersWithErrors.length,
-			openReposOnly:
+			allRepos:
 				preferences.pullRequestQueryShowAllRepos == null
-					? false
-					: !preferences.pullRequestQueryShowAllRepos,
-			showLabels: !preferences.pullRequestQueryHideLabels
+					? true
+					: preferences.pullRequestQueryShowAllRepos,
+			hideLabels: preferences.pullRequestQueryHideLabels
 		};
 	}, shallowEqual);
 
@@ -195,37 +204,24 @@ export const OpenPullRequests = React.memo((props: Props) => {
 	const [editingQuery, setEditingQuery] = React.useState<
 		{ providerId: string; index: number } | undefined
 	>(undefined);
-	const [configureQuerySettings, setConfigureQuerySettings] = React.useState(false);
-	const previousConfigureQuerySettings = usePrevious(configureQuerySettings);
 	const previousPRConnectedProvidersWithErrorsCount = usePrevious<number>(
 		derivedState.PRConnectedProvidersWithErrorsCount
 	);
 
 	const setQueries = (providerId, queries) => {
 		dispatch(setUserPreference(["pullRequestQueries", providerId], [...queries]));
-		// dispatch(setUserPreference(["pullRequestQueries"], null));
 	};
-
-	useEffect(() => {
-		for (const connectedProvider of derivedState.PRConnectedProviders) {
-			const providerId = connectedProvider.id;
-			if (derivedState.myPullRequests) {
-				const providerPullRequests =
-					derivedState.myPullRequests && derivedState.myPullRequests[providerId];
-				if (providerPullRequests && providerPullRequests.data === undefined) {
-					// refetch PRs if something has nuked them
-					fetchPRs(derivedState.queries, {
-						force: true
-					});
-				}
-			}
-		}
-	}, [derivedState.myPullRequests, derivedState.PRConnectedProviders]);
 
 	useEffect(() => {
 		const disposable = HostApi.instance.on(DidChangeDataNotificationType, (e: any) => {
 			if (e.type === ChangeDataType.PullRequests) {
-				fetchPRs(queries);
+				console.warn("OpenPullRequests: ChangeDataType.PullRequests", e);
+				setIsLoadingPRs(true);
+				setTimeout(() => {
+					// kind of a hack to ensure that the provider's search api
+					// has all the latest data after a PR is merged/opened/closed
+					fetchPRs(queries, { force: true, alreadyLoading: true });
+				}, 4000);
 			}
 		});
 		return () => {
@@ -234,11 +230,8 @@ export const OpenPullRequests = React.memo((props: Props) => {
 	});
 
 	useEffect(() => {
-		// if previously we were editing... and now we're not fetch the PRs...
-		if (previousConfigureQuerySettings && !configureQuerySettings) {
-			fetchPRs(derivedState.queries, { force: true });
-		}
-	}, [derivedState.openReposOnly, derivedState.showLabels]);
+		fetchPRs(derivedState.queries, { force: true });
+	}, [derivedState.allRepos]);
 
 	useEffect(() => {
 		if (
@@ -251,8 +244,10 @@ export const OpenPullRequests = React.memo((props: Props) => {
 	}, [derivedState.PRConnectedProvidersWithErrorsCount]);
 
 	const fetchPRs = useCallback(
-		async (theQueries, options?: { force?: boolean }) => {
-			setIsLoadingPRs(true);
+		async (theQueries, options?: { force?: boolean; alreadyLoading?: boolean }) => {
+			if (!options || options.alreadyLoading !== true) {
+				setIsLoadingPRs(true);
+			}
 			let count: number | undefined = undefined;
 			try {
 				const newGroups = {};
@@ -268,7 +263,7 @@ export const OpenPullRequests = React.memo((props: Props) => {
 							getMyPullRequests(
 								connectedProvider.id,
 								queryStrings,
-								derivedState.openReposOnly,
+								!derivedState.allRepos,
 								options,
 								true
 							)
@@ -308,12 +303,7 @@ export const OpenPullRequests = React.memo((props: Props) => {
 				}
 			}
 		},
-		[
-			editingQuery,
-			configureQuerySettings,
-			derivedState.PRConnectedProviders,
-			derivedState.openReposOnly
-		]
+		[editingQuery, derivedState.PRConnectedProviders, derivedState.allRepos]
 	);
 
 	useMemo(() => {
@@ -331,7 +321,7 @@ export const OpenPullRequests = React.memo((props: Props) => {
 		try {
 			const q = queries[providerId][index];
 			const response: any = await dispatch(
-				getMyPullRequests(providerId, [q.query], derivedState.openReposOnly, { force: true }, true)
+				getMyPullRequests(providerId, [q.query], !derivedState.allRepos, { force: true }, true)
 			);
 			if (response && response.length) {
 				const newGroups = { ...pullRequestGroups };
@@ -429,6 +419,23 @@ export const OpenPullRequests = React.memo((props: Props) => {
 		return total;
 	}, [pullRequestGroups]);
 
+	const settingsMenuItems = [
+		{
+			label: "Only show PRs from open repos",
+			key: "repo-only",
+			checked: !derivedState.allRepos,
+			action: () =>
+				dispatch(setUserPreference(["pullRequestQueryShowAllRepos"], !derivedState.allRepos))
+		},
+		{
+			label: "Show Labels",
+			key: "show-labels",
+			checked: !derivedState.hideLabels,
+			action: () =>
+				dispatch(setUserPreference(["pullRequestQueryHideLabels"], !derivedState.hideLabels))
+		}
+	];
+
 	if (!derivedState.isPRSupportedCodeHostConnected && !hasPRSupportedRepos) return null;
 
 	// console.warn("rendering pr list...");
@@ -443,12 +450,9 @@ export const OpenPullRequests = React.memo((props: Props) => {
 					}
 					save={save}
 					onClose={() => setEditingQuery(undefined)}
-					openReposOnly={derivedState.openReposOnly}
+					openReposOnly={!derivedState.allRepos}
 					prConnectedProviders={derivedState.PRConnectedProviders}
 				/>
-			)}
-			{configureQuerySettings && (
-				<ConfigurePullRequestQuerySettings onClose={() => setConfigureQuerySettings(false)} />
 			)}
 			{(derivedState.isPRSupportedCodeHostConnected || hasPRSupportedRepos) && (
 				<>
@@ -488,13 +492,15 @@ export const OpenPullRequests = React.memo((props: Props) => {
 								delay={1}
 							/>
 						)}
-						<Icon
-							onClick={() => setConfigureQuerySettings(true)}
-							name="gear"
-							title="Configure"
-							placement="bottom"
-							delay={1}
-						/>
+						<InlineMenu
+							key="settings-menu"
+							className="subtle no-padding"
+							noFocusOnSelect
+							noChevronDown
+							items={settingsMenuItems}
+						>
+							<Icon name="gear" title="Settings" placement="bottom" delay={1} />
+						</InlineMenu>
 					</PaneHeader>
 					{props.paneState !== PaneState.Collapsed && (
 						<PaneBody>
@@ -509,7 +515,7 @@ export const OpenPullRequests = React.memo((props: Props) => {
 													<Provider
 														key={provider.id}
 														onClick={() =>
-															dispatch(configureAndConnectProvider(provider.id, "Sidebar"))
+															dispatch(configureAndConnectProvider(provider.id, "PRs Section"))
 														}
 													>
 														<Icon name={providerDisplay.icon} />
@@ -627,6 +633,12 @@ export const OpenPullRequests = React.memo((props: Props) => {
 															repo.name === pr.headRepository.name
 														);
 													});
+													// let numComments = pr.comments ? pr.comments.totalCount : 0;
+													// if (pr.reviews && pr.reviews.nodes) {
+													// 	pr.reviews.nodes.forEach(
+													// 		node => (numComments += node.comments.totalCount)
+													// 	);
+													// }
 													return (
 														<Tooltip
 															key={"pr-tt-" + pr.id + index}
@@ -653,11 +665,11 @@ export const OpenPullRequests = React.memo((props: Props) => {
 																</div>
 																<div>
 																	<span>
-																		{pr.title} #{pr.number}
+																		#{pr.number} {pr.title}
 																	</span>
 																	{pr.labels &&
 																		pr.labels.nodes.length > 0 &&
-																		derivedState.showLabels && (
+																		!derivedState.hideLabels && (
 																			<span className="cs-tag-container">
 																				{pr.labels.nodes.map((_, index) => (
 																					<Tag
@@ -695,6 +707,14 @@ export const OpenPullRequests = React.memo((props: Props) => {
 																		delay={1}
 																	/>
 																	<Timestamp time={pr.createdAt} relative abbreviated />
+																	{/* numComments > 0 && (
+																		<span
+																			className="badge"
+																			style={{ margin: "0 0 0 10px", flexGrow: 0, flexShrink: 0 }}
+																		>
+																			{numComments}
+																		</span>
+																	) */}
 																</div>
 															</Row>
 														</Tooltip>

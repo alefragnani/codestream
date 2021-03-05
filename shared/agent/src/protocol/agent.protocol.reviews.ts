@@ -185,6 +185,7 @@ export interface GetReviewContentsLocalRequest {
 }
 
 export interface GetReviewContentsResponse {
+	repoRoot?: string;
 	left?: string;
 	right?: string;
 	fileNotIncludedInReview?: boolean;
@@ -217,6 +218,21 @@ export interface ReviewFileContents {
 	left: string;
 	right: string;
 }
+
+export interface GetReviewCoverageRequest {
+	textDocument: TextDocumentIdentifier;
+}
+
+export interface GetReviewCoverageResponse {
+	reviewIds: (string | undefined)[];
+}
+
+export const GetReviewCoverageRequestType = new RequestType<
+	GetReviewCoverageRequest,
+	GetReviewCoverageResponse,
+	void,
+	void
+>("codestream/review/coverage");
 
 export interface ReviewRepoContents {
 	repoId: string;
@@ -333,6 +349,7 @@ export interface CheckPullRequestPreconditionsResponse {
 	branches?: string[];
 	remoteBranches?: string[];
 	pullRequestTemplate?: string;
+	commitsBehindOriginHeadBranch?: string;
 	warning?: {
 		message?: string;
 		type?: "ALREADY_HAS_PULL_REQUEST" | string;
@@ -376,6 +393,7 @@ export interface CreatePullRequestRequest {
 		title: string;
 		url: string;
 	}[];
+	ideName?: string;
 }
 
 export interface CreatePullRequestResponse {
@@ -449,3 +467,18 @@ export const EndReviewRequestType = new RequestType<
 	void,
 	void
 >("codestream/review/end");
+
+export interface CreateReviewsForUnreviewedCommitsRequest {
+	repoId: string;
+}
+
+export interface CreateReviewsForUnreviewedCommitsResponse {
+	reviewIds: string[];
+}
+
+export const CreateReviewsForUnreviewedCommitsRequestType = new RequestType<
+	CreateReviewsForUnreviewedCommitsRequest,
+	CreateReviewsForUnreviewedCommitsResponse,
+	void,
+	void
+>("codestream/review/createForUnreviewedCommits");

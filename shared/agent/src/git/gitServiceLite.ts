@@ -6,9 +6,11 @@ import { URI } from "vscode-uri";
 import { Logger } from "../logger";
 import { CodeStreamSession } from "../session";
 import { Strings } from "../system";
-import { git } from "./git";
+import { git, isWslGit } from "./git";
 
 const cygwinRegex = /\/cygdrive\/([a-zA-Z])/;
+const wslUncRegex = /(\\\\wsl\$\\.+?)\\.*/;
+const wslMntRegex = /\/mnt\/([a-z])(.+)/;
 /**
  * Class to allow for some basic git operations that has no dependency on a user session
  *
@@ -110,48 +112,16 @@ export class GitServiceLite {
 			}
 		}
 
+		const wslPrefix = isWslGit() ? this._getWslPrefix(filePath) : undefined;
 		try {
 			const data = (await git({ cwd: cwd }, "rev-parse", "--show-toplevel")).trim();
-			const repoRoot = data === "" ? undefined : this._normalizePath(data);
+			const repoRoot = data === "" ? undefined : this._normalizePath(data, wslPrefix);
 
 			if (repoRoot === undefined) {
 				return undefined;
 			}
 
-			try {
-				cwd = this._normalizePath(cwd);
-				let relative = path.relative(repoRoot, cwd);
-				let isParentOrSelf =
-					!relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
-				if (isParentOrSelf) {
-					Logger.log(`getRepoRoot: ${repoRoot} is parent of ${cwd} or itself - returning`);
-					return repoRoot;
-				}
-
-				Logger.log(
-					`getRepoRoot: ${repoRoot} is neither parent of ${cwd} nor itself - finding symlink`
-				);
-				const realCwd = this._normalizePath(fs.realpathSync(cwd));
-				Logger.log(`getRepoRoot: ${cwd} -> ${realCwd}`);
-				relative = path.relative(repoRoot, realCwd);
-				isParentOrSelf = !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
-				if (!isParentOrSelf) {
-					Logger.log(
-						`getRepoRoot: ${repoRoot} is neither parent of ${realCwd} nor itself - returning`
-					);
-					return repoRoot;
-				}
-
-				const symlinkRepoRoot = this._normalizePath(path.resolve(cwd, relative));
-				Logger.log(
-					`getRepoRoot: found symlink repo root ${symlinkRepoRoot} -> ${repoRoot} - returning`
-				);
-
-				return symlinkRepoRoot;
-			} catch (ex) {
-				Logger.warn(ex);
-				return repoRoot;
-			}
+			return this.getRepoRootPreservingSymlink(cwd, repoRoot);
 		} catch (ex) {
 			// If we can't find the git executable, rethrow
 			if (/spawn (.*)? ENOENT/.test(ex.message)) {
@@ -162,7 +132,54 @@ export class GitServiceLite {
 		}
 	}
 
-	_normalizePath(path: string): string {
+	getRepoRootPreservingSymlink(possiblySymlinkedPath: string, repoRoot: string): string {
+		try {
+			possiblySymlinkedPath = this._normalizePath(possiblySymlinkedPath);
+			let relative = path.relative(repoRoot, possiblySymlinkedPath);
+			let isParentOrSelf = !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
+			if (isParentOrSelf) {
+				Logger.debug(
+					`getRepoRootPreservingSymlink: ${repoRoot} is parent of ${possiblySymlinkedPath} or itself`
+				);
+				return repoRoot;
+			}
+
+			Logger.debug(
+				`getRepoRootPreservingSymlink: ${repoRoot} is neither parent of ${possiblySymlinkedPath} nor itself`
+			);
+			const realPath = this._normalizePath(fs.realpathSync(possiblySymlinkedPath));
+			Logger.debug(`getRepoRootPreservingSymlink: ${possiblySymlinkedPath} -> ${realPath}`);
+			relative = path.relative(realPath, repoRoot);
+			isParentOrSelf = !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
+			if (!isParentOrSelf) {
+				Logger.debug(
+					`getRepoRootPreservingSymlink: ${repoRoot} is neither parent of ${realPath} nor itself`
+				);
+				return repoRoot;
+			}
+
+			const symlinkRepoRoot = this._normalizePath(path.resolve(possiblySymlinkedPath, relative));
+			Logger.log(
+				`getRepoRootPreservingSymlink: found symlink repo root ${symlinkRepoRoot} -> ${repoRoot}`
+			);
+
+			return symlinkRepoRoot;
+		} catch (ex) {
+			Logger.warn(ex);
+			return repoRoot;
+		}
+	}
+
+	_getWslPrefix(path: string): string | undefined {
+		const wslMatch = wslUncRegex.exec(path);
+		if (wslMatch != null) {
+			const [, prefix] = wslMatch;
+			return prefix;
+		}
+		return undefined;
+	}
+
+	_normalizePath(path: string, wslPrefix: string | undefined = undefined): string {
 		const cygwinMatch = cygwinRegex.exec(path);
 		if (cygwinMatch != null) {
 			const [, drive] = cygwinMatch;
@@ -172,6 +189,24 @@ export class GitServiceLite {
 			Logger.debug(`Cygwin git path sanitized: ${path} -> ${sanitized}`);
 			return sanitized;
 		}
+
+		if (wslPrefix) {
+			// wsl git + wsl folder
+			const normalized = wslPrefix + path.trim().replace(/\//g, "\\");
+			Logger.debug(`WSL path normalized: ${path} -> ${normalized}`);
+			return normalized;
+		} else if (isWslGit()) {
+			const wslMntMatch = wslMntRegex.exec(path);
+			if (wslMntMatch != null) {
+				// wsl git + windows folder perceived as /mnt/c/...
+				const [, drive, rest] = wslMntMatch;
+				const windowsPath = drive.toUpperCase() + ":" + rest;
+				const normalized = Strings.normalizePath(windowsPath.trim());
+				Logger.debug(`Windows path (with WSL git) normalized: ${path} -> ${normalized}`);
+				return normalized;
+			}
+		}
+
 		// Make sure to normalize: https://github.com/git-for-windows/git/issues/2478
 		return Strings.normalizePath(path.trim());
 	}

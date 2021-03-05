@@ -27,6 +27,8 @@ import {
 	DidChangePullRequestCommentsNotificationType,
 	DidChangeVersionCompatibilityNotification,
 	DidChangeVersionCompatibilityNotificationType,
+	DidDetectUnreviewedCommitsNotification,
+	DidDetectUnreviewedCommitsNotificationType,
 	DidEncounterMaintenanceModeNotification,
 	DidEncounterMaintenanceModeNotificationType,
 	DidFailLoginNotificationType,
@@ -39,7 +41,6 @@ import {
 	FetchCodemarksRequestType,
 	FetchDocumentMarkersRequestType,
 	FetchFileStreamsRequestType,
-	FetchMarkerLocationsRequestType,
 	FetchMarkersRequestType,
 	FetchPostRepliesRequestType,
 	FetchPostsRequestType,
@@ -94,7 +95,11 @@ import {
 	FetchReviewsRequestType,
 	GetFileContentsAtRevisionRequestType,
 	GetFileContentsAtRevisionResponse,
-	AgentInitializedNotificationType
+	AgentInitializedNotificationType,
+	UpdateUserRequest,
+	UpdateUserRequestType,
+	UserDidCommitNotificationType,
+	UserDidCommitNotification
 } from "@codestream/protocols/agent";
 import {
 	ChannelServiceType,
@@ -189,9 +194,21 @@ export class CodeStreamAgentConnection implements Disposable {
 		return this._onDidChangeDocumentMarkers.event;
 	}
 
-	private _onDidChangePullRequestComments = new EventEmitter<DidChangePullRequestCommentsNotification>();
+	private _onDidChangePullRequestComments = new EventEmitter<
+		DidChangePullRequestCommentsNotification
+	>();
 	get onDidChangePullRequestComments(): Event<DidChangePullRequestCommentsNotification> {
 		return this._onDidChangePullRequestComments.event;
+	}
+
+	private _onUserDidCommit = new EventEmitter<UserDidCommitNotification>();
+	get onUserDidCommit(): Event<UserDidCommitNotification> {
+		return this._onUserDidCommit.event;
+	}
+
+	private _onDidDetectUnreviewedCommits = new EventEmitter<DidDetectUnreviewedCommitsNotification>();
+	get onDidDetectUnreviewedCommits(): Event<DidDetectUnreviewedCommitsNotification> {
+		return this._onDidDetectUnreviewedCommits.event;
 	}
 
 	private _onDidChangeVersion = new EventEmitter<DidChangeVersionCompatibilityNotification>();
@@ -277,8 +294,7 @@ export class CodeStreamAgentConnection implements Disposable {
 							this._restartCount = 0;
 							try {
 								this.setHandlers();
-							}
-							catch (e) {
+							} catch (e) {
 								const msg = e instanceof Error ? e.message : JSON.stringify(e);
 								Logger.log(`Error setting handlers after restart: ${msg}`);
 								throw e;
@@ -402,14 +418,10 @@ export class CodeStreamAgentConnection implements Disposable {
 			});
 		}
 
-		fetch(uri: Uri, excludeArchived: boolean = false) {
+		fetch(uri: Uri) {
 			return this._connection.sendRequest(FetchDocumentMarkersRequestType, {
 				textDocument: { uri: uri.toString() },
-				filters: excludeArchived
-					? {
-							excludeArchived: true
-					  }
-					: undefined
+				applyFilters: true
 			});
 		}
 
@@ -442,13 +454,6 @@ export class CodeStreamAgentConnection implements Disposable {
 
 		get(markerId: string) {
 			return this._connection.sendRequest(GetMarkerRequestType, { markerId: markerId });
-		}
-
-		fetchLocations(streamId: string, commitHash: string) {
-			return this._connection.sendRequest(FetchMarkerLocationsRequestType, {
-				streamId: streamId,
-				commitHash: commitHash
-			});
 		}
 	})(this);
 
@@ -884,6 +889,10 @@ export class CodeStreamAgentConnection implements Disposable {
 			});
 		}
 
+		updateUser(user: UpdateUserRequest) {
+			return this._connection.sendRequest(UpdateUserRequestType, user);
+		}
+
 		unreads() {
 			return this._connection.sendRequest(GetUnreadsRequestType, {});
 		}
@@ -909,8 +918,7 @@ export class CodeStreamAgentConnection implements Disposable {
 	}
 
 	@log({
-		prefix: (context, _e: DidChangePullRequestCommentsNotification) =>
-			`${context.prefix}`
+		prefix: (context, _e: DidChangePullRequestCommentsNotification) => `${context.prefix}`
 	})
 	private onPullRequestCommentsChanged(e: DidChangePullRequestCommentsNotification) {
 		this._onDidChangePullRequestComments.fire(e);
@@ -925,6 +933,20 @@ export class CodeStreamAgentConnection implements Disposable {
 			Logger.debug(`\tAgentConnection.onDataChanged(${message.type})`, message.data);
 			this._onDidChangeData.fire(message);
 		}
+	}
+
+	@log({
+		prefix: (context, _e: UserDidCommitNotification) => `${context.prefix}`
+	})
+	private onUserCommitted(e: UserDidCommitNotification) {
+		this._onUserDidCommit.fire(e);
+	}
+
+	@log({
+		prefix: (context, _e: DidDetectUnreviewedCommitsNotification) => `${context.prefix}`
+	})
+	private onUnreviewedCommitsDetected(e: DidDetectUnreviewedCommitsNotification) {
+		this._onDidDetectUnreviewedCommits.fire(e);
 	}
 
 	@log()
@@ -1049,7 +1071,7 @@ export class CodeStreamAgentConnection implements Disposable {
 		return this._client.initializeResult! as AgentInitializeResult;
 	}
 
-	private setHandlers () {
+	private setHandlers() {
 		if (!this._client) return;
 		this._client.onNotification(DidChangeDataNotificationType, this.onDataChanged.bind(this));
 		this._client.onNotification(
@@ -1092,6 +1114,8 @@ export class CodeStreamAgentConnection implements Disposable {
 		this._client.onNotification(AgentInitializedNotificationType, () => {
 			this._onAgentInitialized.fire();
 		});
+		this._client.onNotification(UserDidCommitNotificationType, this.onUserCommitted.bind(this));
+		this._client.onNotification(DidDetectUnreviewedCommitsNotificationType, this.onUnreviewedCommitsDetected.bind(this));
 		this._client.onRequest(AgentOpenUrlRequestType, e => this._onOpenUrl.fire(e));
 	}
 

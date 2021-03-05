@@ -5,7 +5,15 @@ import ContentEditable from "react-contenteditable";
 import * as codemarkSelectors from "../store/codemarks/reducer";
 import * as actions from "./actions";
 const emojiData = require("../node_modules/markdown-it-emoji-mart/lib/data/full.json");
-import { CSChannelStream, CSPost, CSUser, CSTeam, CSTag, CSMe } from "@codestream/protocols/api";
+import {
+	CSChannelStream,
+	CSPost,
+	CSUser,
+	CSTeam,
+	CSTag,
+	CSMe,
+	Attachment
+} from "@codestream/protocols/api";
 import KeystrokeDispatcher from "../utilities/keystroke-dispatcher";
 import {
 	createRange,
@@ -22,15 +30,20 @@ import Menu from "./Menu";
 import Button from "./Button";
 import Icon from "./Icon";
 import { confirmPopup } from "./Confirm";
-import { CodemarkPlus } from "@codestream/protocols/agent";
+import {
+	CodemarkPlus,
+	UploadFileRequest,
+	UploadFileRequestType
+} from "@codestream/protocols/agent";
 import { CodeStreamState } from "../store";
 import { getTeamTagsArray, getTeamMembers, getUsernames } from "../store/users/reducer";
-import { getChannelStreamsForTeam } from "../store/streams/reducer";
+// import { getChannelStreamsForTeam } from "../store/streams/reducer";
 import { ServicesState } from "../store/services/types";
-import { getSlashCommands } from "./SlashCommands";
 import { MarkdownText } from "./MarkdownText";
-
+import { isFeatureEnabled } from "../store/apiVersioning/reducer";
 import { getProviderPullRequestCollaborators } from "../store/providerPullRequests/reducer";
+import Tooltip from "./Tooltip";
+import { HostApi } from "../webview-api";
 
 type PopupType = "at-mentions" | "slash-commands" | "channels" | "emojis";
 
@@ -40,10 +53,16 @@ const tuple = <T extends string[]>(...args: T) => args;
 
 const COLOR_OPTIONS = tuple("blue", "green", "yellow", "orange", "red", "purple", "aqua", "gray");
 
+export interface AttachmentField extends Attachment {
+	status?: "uploading" | "error" | "uploaded";
+	error?: string;
+}
+
 interface State {
 	emojiOpen: boolean;
 	codemarkOpen: boolean;
 	tagsOpen: false | "select" | "edit" | "create";
+	attachOpen: boolean;
 	cursorPosition?: any;
 	currentPopup?: PopupType;
 	popupPrefix?: string;
@@ -53,6 +72,7 @@ interface State {
 	emojiMenuTarget?: any;
 	codemarkMenuTarget?: any;
 	tagsMenuTarget?: any;
+	attachMenuTarget?: any;
 	editingTag?: any;
 	customColor?: string;
 	q?: string;
@@ -60,6 +80,8 @@ interface State {
 	formatCode: boolean;
 	insertPrefix: string;
 	isPreviewing: boolean;
+	isDropTarget: boolean;
+	isPasteEvent: boolean;
 }
 
 interface ConnectedProps {
@@ -70,10 +92,10 @@ interface ConnectedProps {
 	teammates: CSUser[];
 	currentUserId: string;
 	teamTags: CSTag[];
-	channelStreams: CSChannelStream[];
+	// channelStreams: CSChannelStream[];
 	services: ServicesState;
-	slashCommands: any[];
 	usernames: string[];
+	attachFilesEnabled: boolean;
 }
 
 interface Props extends ConnectedProps {
@@ -101,9 +123,13 @@ interface Props extends ConnectedProps {
 	toggleCodemark?: Function;
 	autoFocus?: boolean;
 	className?: string;
+	attachments?: AttachmentField[];
+	attachmentContainerType?: "codemark" | "reply" | "review";
+	setAttachments?(attachments: AttachmentField[]): void;
 	renderCodeBlock?(index: number, force: boolean): React.ReactNode | null;
 	renderCodeBlocks?(): React.ReactNode | null;
 	__onDidRender?(stuff: { [key: string]: any }): any; // HACKy: sneaking internals to parent
+	onPaste?(e: ClipboardEvent): void;
 }
 
 export class MessageInput extends React.Component<Props, State> {
@@ -116,11 +142,14 @@ export class MessageInput extends React.Component<Props, State> {
 			emojiOpen: false,
 			codemarkOpen: false,
 			tagsOpen: false,
+			attachOpen: false,
 			customColor: "",
 			codemarkMenuStart: 0,
 			formatCode: false,
 			insertPrefix: "",
-			isPreviewing: false
+			isPreviewing: false,
+			isDropTarget: false,
+			isPasteEvent: false
 		};
 	}
 
@@ -131,13 +160,18 @@ export class MessageInput extends React.Component<Props, State> {
 		// so that HTML doesn't get pasted into the input field. without this,
 		// HTML would be rendered as HTML when pasted
 		if (this._contentEditable) {
-			this._contentEditable.htmlEl.addEventListener("paste", function(e) {
+			this._contentEditable.htmlEl.addEventListener("paste", e => {
 				e.preventDefault();
+				this.setState({ isPasteEvent: true });
 				let text = e.clipboardData!.getData("text/plain");
 				text = asPastedText(text);
 				document.execCommand("insertText", false, text);
+				this.setState({ isPasteEvent: false });
 				// const text = e.clipboardData!.getData("text/plain");
 				// document.execCommand("insertHTML", false, text.replace(/\n/g, "<br>"));
+				if (this.props.onPaste) {
+					this.props.onPaste(e);
+				}
 			});
 			this.disposables.push(
 				KeystrokeDispatcher.onKeyDown(
@@ -182,10 +216,19 @@ export class MessageInput extends React.Component<Props, State> {
 		this.disposables.forEach(d => d.dispose());
 	}
 
+	onChangeWrapper(text: string, formatCode: boolean) {
+		if (!this.props.onChange) return;
+		if (this.state.isPasteEvent) {
+			text = text.replace(/```\s*?```/g, "```");
+			text = text.replace(/```(\s*?(<div>|<\/div>)+\s*?)*?```/g, "```");
+		}
+		this.props.onChange(text, formatCode);
+	}
+
 	quotePost() {
 		if (this._contentEditable) {
 			this._contentEditable.htmlEl.innerHTML = "";
-			this.props.onChange && this.props.onChange("", false);
+			this.onChangeWrapper("", false);
 		}
 		this.focus(() => {
 			const post = this.props.quotePost!;
@@ -195,6 +238,137 @@ export class MessageInput extends React.Component<Props, State> {
 			this.insertNewlineAtCursor();
 		});
 	}
+
+	pinImage = (filename: string, url: string) => {
+		this.insertTextAtCursor(`![${filename}](${url.replace(/ /g, "%20")})`);
+	};
+
+	renderAttachedFiles = () => {
+		const { attachments = [] } = this.props;
+
+		if (!attachments || attachments.length === 0) return;
+		return (
+			<div className="related" key="attached-files">
+				<div className="related-label">Attachments</div>
+				{attachments.map((file, index) => {
+					const icon =
+						file.status === "uploading" ? (
+							<Icon name="sync" className="spin" style={{ verticalAlign: "3px" }} />
+						) : file.status === "error" ? (
+							<Icon name="alert" className="spinnable" />
+						) : (
+							<Icon name="paperclip" className="spinnable" />
+						);
+					const isImage = (file.mimetype || "").startsWith("image");
+					const text = replaceHtml(this._contentEditable!.htmlEl.innerHTML) || "";
+					const imageInjected =
+						isImage && file.url ? text.includes(`![${file.name}](${file.url})`) : false;
+					return (
+						<Tooltip title={file.error} placement="top" delay={1}>
+							<div key={index} className="attachment">
+								<span>{icon}</span>
+								<span>{file.name}</span>
+								<span>
+									{isImage && file.url && (
+										<Icon
+											title={
+												imageInjected
+													? `This image is in the markdown above`
+													: `Insert this image in markdown`
+											}
+											placement="bottomRight"
+											align={{ offset: [20, 0] }}
+											name="pin"
+											className={imageInjected ? "clickable selected" : "clickable"}
+											onMouseDown={e => !imageInjected && this.pinImage(file.name, file.url!)}
+										/>
+									)}
+									<Icon
+										name="x"
+										className="clickable"
+										onClick={() => {
+											const { attachments = [] } = this.props;
+											const newAttachments = [...attachments];
+											newAttachments.splice(index, 1);
+											if (this.props.setAttachments) this.props.setAttachments(newAttachments);
+										}}
+									/>
+								</span>
+							</div>
+						</Tooltip>
+					);
+				})}
+			</div>
+		);
+	};
+
+	handlePaste = e => {
+		if (!e.clipboardData || !e.clipboardData.files) return;
+
+		this.attachFiles(e.clipboardData.files);
+	};
+
+	replaceAttachment = (attachment, index) => {
+		attachment = { ...attachment, mimetype: attachment.type || attachment.mimetype };
+		const { attachments = [] } = this.props;
+		let newAttachments = [...attachments];
+		newAttachments.splice(index, 1, attachment);
+		// this.setState({ attachments: newAttachments });
+		if (this.props.setAttachments) this.props.setAttachments(newAttachments);
+	};
+
+	attachFiles = async files => {
+		if (!files || files.length === 0) return;
+
+		const { attachments = [] } = this.props;
+		let index = attachments.length;
+
+		[...files].forEach(file => {
+			file.status = "uploading";
+		});
+		// add the dropped files to the list of attachments, with uploading state
+		// this.setState({ attachments: [...attachments, ...files] });
+		if (this.props.setAttachments) this.props.setAttachments([...attachments, ...files]);
+
+		for (const file of files) {
+			try {
+				const request: UploadFileRequest = {
+					path: file.path,
+					name: file.name,
+					size: file.size,
+					mimetype: file.type
+				};
+				if (!file.path) {
+					// encode as base64 to send to the agent
+					const toBase64 = file =>
+						new Promise((resolve, reject) => {
+							const reader = new FileReader();
+							reader.readAsDataURL(file);
+							reader.onload = () => resolve(reader.result);
+							reader.onerror = error => reject(error);
+						});
+					request.buffer = await toBase64(file);
+				}
+				const response = await HostApi.instance.send(UploadFileRequestType, request);
+				if (response && response.url) {
+					this.replaceAttachment(response, index);
+				} else {
+					file.status = "error";
+					this.replaceAttachment(file, index);
+				}
+				HostApi.instance.track("File Attached", {
+					"File Type": file.type,
+					Parent: this.props.attachmentContainerType
+				});
+			} catch (e) {
+				console.warn("Error uploading file: ", e);
+				file.status = "error";
+				file.error = e;
+				this.replaceAttachment(file, index);
+			}
+			index++;
+		}
+	};
 
 	// for keypresses that we can't capture with standard
 	// javascript events
@@ -224,6 +398,11 @@ export class MessageInput extends React.Component<Props, State> {
 
 	hideTagsPicker = () => {
 		this.setState({ tagsOpen: false, q: "" });
+		KeystrokeDispatcher.levelDown();
+	};
+
+	hideFilePicker = () => {
+		this.setState({ attachOpen: false });
 		KeystrokeDispatcher.levelDown();
 	};
 
@@ -293,35 +472,17 @@ export class MessageInput extends React.Component<Props, State> {
 					});
 				}
 			});
-		} else if (type === "slash-commands") {
-			// TODO: filtering these commands should happen higher up in the tree
-			if (this.props.slashCommands) {
-				this.props.slashCommands.map(command => {
-					if (command.appliesTo != null && Array.isArray(command.appliesTo)) {
-						if (!command.appliesTo.includes(this.props.teamProvider)) return;
-					}
-
-					if (command.channelOnly && this.props.isDirectMessage) return;
-					if (command.requires && !this.props.services[command.requires]) return;
-
-					const toMatch = command.id.toLowerCase();
-					if (toMatch.indexOf(normalizedPrefix) === 0) {
-						command.identifier = command.id;
-						itemsToShow.push(command);
-					}
-				});
-			}
-		} else if (type === "channels") {
-			Object.values(this.props.channelStreams || []).forEach(channel => {
-				const toMatch = channel.name.toLowerCase();
-				if (toMatch.indexOf(normalizedPrefix) !== -1) {
-					itemsToShow.push({
-						id: channel.name,
-						identifier: "#" + channel.name,
-						description: channel.purpose || ""
-					});
-				}
-			});
+			// } else if (type === "channels") {
+			// 	Object.values(this.props.channelStreams || []).forEach(channel => {
+			// 		const toMatch = channel.name.toLowerCase();
+			// 		if (toMatch.indexOf(normalizedPrefix) !== -1) {
+			// 			itemsToShow.push({
+			// 				id: channel.name,
+			// 				identifier: "#" + channel.name,
+			// 				description: channel.purpose || ""
+			// 			});
+			// 		}
+			// 	});
 		} else if (type === "emojis") {
 			if (normalizedPrefix && normalizedPrefix.length > 1) {
 				Object.keys(emojiData).map(emojiId => {
@@ -377,7 +538,7 @@ export class MessageInput extends React.Component<Props, State> {
 		const nodeText = node.textContent || "";
 		const upToCursor = nodeText.substring(0, range.startOffset);
 		const peopleMatch = upToCursor.match(/(?:^|\s)@([a-zA-Z0-9_.+]*)$/);
-		const channelMatch = upToCursor.match(/(?:^|\s)#([a-zA-Z0-9_.+]*)$/);
+		// const channelMatch = upToCursor.match(/(?:^|\s)#([a-zA-Z0-9_.+]*)$/);
 		const emojiMatch = upToCursor.match(/(?:^|\s):([a-z+_]*)$/);
 		const slashMatch = newPostText.match(/^\/([a-zA-Z0-9+]*)$/);
 		if (this.state.currentPopup === "at-mentions") {
@@ -394,13 +555,13 @@ export class MessageInput extends React.Component<Props, State> {
 				// if the line doesn't start with /word, then hide the popup
 				this.hidePopup();
 			}
-		} else if (this.state.currentPopup === "channels") {
-			if (channelMatch) {
-				this.showPopupSelectors(channelMatch[1].replace(/#/, ""), "channels");
-			} else {
-				// if the line doesn't end with #word, then hide the popup
-				this.hidePopup();
-			}
+			// } else if (this.state.currentPopup === "channels") {
+			// 	if (channelMatch) {
+			// 		this.showPopupSelectors(channelMatch[1].replace(/#/, ""), "channels");
+			// 	} else {
+			// 		// if the line doesn't end with #word, then hide the popup
+			// 		this.hidePopup();
+			// 	}
 		} else if (this.state.currentPopup === "emojis") {
 			if (emojiMatch) {
 				this.showPopupSelectors(emojiMatch[1].replace(/:/, ""), "emojis");
@@ -413,13 +574,12 @@ export class MessageInput extends React.Component<Props, State> {
 			if (slashMatch && !this.props.multiCompose) {
 				this.showPopupSelectors(slashMatch[0].replace(/\//, ""), "slash-commands");
 			}
-			if (channelMatch) this.showPopupSelectors(channelMatch[1].replace(/#/, ""), "channels");
+			// if (channelMatch) this.showPopupSelectors(channelMatch[1].replace(/#/, ""), "channels");
 			if (emojiMatch) this.showPopupSelectors(emojiMatch[1].replace(/:/, ""), "emojis");
 		}
 
 		// track newPostText as the user types
-		this.props.onChange &&
-			this.props.onChange(this._contentEditable!.htmlEl.innerHTML, this.state.formatCode);
+		this.onChangeWrapper(this._contentEditable!.htmlEl.innerHTML, this.state.formatCode);
 		this.setState({
 			// autoMentions: this.state.autoMentions.filter(mention => newPostText.includes(mention)), // TODO
 			cursorPosition: getCurrentCursorPosition("input-div")
@@ -440,8 +600,8 @@ export class MessageInput extends React.Component<Props, State> {
 
 		if (this.state.currentPopup === "slash-commands") {
 			toInsert = id + "\u00A0";
-		} else if (this.state.currentPopup === "channels") {
-			toInsert = id + "\u00A0";
+			// } else if (this.state.currentPopup === "channels") {
+			// 	toInsert = id + "\u00A0";
 		} else if (this.state.currentPopup === "emojis") {
 			toInsert = id + ":\u00A0";
 		} else {
@@ -496,9 +656,7 @@ export class MessageInput extends React.Component<Props, State> {
 			sel.modify("move", "forward", "character");
 			// window.getSelection().empty();
 			// this.focus();
-
-			this.props.onChange &&
-				this.props.onChange(this._contentEditable!.htmlEl.innerHTML, this.state.formatCode);
+			this.onChangeWrapper(this._contentEditable!.htmlEl.innerHTML, this.state.formatCode);
 			this.setState({
 				cursorPosition: getCurrentCursorPosition("input-div")
 			});
@@ -538,8 +696,7 @@ export class MessageInput extends React.Component<Props, State> {
 			// window.getSelection().empty();
 			// this.focus();
 
-			this.props.onChange &&
-				this.props.onChange(this._contentEditable.htmlEl.innerHTML, this.state.formatCode);
+			this.onChangeWrapper(this._contentEditable.htmlEl.innerHTML, this.state.formatCode);
 			this.setState({
 				cursorPosition: getCurrentCursorPosition("input-div")
 			});
@@ -551,6 +708,7 @@ export class MessageInput extends React.Component<Props, State> {
 		if (this._contentEditable) {
 			this._contentEditable.htmlEl.focus();
 			this._contentEditable.htmlEl.scrollIntoView({
+				block: "nearest",
 				behavior: "smooth"
 			});
 		}
@@ -578,8 +736,8 @@ export class MessageInput extends React.Component<Props, State> {
 			this.showPopupSelectors("", "emojis");
 		} else if (!multiCompose && event.key === "/" && newPostText.length === 0) {
 			this.showPopupSelectors("", "slash-commands");
-		} else if (event.key === "#") {
-			this.showPopupSelectors("", "channels");
+			// } else if (event.key === "#") {
+			// 	this.showPopupSelectors("", "channels");
 		} else if (
 			event.charCode === 13 &&
 			!event.shiftKey &&
@@ -606,6 +764,7 @@ export class MessageInput extends React.Component<Props, State> {
 			else if (this.state.emojiOpen) this.hideEmojiPicker();
 			else if (this.state.codemarkOpen) this.hideCodemarkPicker();
 			else if (this.state.tagsOpen) this.hideTagsPicker();
+			else if (this.state.attachOpen) this.hideFilePicker();
 			// else this.handleDismissThread();
 		} else {
 			let newIndex = 0;
@@ -661,6 +820,11 @@ export class MessageInput extends React.Component<Props, State> {
 				this.hideTagsPicker();
 				event.stopPropagation();
 			}
+		} else if (this.state.attachOpen) {
+			if (event.key === "Escape") {
+				this.hideFilePicker();
+				event.stopPropagation();
+			}
 		} else {
 			if (event.key == "Escape" && multiCompose && this.props.onDismiss) {
 				this.props.onDismiss();
@@ -712,6 +876,14 @@ export class MessageInput extends React.Component<Props, State> {
 					this.props.toggleCodemark(codemark);
 				}
 		}
+	};
+
+	handleChangeFiles = () => {
+		const attachElement = document.getElementById("attachment") as HTMLInputElement;
+		if (!attachElement) return;
+		console.warn("FILES ARE: ", attachElement.files);
+
+		this.attachFiles(attachElement.files);
 	};
 
 	buildCodemarkMenu = () => {
@@ -775,6 +947,14 @@ export class MessageInput extends React.Component<Props, State> {
 		this.setState(state => ({
 			tagsOpen: "select",
 			tagsMenuTarget: event.target
+		}));
+	};
+
+	handleClickAttachButton = (event: React.SyntheticEvent) => {
+		event.persist();
+		this.setState(state => ({
+			attachOpen: true,
+			attachMenuTarget: event.target
 		}));
 	};
 
@@ -1053,8 +1233,7 @@ export class MessageInput extends React.Component<Props, State> {
 		this.focus(() => {
 			this.setCurrentCursorPosition(this.state.cursorPosition);
 			this.setState({ formatCode });
-			this.props.onChange &&
-				this.props.onChange(this._contentEditable!.htmlEl.innerHTML, formatCode);
+			this.onChangeWrapper(this._contentEditable!.htmlEl.innerHTML, formatCode);
 		});
 	};
 
@@ -1096,8 +1275,18 @@ export class MessageInput extends React.Component<Props, State> {
 		);
 	};
 
+	handleDragEnter = () => this.setState({ isDropTarget: true });
+	handleDragLeave = () => this.setState({ isDropTarget: false });
+	handleDrop = e => {
+		this.setState({ isDropTarget: false });
+		// e.stopPropagation();
+		e.preventDefault();
+
+		this.attachFiles(e.dataTransfer.files);
+	};
+
 	render() {
-		const { isPreviewing, formatCode } = this.state;
+		const { isPreviewing, formatCode, isDropTarget } = this.state;
 		const { placeholder, text, __onDidRender } = this.props;
 
 		__onDidRender &&
@@ -1115,91 +1304,134 @@ export class MessageInput extends React.Component<Props, State> {
 					onKeyDown={this.handleKeyDown}
 					style={{ position: "relative" }}
 				>
-					<div key="message-attach-icons" className="message-attach-icons">
-						{!isPreviewing && (
-							<>
+					{!isPreviewing && !isDropTarget && (
+						<div key="message-attach-icons" className="message-attach-icons">
+							<Icon
+								key="preview"
+								name="markdown"
+								title={
+									<div style={{ textAlign: "center" }}>
+										Click to Preview
+										<div style={{ paddingTop: "5px" }}>
+											<a href="https://www.markdownguide.org/cheat-sheet/">Markdown help</a>
+										</div>
+									</div>
+								}
+								placement="top"
+								align={{ offset: [5, 0] }}
+								delay={1}
+								className={cx("preview", { hover: isPreviewing })}
+								onClick={this.handleClickPreview}
+							/>
+							{this.props.teammates.length > 0 && (
 								<Icon
-									key="preview"
-									name="markdown"
+									key="mention"
+									name="mention"
+									title="Mention a teammate"
+									placement="topRight"
+									align={{ offset: [18, 0] }}
+									delay={1}
+									className={cx("mention", { hover: this.state.currentPopup === "at-mentions" })}
+									onClick={this.handleClickAtMentions}
+								/>
+							)}
+							<Icon
+								key="smiley"
+								name="smiley"
+								title="Add an emoji"
+								placement="topRight"
+								align={{ offset: [9, 0] }}
+								delay={1}
+								className={cx("smiley", {
+									hover: this.state.emojiOpen
+								})}
+								onClick={this.handleClickEmojiButton}
+							/>
+							{this.state.emojiOpen && (
+								<EmojiPicker
+									addEmoji={this.addEmoji}
+									target={this.state.emojiMenuTarget}
+									autoFocus={true}
+								/>
+							)}
+							{this.props.attachFilesEnabled && this.props.setAttachments && (
+								<Tooltip
 									title={
-										<div style={{ textAlign: "center" }}>
-											Click to Preview
-											<div style={{ paddingTop: "5px" }}>
-												<a href="https://www.markdownguide.org/cheat-sheet/">Markdown help</a>
-											</div>
+										<div style={{ maxWidth: "150px" }}>
+											Attach files by dragging &amp; dropping, selecting, or pasting them.
 										</div>
 									}
+									placement="topRight"
+									align={{ offset: [20, 0] }}
+									delay={1}
+									trigger={["hover"]}
+								>
+									<span className="icon-wrapper">
+										<input
+											type="file"
+											id="attachment"
+											name="attachment"
+											multiple
+											title=""
+											onChange={this.handleChangeFiles}
+											style={{
+												top: 0,
+												left: 0,
+												width: "16px",
+												height: "16px",
+												position: "absolute",
+												opacity: 0,
+												zIndex: 5
+											}}
+										/>
+										<label htmlFor="attachment">
+											<Icon
+												key="paperclip"
+												name="paperclip"
+												className={cx("attach", { hover: this.state.attachOpen })}
+											/>
+										</label>
+									</span>
+								</Tooltip>
+							)}
+							{this.props.relatedCodemarkIds && this.props.codemarks.length > 0 && (
+								<Icon
+									key="codestream"
+									name="codestream"
+									title="Add a related codemark"
 									placement="top"
 									align={{ offset: [5, 0] }}
 									delay={1}
-									className={cx("preview", { hover: isPreviewing })}
-									onClick={this.handleClickPreview}
+									className={cx("codestream", { hover: this.state.codemarkOpen })}
+									onClick={this.handleClickCodemarkButton}
 								/>
-								{this.props.teammates.length > 0 && (
-									<Icon
-										key="mention"
-										name="mention"
-										title="Mention a teammate"
-										placement="topRight"
-										align={{ offset: [18, 0] }}
-										delay={1}
-										className={cx("mention", { hover: this.state.currentPopup === "at-mentions" })}
-										onClick={this.handleClickAtMentions}
-									/>
-								)}
+							)}
+							{this.buildCodemarkMenu()}
+							{this.props.withTags && (
 								<Icon
-									key="smiley"
-									name="smiley"
-									title="Add an emoji"
-									placement="topRight"
-									align={{ offset: [9, 0] }}
+									key="tag"
+									name="tag"
+									title="Add tags"
+									placement="top"
+									align={{ offset: [5, 0] }}
 									delay={1}
-									className={cx("smiley", {
-										hover: this.state.emojiOpen
-									})}
-									onClick={this.handleClickEmojiButton}
+									className={cx("tags", { hover: this.state.tagsOpen })}
+									onClick={this.handleClickTagButton}
 								/>
-								{this.state.emojiOpen && (
-									<EmojiPicker
-										addEmoji={this.addEmoji}
-										target={this.state.emojiMenuTarget}
-										autoFocus={true}
-									/>
-								)}
-								{this.props.relatedCodemarkIds && this.props.codemarks.length > 0 && (
-									<Icon
-										key="codestream"
-										name="codestream"
-										title="Add a related codemark"
-										placement="top"
-										align={{ offset: [5, 0] }}
-										delay={1}
-										className={cx("codestream", { hover: this.state.codemarkOpen })}
-										onClick={this.handleClickCodemarkButton}
-									/>
-								)}
-								{this.buildCodemarkMenu()}
-								{this.props.withTags && (
-									<Icon
-										key="tag"
-										name="tag"
-										title="Add tags"
-										placement="top"
-										align={{ offset: [5, 0] }}
-										delay={1}
-										className={cx("tags", { hover: this.state.tagsOpen })}
-										onClick={this.handleClickTagButton}
-									/>
-								)}
-								{this.buildTagMenu()}
-							</>
-						)}
-					</div>
+							)}
+							{this.buildTagMenu()}
+						</div>
+					)}
 					{isPreviewing && (
 						<div className={cx("message-input preview", { "format-code": formatCode })}>
 							{this.renderTextReplaceCodeBlocks(
 								replaceHtml(this._contentEditable!.htmlEl.innerHTML) || ""
 							)}
+						</div>
+					)}
+					{this.props.attachFilesEnabled && this.props.setAttachments && (
+						<div className={cx("drop-target", { hover: this.state.isDropTarget })}>
+							<span className="expand">Drop here</span>
 						</div>
 					)}
 					<AtMentionsPopup
@@ -1213,12 +1445,17 @@ export class MessageInput extends React.Component<Props, State> {
 						<ContentEditable
 							className={cx(
 								"message-input",
+								"hide-on-drop",
 								btoa(unescape(encodeURIComponent(placeholder || ""))),
 								{
 									"format-code": formatCode,
+									invisible: this.state.isDropTarget,
 									hide: isPreviewing
 								}
 							)}
+							onDragEnter={this.handleDragEnter}
+							onDrop={this.handleDrop}
+							onDragLeave={this.handleDragLeave}
 							id="input-div"
 							onChange={this.handleChange}
 							onBlur={this.handleBlur}
@@ -1230,6 +1467,7 @@ export class MessageInput extends React.Component<Props, State> {
 						/>
 					</AtMentionsPopup>
 				</div>
+				{this.renderAttachedFiles()}
 				{isPreviewing && this.renderExitPreview()}
 			</>
 		);
@@ -1258,12 +1496,15 @@ const mapStateToProps = (
 		codemarks: codemarkSelectors.getTypeFilteredCodemarks(state) || EMPTY_ARRAY,
 		isInVscode: state.ide.name === "VSC",
 		teamTags: Boolean(props.withTags) ? getTeamTagsArray(state) : emptyArray,
-		channelStreams: getChannelStreamsForTeam(state, state.context.currentTeamId),
+		// channelStreams: getChannelStreamsForTeam(state, state.context.currentTeamId),
 		services: state.services,
-		slashCommands: getSlashCommands(state.capabilities),
 		currentUser: state.users[state.session.userId!] as CSMe,
-		usernames: getUsernames(state)
+		usernames: getUsernames(state),
+		attachFilesEnabled: isFeatureEnabled(state, "fileUploads")
 	};
 };
 
-export default connect(mapStateToProps, { ...actions })(MessageInput);
+export default connect(
+	mapStateToProps,
+	{ ...actions }
+)(MessageInput);

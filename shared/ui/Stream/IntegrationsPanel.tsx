@@ -21,6 +21,7 @@ import { Button } from "../src/components/Button";
 import { DropdownButton } from "./Review/DropdownButton";
 import { PrePRProviderInfoModal } from "./PrePRProviderInfoModal";
 import { Dialog } from "../src/components/Dialog";
+import { isOnPrem } from "../store/configs/reducer";
 
 export const Provider = styled(Button)`
 	width: 100%;
@@ -75,7 +76,7 @@ export const IntegrationButtons = styled.div<{ noBorder?: boolean; noPadding?: b
 export const IntegrationsPanel = () => {
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
-		const { providers, teams, context, session, users } = state;
+		const { providers, teams, context, session, users, configs } = state;
 		const team = teams[context.currentTeamId];
 		const teamSettings = team.settings || {};
 		const teamCodeHostProviders = teamSettings.codeHostProviders || {};
@@ -97,15 +98,18 @@ export const IntegrationsPanel = () => {
 				].includes(providers[id].name)
 			)
 			.filter(id => !connectedProviders.includes(id))
-			.filter(id => !teamSettings.limitCodeHost || teamCodeHostProviders[id]);
+			.filter(id => !teamSettings.limitCodeHost || teamCodeHostProviders[id])
+			.sort((a, b) => providers[a].name.localeCompare(providers[b].name));
 		const issueProviders = Object.keys(providers)
 			.filter(id => providers[id].hasIssues)
 			.filter(id => !codeHostProviders.includes(id))
 			.filter(id => !connectedProviders.includes(id))
-			.filter(id => !teamSettings.limitIssues || teamIssuesProviders[id]);
+			.filter(id => !teamSettings.limitIssues || teamIssuesProviders[id])
+			.sort((a, b) => providers[a].name.localeCompare(providers[b].name));
 		const messagingProviders = Object.keys(providers)
 			.filter(id => providers[id].hasSharing)
-			.filter(id => !teamSettings.limitMessaging || teamMessagingProviders[id]);
+			.filter(id => !teamSettings.limitMessaging || teamMessagingProviders[id])
+			.sort((a, b) => providers[a].name.localeCompare(providers[b].name));
 		const sharingTargets = getConnectedSharingTargets(state);
 
 		return {
@@ -118,7 +122,8 @@ export const IntegrationsPanel = () => {
 			sharingTargets,
 			currentTeam: team,
 			currentUser: user,
-			currentUserIsAdmin
+			currentUserIsAdmin,
+			isOnPrem: isOnPrem(configs)
 		};
 	});
 
@@ -154,7 +159,7 @@ export const IntegrationsPanel = () => {
 					return (
 						<ProviderDropdown key={providerId} items={items} variant="success">
 							{display.icon && <Icon name={display.icon} />}
-							{shareTarget.teamName}
+							{display.displayName} - {shareTarget.teamName}
 						</ProviderDropdown>
 					);
 				});
@@ -189,7 +194,14 @@ export const IntegrationsPanel = () => {
 		const { providers } = derivedState;
 		return providerIds.map(providerId => {
 			const provider = providers[providerId];
-			const { name, isEnterprise, host, needsConfigure, forEnterprise } = provider;
+			const {
+				name,
+				isEnterprise,
+				host,
+				needsConfigure,
+				needsConfigureForOnPrem,
+				forEnterprise
+			} = provider;
 			const display = PROVIDER_MAPPINGS[name];
 			if (!display) return null;
 
@@ -198,7 +210,7 @@ export const IntegrationsPanel = () => {
 				? `${display.displayName} - ${displayHost}`
 				: display.displayName;
 			let action;
-			if (needsConfigure) {
+			if (needsConfigure || (derivedState.isOnPrem && needsConfigureForOnPrem)) {
 				// otherwise, if it's a provider that needs to be pre-configured,
 				// bring up the custom popup for configuring it
 				action = () =>
@@ -264,7 +276,7 @@ export const IntegrationsPanel = () => {
 						onClick={() => dispatch(connectProvider(providerId, "Integrations Panel"))}
 					>
 						{display.icon && <Icon name={display.icon} />}
-						{`Add ${display.groupName}`}
+						{`Add ${display.displayName} ${display.groupName}`}
 					</Provider>
 				);
 			} else
@@ -295,9 +307,9 @@ export const IntegrationsPanel = () => {
 			<IntegrationGroups>
 				{Object.keys(derivedState.providers).length === 0 && (
 					<>
-						<h2>HTTPS Required</h2>
+						<h2>No Integrations Available</h2>
 						<p>
-							CodeStream integrations require a secure connection to your CodeStream server. Please
+							This version of CodeStream On-Prem is not configured for any integrations. Please
 							contact your on-prem CodeStream administrator.
 						</p>
 						<div style={{ textAlign: "center", marginBottom: "20px" }}>

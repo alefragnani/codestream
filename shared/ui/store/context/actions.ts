@@ -3,7 +3,7 @@ import { logError } from "../../logger";
 import { setUserPreference } from "../../Stream/actions";
 import { action } from "../common";
 import { ContextActionsType, ContextState, PostEntryPoint, Route } from "./types";
-import { WebviewPanels, WebviewModals } from "@codestream/protocols/webview";
+import { WebviewPanels, WebviewModals, NewPullRequestBranch } from "@codestream/protocols/webview";
 import { CodemarkType } from "@codestream/protocols/api";
 
 export const reset = () => action("RESET");
@@ -65,6 +65,9 @@ export const setChannelFilter = (value: string) => async dispatch => {
 export const setChannelsMuteAll = (enabled: boolean) =>
 	action(ContextActionsType.SetChannelsMuteAll, enabled);
 
+export const setIsFirstPageview = (value: boolean) =>
+	action(ContextActionsType.SetIsFirstPageview, value);
+
 export const setCodemarkTagFilter = (value: string) =>
 	action(ContextActionsType.SetCodemarkTagFilter, value);
 
@@ -118,8 +121,25 @@ export const setCurrentStream = (streamId?: string, threadId?: string) => (dispa
 	}
 };
 
-export const setCurrentReview = (reviewId?: string) =>
+export const _setCurrentReview = (reviewId?: string) =>
 	action(ContextActionsType.SetCurrentReview, { reviewId });
+
+export const _setCurrentReviewOptions = (options: any) =>
+	action(ContextActionsType.SetCurrentReviewOptions, { options });
+
+export const setCurrentReview = (reviewId?: string, options?: { openFirstDiff?: boolean }) => (
+	dispatch,
+	getState
+) => {
+	if (!reviewId) {
+		dispatch(_setCurrentReviewOptions(undefined));
+	}
+	dispatch(_setCurrentReviewOptions(options));
+	return dispatch(_setCurrentReview(reviewId));
+};
+
+export const setCurrentReviewOptions = (options: any) =>
+	action(ContextActionsType.SetCurrentReviewOptions, { options });
 
 export const setCurrentRepo = (id?: string, path?: string) =>
 	action(ContextActionsType.SetCurrentRepo, { id, path });
@@ -127,15 +147,25 @@ export const setCurrentRepo = (id?: string, path?: string) =>
 export const setCreatePullRequest = (reviewId?: string) =>
 	action(ContextActionsType.SetCreatePullRequest, { reviewId });
 
-export const setCurrentPullRequest = (providerId: string, id: string, commentId?: string) =>
-	action(ContextActionsType.SetCurrentPullRequest, { providerId, id, commentId });
+export const setCurrentPullRequest = (
+	providerId: string,
+	id: string,
+	commentId?: string,
+	source?: string
+) => action(ContextActionsType.SetCurrentPullRequest, { providerId, id, commentId, source });
+
+export const setNewPullRequestOptions = (options?: { branch: NewPullRequestBranch }) =>
+	action(ContextActionsType.SetNewPullRequestOptions, { options });
 
 export const clearCurrentPullRequest = () =>
 	action(ContextActionsType.SetCurrentPullRequest, {
 		providerId: "",
 		id: "",
-		commentId: ""
+		commentId: "",
+		source: ""
 	});
+
+export const setOnboardStep = (step: number) => action(ContextActionsType.SetOnboardStep, { step });
 
 export const setStartWorkCard = (card: any) =>
 	action(ContextActionsType.SetStartWorkCard, { card });

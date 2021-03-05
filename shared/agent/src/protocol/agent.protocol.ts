@@ -35,6 +35,7 @@ export * from "./agent.protocol.youtrack";
 export * from "./agent.protocol.azuredevops";
 export * from "./agent.protocol.okta";
 export * from "./agent.protocol.clubhouse";
+export * from "./agent.protocol.linear";
 
 export interface Document {
 	uri: string;
@@ -63,6 +64,7 @@ export enum CodeDelimiterStyles {
 	TRIPLE_BACK_QUOTE = "tripleBackQuote",
 	SINGLE_BACK_QUOTE = "singleBackQuote",
 	HTML_MARKUP = "htmlMarkup",
+	HTML_LIGHT_MARKUP = "htmlLightMarkup",
 	CODE_BRACE = "codeBrace"
 }
 
@@ -112,6 +114,7 @@ export interface BaseAgentOptions {
 	traceLevel: TraceLevel;
 	recordRequests?: boolean;
 	workspaceFolders?: WorkspaceFolder[];
+	machineId?: string;
 }
 
 export interface AgentOptions extends BaseAgentOptions {
@@ -270,6 +273,28 @@ export interface CodeStreamDiffUriData {
 		};
 	};
 }
+
+export interface UploadFileRequest {
+	path: string;
+	name: string;
+	mimetype: string;
+	size: number;
+	buffer?: any;
+}
+
+export interface UploadFileResponse {
+	url: string;
+	name: string;
+	mimetype: string;
+	size: number;
+}
+
+export const UploadFileRequestType = new RequestType<
+	UploadFileRequest,
+	UploadFileResponse,
+	void,
+	void
+>("codestream/upload/file");
 
 export const CodeStreamApiGetRequestType = new RequestType<any, any, void, void>(
 	"codestream/api/get"

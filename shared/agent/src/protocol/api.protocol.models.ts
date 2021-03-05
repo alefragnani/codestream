@@ -36,6 +36,17 @@ export enum CodemarkStatus {
 	Closed = "closed"
 }
 
+export interface ShareTarget {
+	createdAt: number;
+	providerId: string; // "slack" | "msteams";
+	teamId: string;
+	teamName: string;
+	channelId: string;
+	channelName: string;
+	postId: string;
+	url: string;
+}
+
 export interface CSCodemark extends CSEntity {
 	teamId: string;
 	streamId: string;
@@ -179,6 +190,7 @@ export interface ReviewChangesetFileInfo {
 	statusX?: FileStatus;
 	statusY?: FileStatus;
 	reviewStatus?: { [reviewerId: string]: "visited" | "current" };
+	repoId?: string;
 }
 
 export interface CSReviewDiffs {
@@ -247,12 +259,22 @@ export interface CSReview extends CSEntity {
 	reviewChangesets: CSReviewChangeset[];
 	lastActivityAt: number;
 	followerIds?: string[];
+	codeAuthorIds?: string[];
 	// TODO eventually make this not optional
 	permalink?: string;
 	approvedAt?: number;
 	pullRequestUrl?: string;
 	pullRequestTitle?: string;
 	pullRequestProviderId?: string;
+}
+
+export interface Attachment {
+	mimetype: string;
+	name: string;
+	title: string;
+	type: string;
+	url?: string;
+	size?: number;
 }
 
 export interface CSPost extends CSEntity {
@@ -264,27 +286,13 @@ export interface CSPost extends CSEntity {
 	seqNum: number | string;
 	hasBeenEdited: boolean;
 	mentionedUserIds?: string[];
-	origin?: "email" | "slack" | "msteams";
+	origin?: "email" | "slack" | "msteams" | "editor";
 	reactions?: { [key: string]: string[] };
 	codemarkId?: string;
 	reviewCheckpoint?: number;
 	reviewId?: string;
-	files?: [
-		{
-			mimetype: string;
-			name: string;
-			title: string;
-			type: string;
-			url: string;
-			preview?:
-				| string
-				| {
-						url: string;
-						width: number;
-						height: number;
-				  };
-		}
-	];
+	files?: Attachment[];
+	sharedTo?: ShareTarget[];
 }
 
 export interface CSRemote {
@@ -381,6 +389,9 @@ export interface CSCompany extends CSEntity {
 	trialEndDate?: number;
 	plan?: string;
 	reportingGroup?: string;
+	testGroups?: {
+		[key: string]: string;
+	};
 }
 
 export interface CSTeam extends CSEntity {
@@ -442,148 +453,82 @@ export interface CSTag {
 	sortOrder?: number;
 }
 
-export interface CSAsanaProviderInfo {
-	refreshToken: string;
+export interface CSProviderInfo {
 	accessToken: string;
+	refreshToken?: string;
 	tokenError?: any;
-	expiresAt: number;
-	userId: string;
-	hosts: { [host: string]: CSAsanaProviderInfo };
-}
-
-export interface CSBitbucketProviderInfo {
-	refreshToken: string;
-	accessToken: string;
-	tokenError?: any;
-	expiresAt: number;
-	userId: string;
-	hosts: { [host: string]: CSBitbucketProviderInfo };
+	expiresAt?: number;
+	userId?: string;
+	isApiToken?: boolean;
+	hosts?: { [host: string]: CSProviderInfos };
 	data?: {
 		baseUrl?: string;
 		scopes?: string;
-	};
-}
-
-export interface CSGitHubProviderInfo {
-	accessToken: string;
-	tokenError?: any;
-	userId: string;
-	hosts: { [host: string]: CSGitHubProviderInfo };
-	data?: {
-		baseUrl?: string;
 		[key: string]: any;
 	};
 }
 
-export interface CSGitLabProviderInfo {
-	accessToken: string;
-	tokenError?: any;
-	userId: string;
-	hosts: { [host: string]: CSGitLabProviderInfo };
+export interface CSAsanaProviderInfo extends CSProviderInfo {
+	refreshToken: string;
+}
+
+export interface CSBitbucketProviderInfo extends CSProviderInfo {
+	refreshToken: string;
+}
+
+export interface CSGitHubProviderInfo extends CSProviderInfo {}
+
+export interface CSGitLabProviderInfo extends CSProviderInfo {}
+
+export interface CSJiraProviderInfo extends CSProviderInfo {
+	refreshToken: string;
 	data?: {
 		baseUrl?: string;
+		email?: string;
 	};
 }
 
-export interface CSJiraProviderInfo {
-	accessToken: string;
-	tokenError?: any;
+export interface CSMSTeamsProviderInfo extends CSProviderInfo {
 	refreshToken: string;
-	expiresAt: number;
-	hosts: { [hosts: string]: CSJiraProviderInfo };
-}
-
-export interface CSMSTeamsProviderInfo {
-	accessToken: string;
-	tokenError?: any;
 	data: {
 		expires_in: number;
 		scope: string;
 		token_type: string;
 	};
-	expiresAt: number;
-	refreshToken: string;
-
 	teamId: string;
-	userId: string;
-	hosts?: { [host: string]: CSMSTeamsProviderInfo };
 	extra?: { [host: string]: any };
 	multiple?: {
 		[teamId: string]: Omit<CSMSTeamsProviderInfo, "multiple">;
 	};
 }
 
-export interface CSJiraServerProviderInfo {
-	accessToken: string;
-	tokenError?: any;
+export interface CSJiraServerProviderInfo extends CSProviderInfo {
 	oauthTokenSecret: string;
-	hosts: { [hosts: string]: CSJiraServerProviderInfo };
 }
 
-export interface CSSlackProviderInfo {
-	accessToken: string;
-	tokenError?: any;
+export interface CSSlackProviderInfo extends CSProviderInfo {
 	teamId: string;
-	userId: string;
-	hosts?: { [host: string]: CSSlackProviderInfo };
-	data?: { [key: string]: any };
 	extra?: { [host: string]: any };
 	multiple?: {
 		[teamId: string]: Omit<CSSlackProviderInfo, "multiple">;
 	};
 }
 
-export interface MSTeamsProviderInfo {
-	accessToken: string;
-	tokenError?: any;
-	refreshToken: string;
-	expiresAt: number;
-	teamId: string;
-	userId: string;
-	hosts?: { [host: string]: MSTeamsProviderInfo };
-	data?: { [key: string]: any };
-	extra?: { [key: string]: any };
-	multiple?: {
-		[teamId: string]: Omit<MSTeamsProviderInfo, "multiple">;
-	};
-}
-
-export interface CSTrelloProviderInfo {
-	accessToken: string;
-	tokenError?: any;
+export interface CSTrelloProviderInfo extends CSProviderInfo {
 	apiKey: string;
-	userId: string;
-	hosts: { [host: string]: CSTrelloProviderInfo };
 }
 
-export interface CSYouTrackProviderInfo {
-	accessToken: string;
-	tokenError?: any;
-	userId: string;
-	hosts: { [host: string]: CSYouTrackProviderInfo };
-	data?: {
-		baseUrl?: string;
-	};
-}
+export interface CSYouTrackProviderInfo extends CSProviderInfo {}
 
-export interface CSAzureDevOpsProviderInfo {
-	accessToken: string;
-	tokenError?: any;
+export interface CSAzureDevOpsProviderInfo extends CSProviderInfo {
 	organization?: string;
-	hosts: { [host: string]: CSAzureDevOpsProviderInfo };
 }
 
-export interface CSOktaProviderInfo {
-	accessToken: string;
-	tokenError?: any;
-	hosts: { [host: string]: CSAzureDevOpsProviderInfo };
-}
+export interface CSOktaProviderInfo extends CSProviderInfo {}
 
-export interface CSClubhouseProviderInfo {
-	accessToken: string;
-	tokenError?: any;
-	hosts: { [host: string]: CSAzureDevOpsProviderInfo };
-}
+export interface CSClubhouseProviderInfo extends CSProviderInfo {}
+
+export interface CSLinearProviderInfo extends CSProviderInfo {}
 
 export type CSProviderInfos =
 	| CSAsanaProviderInfo
@@ -598,7 +543,8 @@ export type CSProviderInfos =
 	| CSYouTrackProviderInfo
 	| CSAzureDevOpsProviderInfo
 	| CSOktaProviderInfo
-	| CSClubhouseProviderInfo;
+	| CSClubhouseProviderInfo
+	| CSLinearProviderInfo;
 
 type Filter<T, U> = T extends U ? T : never;
 export type CSRefreshableProviderInfos = Filter<CSProviderInfos, { refreshToken: string }>;
@@ -641,6 +587,7 @@ export interface CSUser extends CSEntity {
 	presence?: string;
 	preferences?: CSMePreferences;
 	firstSessionStartedAt?: number;
+	hasGitLens?: boolean;
 }
 
 export interface CSLastReads {
@@ -682,6 +629,13 @@ export interface PullRequestQuery {
 	hidden: boolean;
 }
 
+export interface FetchRequestQuery {
+	name: string;
+	query: string;
+	hidden: boolean;
+	limit?: number;
+}
+
 export interface CSMePreferences {
 	telemetryConsent?: boolean; // legacy
 	telemetryOptOut?: boolean;
@@ -693,12 +647,26 @@ export interface CSMePreferences {
 	skipPostCreationModal?: boolean;
 	pullRequestFilesChangedMode?: "files" | "tree" | "hunks";
 	pullRequestQueries?: PullRequestQuery[];
+	fetchRequestQueries?: FetchRequestQuery[];
 	pullRequestQueryShowAllRepos?: boolean;
 	pullRequestQueryHideLabels?: boolean;
 	pullRequestView?: "auto" | "vertical" | "side-by-side";
+	reviewCreateOnCommit?: boolean;
+	reviewCreateOnDetectUnreviewedCommits?: boolean;
+	issueReposDefaultBranch?: {
+		[repoId: string]: string;
+	};
 	hiddenPaneNodes?: {
 		[nodeId: string]: boolean;
 	};
+
+	// which icons to show in the editor gutters
+	codemarksShowPRComments?: boolean;
+	codemarksHideReviews?: boolean;
+	codemarksHideResolved?: boolean;
+	codemarksShowArchived?: boolean;
+
+	defaultResolveAction?: "resolve" | "archive";
 	[key: string]: any;
 }
 

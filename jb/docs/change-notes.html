@@ -1,3 +1,167 @@
+<h4 id="10_6_1">10.6.1</h4>
+<h5>Added</h5>
+<ul>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/411">#411</a> - Case sensitive branch names</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>"+" button to comment on code is only shown in the editor gutter on selection (i.e., not on hover) unless you're in a diff for a feedback request or pull request</li>
+    <li>Even if Line Number is the selected sort, the sorting of the Codemarks section is always Date unless Current File is the selected filter</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Fixes an issue with connecting on on-prem services, such as GitHub Entperise and Bitbucket Server</li>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/408">#408</a> - Codemark not showing code block with Russian characters</li>
+    <li>Fixes an issue when clicking on icons in the editor gutter for pull request comments from Bitbucket or GitLab</li>
+    <li>Fixes an issue with viewing diffs for pull requests from forks</li>
+    <li>Fixes an issue where manually entering triple backticks when adding a code block to a post breaks the formatting of the post</li>
+    <li>Fixes an issue where the contents of the Codemarks section would unecessarily reload when switching files within the same repo</li>
+    <li>Fixes an issue when clicking to see git diff in review window would trigger an undefined error</li>
+</ul>
+<h4 id="10_6_0">10.6.0</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds the ability to review a pull request by a specific commit</li>
+    <li>Adds a new onboarding tour focussed on educating new users on CodeStream's key features</li>
+    <li>Adds a "Shared To" section to codemarks and feedback requests indicating when the item was shared to Slack</li>
+    <li>Adds an <a href="https://www.codestream.com/blog/codestream-10-6-discussion-resolutions-published-to-slack">automated post to Slack</a> when a shared codemark or feedback request has been resolved</li>
+    <li>Adds the feedback request title to the toast notification when the request is approved, rejected ot reopened</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Fixes an issue with “disable strict SSL” setting not working for self-hosted services</li>
+    <li>Fixes an issue with an HTTPS-Required popup incorrectly showing for new on-prem installations</li>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/388">#388</a> - Codemark issue with filenames containing "+" char</li>
+    <li>Fixes an unexpected error when clicking on a pull request</li>
+    <li>Fixes an issue with the count in the heading of the Coedmarks section being incorrect when filter isn't set to the current file</li>
+    <li>Fixes an issue commenting in a pull request in a file in a folder that doesn't exist in your current branch</li>
+    <li>Fixes an issue with the Slack integration not appearing as a green tile on the Integrations page immediately after connecting</li>
+    <li>Fixes an issue with the Locate button not working in a feedback request when you don't have the given repo open</li>
+    <li>Fixes an issue with commenting on code in files that are symlinks</li>
+    <li>Fixes an issue with icons for PR comments not appearing in the editor gutter when the file is a type not supported by the IDE</li>
+</ul>
+<h4 id="10_5_1">10.5.1</h4>
+<h5>Fixed</h5>
+<ul>
+    <li>Fixes an issue that caused an 'Unexpected Error' screen on sign-in</li>
+</ul>
+<h4 id="10_5_0">10.5.0</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds PSI (code intelligence) to diffs for both feedback requests and pull requests</li>
+    <li>Adds a prompt to create a feedback request when you commit code from outside the IDE, which can be turned off via a toggle above the form</li>
+    <li>Adds checkbox to the Notifications page to control the new Feedback Request Reminder email notification</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>Comment codemarks can now be resolved</li>
+    <li>The Codemarks section of the sidebar breaks out codemarks by status (open, resolved, archived) with new colors for each</li>
+    <li>Default filters on the Search page are now Open Issues, Open Code Comments, and Open Feedback Requests, and is:open / is:closed advanced syntax now includes comment codemarks</li>
+    <li>CodeStream on-prem customers can now connect to Jira's cloud service using API tokens instead of OAuth</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Fixes issue that prevented pull request creation on github.io repositories</li>
+    <li>Fixes an issue with invitation codes for on-prem customers not correctly setting the CodeStream server URL for the invitee</li>
+    <li>Fixes an issue when commenting on a pull request that has been sitting open for more than an hour</li>
+    <li>Fixes a formatting issue with issues created on Asana</li>
+</ul>
+<h4 id="10_4_3">10.4.3</h4>
+<h5>Fixed</h5>
+<ul>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/392">#392</a> - Codemark not showing code block when created from Windows</li>
+</ul>
+<h4 id="10_4_2">10.4.2</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds a new tree view in the Changed Files section of feedback requests</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>Stop sending toast notifications for closed pull requests</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Fixes an issue where CodeStream could trigger the IntelliJ decompiler</li>
+    <li>Fixes an issue with commenting in a feedback request in a file with an @ in the name</li>
+    <li>Fixes an issue preventing you from being able to edit a feedback request</li>
+    <li>Fixes an issue creating an issue codemark on GitLab cloud</li>
+</ul>
+<h4 id="10_4_1">10.4.1</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds the ability to attach files to a feedback request, or to a reply</li>
+    <li>Adds support for custom queries for Jira Server in the Issues section</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>Automatically populate all reviewer slots in a feedback request, going to recent committers if necessary, if one of the "authorship" assignment options is selected</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/380">#380</a> - Viewing a PR with status checks on GitHub Enterprise generates an error</li>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/376">#376</a> - Can't exit preview mode when creating a feedback request</li>
+    <li>Fixes an issue where you'd end up in an infinite "Fetching repo..." loop trying to create an issue on Bitbucket</li>
+    <li>Fixes an issue creating a permalink when in a WSL environment</li>
+</ul>
+<h4 id="10_4_0">10.4.0</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds support for <a href="https://www.codestream.com/blog/codestream-10-4-file-attachments-github-status-checks"></a>file attachments</a> when creating comment or issue codemarks</li>
+    <li>Adds support for GitHub status checks in pull requests rendered in CodeStream</li>
+    <li>When selecting a Linear issue to start work, the branch name associated with the issue is used</li>
+    <li>Adds the ability to pull the latest, if the base branch is behind origin, when previewing diffs while creating a pull request</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>Prevent the creation of codemarks when in a preview diff while submitting a feedback request</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/353">#353</a> - Codemark glyphs do not show up in WSL environment</li>
+    <li>Fixes an issue where starting work on an issue creates a feature branch against the wrong base</li>
+    <li>Fixes a data integrity issue that led to a small group of users getting an error clicking on a codemark</li>
+    <li>Fixes with the fetching of too much history data from PubNub if client clock is inaccurately set</li>
+    <li>Performance improvements</li>
+    <li>Fixes an issue with feedback requests assigned to you not appearing in the Approved or Needs Work sections without a reload</li>
+</ul>
+<h4 id="10_3_0">10.3.0</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds a new integration with the Linear issue-tracking service</li>
+    <li>Adds an <a href="https://medium.com/teamcodestream/how-we-extended-gitlens-pull-request-functionality-in-visual-studio-code-f4dbecbea4c2"></a>integration with GitLens</a> which allows you to create and view pull requests using CodeStream</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/364">#364</a> - Copy button in PR is copying the base branch name instead of the compare branch</li>
+    <li>Fixes an issue where the Open File button in the Tree View of the list of files in a PR wouldn't open the correct file if sections of the tree were collapsed</li>
+</ul>
+<h4 id="10_2_2">10.2.2</h4>
+<h5>Added</h5>
+<ul>
+    <li>Split the Feedback Requests section of the sidebar into sections for Open, Approved and Needs Work</li>
+    <li>When selecting a ticket to start work, added an option to pull latest if base branch is behind origin</li>
+    <li>Added the ability to set a default base branch per repo when creating a feature branch</li>
+</ul>
+<h4 id="10_2_1">10.2.1</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds a new onboarding flow for some users that guides them through the setup of integrations and creating their first code comment</li>
+    <li>Adds the ability to generate a feedback request after commiting via the JetBrains commit dialog</li>
+    <li>Adds support for remotes using SSH aliases</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>When creating a feedback request only commits from current user are checked by default, and only if they include the most recent commit</li>
+    <li>The list in the Pull Requests section automatically updates when you open, close or merge a pull request from CodeStream</li>
+    <li>The hovers for icons in the editor gutter now make it clear if the discussion was a comment, issue, feedback request or pull request</li>
+    <li>Optimization of git operations to gather commits when creating a feedback request</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Fixes an issue where CodeStream would repeatedly reload</li>
+    <li>Fixes an issue that would create an error when clicking on a feedback request due to bad data</li>
+</ul>
 <h4 id="10_2_0">10.2.0</h4>
 <h5>Added</h5>
 <ul>

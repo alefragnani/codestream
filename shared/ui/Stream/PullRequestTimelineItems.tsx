@@ -155,7 +155,7 @@ export const PullRequestTimelineItems = (props: PropsWithChildren<Props>) => {
 				<PRCommentCard className="dark-header">
 					<PRCommentHeader>
 						<div>
-							<PRAuthor>{pr.author.login}</PRAuthor> commented{" "}
+							<PRAuthor>{(pr.author || GHOST).login}</PRAuthor> commented{" "}
 							<Timestamp time={pr.createdAt!} relative />
 							{pr.includesCreatedEdit ? <> • edited</> : ""}
 						</div>
@@ -226,7 +226,7 @@ export const PullRequestTimelineItems = (props: PropsWithChildren<Props>) => {
 										<>
 											<PRCommentHeader>
 												<div>
-													<PRAuthor>{author.login}</PRAuthor> commented{" "}
+													<PRAuthor>{(author || GHOST).login}</PRAuthor> commented{" "}
 													<Timestamp time={item.createdAt!} relative />
 													{item.includesCreatedEdit ? <> • edited</> : ""}
 												</div>
@@ -287,7 +287,7 @@ export const PullRequestTimelineItems = (props: PropsWithChildren<Props>) => {
 									<PRHeadshot key={index} size={40} person={author} />
 									{reviewIcon}
 									<PRTimelineItemBody>
-										<PRAuthor>{author.login}</PRAuthor>{" "}
+										<PRAuthor>{(author || GHOST).login}</PRAuthor>{" "}
 										{item.state === "APPROVED" && "approved this review"}
 										{item.state === "CHANGES_REQUESTED" && "requested changes"}
 										{item.state === "COMMENTED" && "reviewed"}
@@ -315,7 +315,7 @@ export const PullRequestTimelineItems = (props: PropsWithChildren<Props>) => {
 											<>
 												<PRCommentHeader>
 													<div>
-														<PRAuthor>{author.login}</PRAuthor> commented{" "}
+														<PRAuthor>{(author || GHOST).login}</PRAuthor> commented{" "}
 														<Timestamp time={item.createdAt!} relative />
 														{item.includesCreatedEdit ? <> • edited</> : ""}
 													</div>
@@ -437,7 +437,15 @@ export const PullRequestTimelineItems = (props: PropsWithChildren<Props>) => {
 													headBranch: props.pr.headRefName,
 													headSha: props.pr.headRefOid,
 													filePath,
-													repoId: derivedState.currentRepo!.id!
+													repoId: derivedState.currentRepo!.id!,
+													context: props.pr
+														? {
+																pullRequest: {
+																	providerId: props.pr.providerId,
+																	id: props.pr.id
+																}
+														  }
+														: undefined
 												};
 
 												try {
@@ -511,6 +519,7 @@ export const PullRequestTimelineItems = (props: PropsWithChildren<Props>) => {
 															item={item}
 															comment={comment}
 															author={author}
+															mode="timeline"
 															skipResolvedCheck
 														/>
 													</PRCodeComment>
@@ -867,10 +876,22 @@ export const PullRequestTimelineItems = (props: PropsWithChildren<Props>) => {
 								<Icon name="milestone" className="circled" />
 								<PRTimelineItemBody>
 									<PRHeadshotName key={index} person={item.actor} />
-									force-pushed the{" "}
-									{item.ref && item.ref.name && <PRBranch>{item.ref.name}</PRBranch>} branch from{" "}
-									<PRBranch>{item.beforeCommit.abbreviatedOid}</PRBranch> to{" "}
-									<PRBranch>{item.afterCommit.abbreviatedOid}</PRBranch>
+									force-pushed{" "}
+									{item.ref && item.ref.name && (
+										<>
+											the <PRBranch>{item.ref.name}</PRBranch> branch
+										</>
+									)}{" "}
+									{item.beforeCommit && (
+										<>
+											from <PRBranch>{item.beforeCommit.abbreviatedOid}</PRBranch>
+										</>
+									)}{" "}
+									{item.afterCommit && (
+										<>
+											to <PRBranch>{item.afterCommit.abbreviatedOid}</PRBranch>
+										</>
+									)}{" "}
 									<Timestamp time={item.createdAt!} relative />
 								</PRTimelineItemBody>
 							</PRTimelineItem>

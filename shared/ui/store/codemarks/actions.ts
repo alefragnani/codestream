@@ -1,4 +1,4 @@
-import { CSCodemark, CodemarkType } from "@codestream/protocols/api";
+import { CSCodemark, CodemarkType, Attachment } from "@codestream/protocols/api";
 import { action } from "../common";
 import { CodemarksActionsTypes } from "./types";
 import { HostApi } from "@codestream/webview/webview-api";
@@ -6,6 +6,7 @@ import {
 	AddMarkersRequest,
 	AddMarkersRequestType,
 	UpdateCodemarkRequestType,
+	UpdatePostSharingDataRequestType,
 	DeleteCodemarkRequestType,
 	GetRangeScmInfoResponse,
 	CrossPostIssueValues,
@@ -50,6 +51,7 @@ export interface BaseNewCodemarkAttributes {
 	deleteMarkerLocations?: {
 		[index: number]: boolean;
 	};
+	files?: Attachment[];
 }
 
 export interface SharingNewCodemarkAttributes extends BaseNewCodemarkAttributes {
@@ -58,7 +60,9 @@ export interface SharingNewCodemarkAttributes extends BaseNewCodemarkAttributes 
 	sharingAttributes?: {
 		providerId: string;
 		providerTeamId: string;
+		providerTeamName?: string;
 		channelId: string;
+		channelName?: string;
 	};
 	textDocuments?: TextDocumentIdentifier[];
 	entryPoint?: string;
@@ -98,6 +102,7 @@ export const createCodemark = (attributes: SharingNewCodemarkAttributes) => asyn
 	getState: () => CodeStreamState
 ) => {
 	const { accessMemberIds, ...rest } = attributes;
+	const state = getState();
 
 	try {
 		const response = await HostApi.instance.send(CreateShareableCodemarkRequestType, {
@@ -109,7 +114,9 @@ export const createCodemark = (attributes: SharingNewCodemarkAttributes) => asyn
 			addedUsers: attributes.addedUsers,
 			parentPostId: attributes.parentPostId,
 			isPseudoCodemark: attributes.isPseudoCodemark,
-			isProviderReview: attributes.isProviderReview
+			isProviderReview: attributes.isProviderReview,
+			files: attributes.files,
+			ideName: state.ide.name
 		});
 		if (response) {
 			let result;
@@ -127,16 +134,37 @@ export const createCodemark = (attributes: SharingNewCodemarkAttributes) => asyn
 				dispatch(addStreams([response.stream]));
 
 				if (attributes.sharingAttributes) {
+					const { sharingAttributes } = attributes;
 					try {
-						await HostApi.instance.send(CreateThirdPartyPostRequestType, {
-							providerId: attributes.sharingAttributes.providerId,
-							channelId: attributes.sharingAttributes.channelId,
-							providerTeamId: attributes.sharingAttributes.providerTeamId,
-							text: rest.text,
-							codemark: response.codemark,
-							remotes: attributes.remotes,
-							mentionedUserIds: attributes.mentionedUserIds
-						});
+						const { post, ts, permalink } = await HostApi.instance.send(
+							CreateThirdPartyPostRequestType,
+							{
+								providerId: sharingAttributes.providerId,
+								channelId: sharingAttributes.channelId,
+								providerTeamId: sharingAttributes.providerTeamId,
+								text: rest.text,
+								codemark: response.codemark,
+								remotes: attributes.remotes,
+								mentionedUserIds: attributes.mentionedUserIds
+							}
+						);
+						if (ts) {
+							await HostApi.instance.send(UpdatePostSharingDataRequestType, {
+								postId: response.codemark.postId,
+								sharedTo: [
+									{
+										createdAt: post.createdAt,
+										providerId: sharingAttributes.providerId,
+										teamId: sharingAttributes.providerTeamId,
+										teamName: sharingAttributes.providerTeamName || "",
+										channelId: sharingAttributes.channelId,
+										channelName: sharingAttributes.channelName || "",
+										postId: ts,
+										url: permalink || ""
+									}
+								]
+							});
+						}
 						HostApi.instance.track("Shared Codemark", {
 							Destination: capitalize(
 								getConnectedProviders(getState()).find(
@@ -157,7 +185,16 @@ export const createCodemark = (attributes: SharingNewCodemarkAttributes) => asyn
 		// if this is a sharing error just throw it
 		if (isCreateCodemarkError(error)) throw error;
 
-		logError("Error creating a codemark", { message: error.toString() });
+		logError(
+			attributes &&
+				attributes.codeBlocks &&
+				attributes.codeBlocks.length &&
+				attributes.codeBlocks[0].context &&
+				attributes.codeBlocks[0].context.pullRequest
+				? "Error creating PR comment"
+				: "Error creating a codemark",
+			{ message: error.toString() }
+		);
 		throw { reason: "create" } as CreateCodemarkError;
 	}
 };

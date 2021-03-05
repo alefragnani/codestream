@@ -2,6 +2,7 @@
 import { CreateReviewChangesetsRequest } from "./agent.protocol.reviews";
 import { RepoScmStatus } from "./agent.protocol.scm";
 import {
+	Attachment,
 	ChannelServiceType,
 	CodemarkType,
 	CSApiCapabilities,
@@ -93,7 +94,7 @@ export interface CSLoginResponse {
 	teamId?: string;
 	capabilities?: CSApiCapabilities;
 	features?: CSApiFeatures;
-	runTimeEnvironment?: string;
+	runtimeEnvironment?: string;
 }
 
 export interface CSRegisterRequest {
@@ -104,6 +105,7 @@ export interface CSRegisterRequest {
 	companyName?: string;
 	wantLink?: boolean;
 	inviteCode?: string;
+	machineId?: string;
 }
 
 export interface CSRegisterResponse {
@@ -264,6 +266,14 @@ export interface CSEditPostResponse {
 	post: { [key: string]: any };
 }
 
+export interface CSUpdatePostSharingDataRequest {
+	[key: string]: any;
+}
+
+export interface CSUpdatePostSharingDataResponse {
+	post: { [key: string]: any };
+}
+
 export interface CSReactions {
 	[emoji: string]: boolean;
 }
@@ -290,7 +300,9 @@ export interface CSMarkPostUnreadResponse {}
 
 export interface CSSetCodemarkPinnedRequest {}
 
-export interface CSSetCodemarkPinnedResponse {}
+export interface CSSetCodemarkPinnedResponse {
+	codemark: CSCodemark;
+}
 
 export interface CSPinReplyToCodemarkRequest {
 	codemarkId: string;
@@ -409,6 +421,7 @@ export interface CSInviteUserRequest {
 	email: string;
 	teamId: string;
 	fullName?: string;
+	dontSendEmail?: boolean;
 }
 
 export interface CSInviteUserResponse {
@@ -541,6 +554,8 @@ export interface CSCreateReviewRequest {
 	status?: string;
 	reviewers?: string[];
 	authorsById?: { [authorId: string]: { stomped: number; commits: number } };
+	followerIds?: string[];
+	codeAuthorIds?: string[];
 	tags?: string[];
 
 	repoChanges?: CSRepoChange[];
@@ -552,6 +567,7 @@ export interface CSCreateReviewRequest {
 	externalProviderUrl?: string;
 	externalProviderHost?: string;
 	remoteCodeUrl?: { name: string; url: string };
+	files?: Attachment[];
 	// threadUrl?: string;
 }
 

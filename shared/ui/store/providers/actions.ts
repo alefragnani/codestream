@@ -17,6 +17,7 @@ import { CSMe } from "@codestream/protocols/api";
 import { logError } from "../../logger";
 import { setIssueProvider, openPanel } from "../context/actions";
 import { deleteForProvider } from "../activeIntegrations/actions";
+import { isOnPrem } from "../configs/reducer";
 
 export const reset = () => action("RESET");
 
@@ -24,7 +25,8 @@ export const getUserProviderInfo = (user: CSMe, provider: string, teamId: string
 	const providerInfo = user.providerInfo || {};
 	const userProviderInfo = providerInfo[provider];
 	const teamProviderInfo = providerInfo[teamId] && providerInfo[teamId][provider];
-	return userProviderInfo || teamProviderInfo;
+	if (userProviderInfo && userProviderInfo.accessToken) return userProviderInfo;
+	else return teamProviderInfo;
 };
 
 export const updateProviders = (data: ProvidersState) => action(ProvidersActionsType.Update, data);
@@ -34,13 +36,15 @@ export const configureAndConnectProvider = (
 	connectionLocation: ViewLocation,
 	force?: boolean
 ) => async (dispatch, getState) => {
-	const { providers } = getState();
+	const { providers, configs } = getState();
 	const provider = providers[providerId];
-	const { forEnterprise, isEnterprise, name, needsConfigure } = provider;
-	if (needsConfigure) {
-		dispatch(openPanel(`configure-provider-${provider.name}-${provider.id}-Integrations Panel`));
+	const { forEnterprise, isEnterprise, name, needsConfigure, needsConfigureForOnPrem } = provider;
+	const onprem = isOnPrem(configs);
+	connectionLocation = connectionLocation || "Integrations Panel";
+	if (needsConfigure || (onprem && needsConfigureForOnPrem)) {
+		dispatch(openPanel(`configure-provider-${provider.name}-${provider.id}-${connectionLocation}`));
 	} else if ((forEnterprise || isEnterprise) && name !== "jiraserver") {
-		dispatch(openPanel(`configure-enterprise-${name}-${provider.id}-Integrations Panel`));
+		dispatch(openPanel(`configure-enterprise-${name}-${provider.id}-${connectionLocation}`));
 	} else {
 		dispatch(connectProvider(provider.id, connectionLocation, force));
 	}
@@ -74,12 +78,16 @@ export const connectProvider = (
 				configureProvider(
 					providerId,
 					{ token: result.accessToken, data: { sessionId: result.sessionId } },
-					true
+					true,
+					connectionLocation
 				)
 			);
 			return {};
 		} else {
 			await api.send(ConnectThirdPartyProviderRequestType, { providerId });
+		}
+		if (provider.hasSharing) {
+			dispatch(sendMessagingServiceConnected(providerId, connectionLocation));
 		}
 		if (provider.hasIssues) {
 			dispatch(sendIssueProviderConnected(providerId, connectionLocation));
@@ -102,7 +110,8 @@ export type ViewLocation =
 	| "Create Pull Request Panel"
 	| "Issues Section"
 	| "Provider Error Banner"
-	| "Onboard";
+	| "Onboard"
+	| "PRs Section";
 
 export const sendIssueProviderConnected = (
 	providerId: string,
@@ -118,7 +127,23 @@ export const sendIssueProviderConnected = (
 		properties: {
 			Service: name,
 			Host: isEnterprise ? host : null,
-			Connection: "On",
+			"Connection Location": connectionLocation
+		}
+	});
+};
+
+export const sendMessagingServiceConnected = (
+	providerId: string,
+	connectionLocation: ViewLocation = "Onboard"
+) => async (dispatch, getState) => {
+	const { providers } = getState();
+	const provider = providers[providerId];
+	if (!provider) return;
+
+	HostApi.instance.send(TelemetryRequestType, {
+		eventName: "Messaging Service Connected",
+		properties: {
+			Service: provider.name,
 			"Connection Location": connectionLocation
 		}
 	});
@@ -205,15 +230,6 @@ export const disconnectProvider = (
 		if (ide.name === "VSC" && provider.name === "github") {
 			await api.send(DisconnectFromIDEProviderRequestType, { provider: provider.name });
 		}
-		api.send(TelemetryRequestType, {
-			eventName: "Issue Service Connected",
-			properties: {
-				Service: provider.name,
-				Host: provider.isEnterprise ? provider.host : null,
-				Connection: "Off",
-				"Connection Location": connectionLocation // ? "Global Nav" : "Compose Modal"
-			}
-		});
 		dispatch(deleteForProvider(providerId, providerTeamId));
 		if (getState().context.issueProvider === provider.host) {
 			dispatch(setIssueProvider(undefined));

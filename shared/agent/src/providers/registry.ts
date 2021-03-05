@@ -87,15 +87,16 @@ export * from "./slack";
 export * from "./msteams";
 export * from "./okta";
 export * from "./clubhouse";
+export * from "./linear";
 
 const PR_QUERIES = [
 	{
 		name: "is waiting on your review",
-		query: `is:pr review-requested:@me -author:@me`
+		query: `is:pr is:open review-requested:@me -author:@me`
 	},
 	{
 		name: "was assigned to you",
-		query: `is:pr assignee:@me -author:@me`
+		query: `is:pr is:open assignee:@me -author:@me`
 	}
 ];
 
@@ -107,6 +108,7 @@ interface ProviderPullRequests {
 @lsp
 export class ThirdPartyProviderRegistry {
 	private _lastProvidersPRs: ProviderPullRequests[] | undefined;
+	private _queriedPRsAgeLimit?: { providerName: string; ageLimit: number[] }[] | undefined;
 	private _pollingInterval: NodeJS.Timer | undefined;
 
 	constructor(public readonly session: CodeStreamSession) {
@@ -126,8 +128,13 @@ export class ThirdPartyProviderRegistry {
 		});
 		const providersPullRequests: ProviderPullRequests[] = [];
 
+		let succeededCount = 0;
 		for (const provider of providers) {
 			try {
+				if ((provider as ThirdPartyProvider).hasTokenError) {
+					Logger.debug(`pullRequestsStateHandler: ignoring ${provider.name} because of tokenError`);
+					continue;
+				}
 				const pullRequests = await provider.getMyPullRequests({
 					queries: PR_QUERIES.map(_ => _.query)
 				});
@@ -137,34 +144,38 @@ export class ThirdPartyProviderRegistry {
 						providerName: provider.name,
 						queriedPullRequests: pullRequests
 					});
+					succeededCount++;
 				}
 			} catch (ex) {
-				const errorString = typeof ex === "string" ? ex : ex.message;
-				if (
-					errorString &&
-					(errorString.indexOf("ENOTFOUND") > -1 ||
-						errorString.indexOf("ETIMEDOUT") > -1 ||
-						errorString.indexOf("EAI_AGAIN") > -1 ||
-						errorString.indexOf("ECONNRESET") > -1 ||
-						errorString.indexOf("ENETDOWN") > -1 ||
-						errorString.indexOf("socket disconnected before secure") > -1)
-				) {
-					// ignore network related errors.
-					return;
-				}
+				Logger.warn(`pullRequestsStateHandler: ${typeof ex === "string" ? ex : ex.message}`);
 				throw ex;
 			}
 		}
+		if (succeededCount > 0) {
+			const newProvidersPRs = this.getProvidersPRsDiff(providersPullRequests);
+			this._lastProvidersPRs = providersPullRequests;
 
-		const newProvidersPRs = this.getProvidersPRsDiff(providersPullRequests);
-		this._lastProvidersPRs = providersPullRequests;
-
-		this.fireNewPRsNotifications(newProvidersPRs);
+			this.fireNewPRsNotifications(newProvidersPRs);
+		}
 	}
 
 	private getProvidersPRsDiff = (providersPRs: ProviderPullRequests[]): ProviderPullRequests[] => {
 		const newProvidersPRs: ProviderPullRequests[] = [];
 		if (this._lastProvidersPRs === undefined) {
+			this._queriedPRsAgeLimit = providersPRs.map(providerPRs => {
+				const ageLimit = providerPRs.queriedPullRequests.map(
+					(pullRequests: GetMyPullRequestsResponse[], index: number) => {
+						if (pullRequests.length > 0) {
+							return pullRequests[pullRequests.length - 1].createdAt;
+						}
+						return 0;
+					}
+				);
+				return {
+					providerName: providerPRs.providerName,
+					ageLimit
+				};
+			});
 			return [];
 		}
 
@@ -179,9 +190,15 @@ export class ThirdPartyProviderRegistry {
 			const queriedPullRequests: GetMyPullRequestsResponse[][] = [];
 			providerPRs.queriedPullRequests.map(
 				(pullRequests: GetMyPullRequestsResponse[], index: number) => {
+					const ageLimit = this._queriedPRsAgeLimit?.find(
+						_ => _.providerName === providerPRs.providerName
+					);
+					const actualPRs = pullRequests.filter(
+						pr => pr.createdAt >= (ageLimit ? ageLimit.ageLimit[index] : 0)
+					);
 					queriedPullRequests.push(
 						differenceWith(
-							pullRequests,
+							actualPRs,
 							previousProviderPRs.queriedPullRequests[index],
 							(value, other) => value.id === other.id
 						)
@@ -596,7 +613,7 @@ export class ThirdPartyProviderRegistry {
 					if (!isConnected) continue;
 
 					const fn = thirdPartyIssueProvider.getIsMatchingRemotePredicate();
-					if (fn && fn({ domain: uri.authority })) {
+					if (fn && fn({ domain: uri.authority, uri: uri })) {
 						const id = provider.getConfig().id;
 						Logger.log(
 							`queryThirdParty: found matching provider for ${uri.authority}. providerId=${id}`

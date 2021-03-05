@@ -58,31 +58,15 @@ export function reduceProviderPullRequests(
 				pullRequests: { ...state.pullRequests }
 			};
 		}
-		case ProviderPullRequestActionsTypes.RemoveFromMyPullRequests: {
-			const newState = { ...state.myPullRequests };
-			newState[action.payload.providerId] = {
-				data: undefined
-			};
-			return {
-				myPullRequests: newState,
-				pullRequests: { ...state.pullRequests }
-			};
-		}
-		case ProviderPullRequestActionsTypes.ClearMyPullRequests: {
-			const newState = { ...state.myPullRequests };
-			newState[action.payload.providerId] = {
-				data: undefined
-			};
-			return {
-				myPullRequests: newState,
-				pullRequests: { ...state.pullRequests }
-			};
-		}
 		case ProviderPullRequestActionsTypes.AddPullRequestFiles: {
 			const newState = createNewObject(state, action);
+			const files = {
+				...newState[action.payload.providerId][action.payload.id].files
+			};
+			files[action.payload.commits] = action.payload.pullRequestFiles;
 			newState[action.payload.providerId][action.payload.id] = {
 				...newState[action.payload.providerId][action.payload.id],
-				files: action.payload.pullRequestFiles
+				files
 			};
 			return {
 				myPullRequests: { ...state.myPullRequests },
@@ -374,7 +358,9 @@ export const getProviderPullRequestRepo = createSelector(
 		let currentRepo: CSRepository | undefined = undefined;
 
 		try {
-			if (!currentPr || !currentPr.conversations) return undefined;
+			if (!currentPr || !currentPr.conversations || !currentPr.conversations.repository) {
+				return undefined;
+			}
 			const repoName = currentPr.conversations.repository.repoName.toLowerCase();
 			const repoUrl = currentPr.conversations.repository.url.toLowerCase();
 

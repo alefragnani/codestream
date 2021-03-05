@@ -1,4 +1,5 @@
 "use strict";
+import { toRepoName } from "../git/utils";
 import { flatten } from "lodash-es";
 import { Response } from "node-fetch";
 import * as paths from "path";
@@ -64,7 +65,8 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 
 	get headers(): any {
 		return {
-			Authorization: `Bearer ${this.accessToken}`
+			Authorization: `Bearer ${this.accessToken}`,
+			"Content-Type": "application/json"
 		};
 	}
 
@@ -89,7 +91,8 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 		};
 	}
 
-	async onConnected() {
+	async onConnected(providerInfo?: CSGitLabProviderInfo) {
+		super.onConnected(providerInfo);
 		this._gitlabUserId = await this.getMemberId();
 		this._projectsByRemotePath = new Map<string, GitLabProject>();
 	}
@@ -299,7 +302,7 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 		// gitlab & enterprise can use project groups + subgroups
 		const owner = split.filter(_ => _ !== "" && _ != null);
 		if (name != null) {
-			name = name.replace(".git", "");
+			name = toRepoName(name);
 		}
 
 		return {
@@ -457,6 +460,7 @@ export class GitLabProvider extends ThirdPartyIssueProviderBase<CSGitLabProvider
 				// NOTE: Keep this await here, so any errors are caught here
 				return await cachedComments.comments;
 			}
+			super.invalidatePullRequestDocumentMarkersCache();
 
 			const remotePaths = await getRemotePaths(
 				repo,

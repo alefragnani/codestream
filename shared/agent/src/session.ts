@@ -25,7 +25,6 @@ import {
 	RTMessage
 } from "./api/apiProvider";
 import { CodeStreamApiProvider } from "./api/codestream/codestreamApi";
-import { Team, User } from "./api/extensions";
 import {
 	ApiVersionCompatibilityChangedEvent,
 	VersionCompatibilityChangedEvent,
@@ -33,10 +32,9 @@ import {
 } from "./api/middleware/versionMiddleware";
 import { Container, SessionContainer } from "./container";
 import { DocumentEventHandler } from "./documentEventHandler";
-import { setGitPath } from "./git/git";
+import { GitRepository } from "./git/models/repository";
 import { Logger } from "./logger";
 import {
-	AgentInitializedNotificationType,
 	ApiRequestType,
 	ApiVersionCompatibility,
 	BaseAgentOptions,
@@ -56,7 +54,6 @@ import {
 	DidLoginNotificationType,
 	DidLogoutNotificationType,
 	DidStartLoginNotificationType,
-	FetchMarkerLocationsRequestType,
 	GetAccessTokenRequestType,
 	GetInviteInfoRequest,
 	GetInviteInfoRequestType,
@@ -70,13 +67,13 @@ import {
 	RegisterUserRequest,
 	RegisterUserRequestType,
 	ReportingMessageType,
-	RestartRequiredNotificationType,
 	SetServerUrlRequest,
 	SetServerUrlRequestType,
 	ThirdPartyProviders,
 	TokenLoginRequest,
 	TokenLoginRequestType,
 	UIStateRequestType,
+	UserDidCommitNotificationType,
 	VerifyConnectivityRequestType,
 	VerifyConnectivityResponse,
 	VersionCompatibility
@@ -89,6 +86,7 @@ import {
 	CSMarker,
 	CSMarkerLocations,
 	CSMe,
+	CSMePreferences,
 	CSPost,
 	CSRegisterResponse,
 	CSRepository,
@@ -98,6 +96,7 @@ import {
 	LoginResult
 } from "./protocol/api.protocol";
 import { log, memoize, registerDecoratedHandlers, registerProviders } from "./system";
+import { testGroups } from "./testGroups";
 
 // FIXME: Must keep this in sync with vscode-codestream/src/api/session.ts
 const envRegex = /https?:\/\/((?:(\w+)-)?api|localhost)\.codestream\.(?:us|com)(?::\d+$)?/i;
@@ -156,6 +155,10 @@ export interface VersionInfo {
 		version: string;
 		detail: string;
 	};
+
+	machine?: {
+		machineId?: string;
+	};
 }
 
 export class CodeStreamSession {
@@ -167,6 +170,11 @@ export class CodeStreamSession {
 	private _onDidChangeCurrentUser = new Emitter<CSMe>();
 	get onDidChangeCurrentUser(): Event<CSMe> {
 		return this._onDidChangeCurrentUser.event;
+	}
+
+	private _onDidChangePreferences = new Emitter<CSMePreferences>();
+	get onDidChangePreferences(): Event<CSMePreferences> {
+		return this._onDidChangePreferences.event;
 	}
 
 	private _onDidChangeMarkerLocations = new Emitter<CSMarkerLocations[]>();
@@ -392,10 +400,6 @@ export class CodeStreamSession {
 				};
 			}
 		);
-
-		this.agent.registerHandler(FetchMarkerLocationsRequestType, r =>
-			this.api.fetchMarkerLocations(r)
-		);
 	}
 
 	setServerUrl(options: SetServerUrlRequest) {
@@ -465,6 +469,7 @@ export class CodeStreamSession {
 				});
 				break;
 			case MessageType.Preferences:
+				this._onDidChangePreferences.fire(e.data);
 				this.agent.sendNotification(DidChangeDataNotificationType, {
 					type: ChangeDataType.Preferences,
 					data: e.data
@@ -576,6 +581,11 @@ export class CodeStreamSession {
 		return this._environment;
 	}
 
+	private _runTimeEnvironment: string = "prod";
+	get runTimeEnvironment() {
+		return this._runTimeEnvironment;
+	}
+
 	get disableStrictSSL(): boolean {
 		return this._options.disableStrictSSL != null ? this._options.disableStrictSSL : false;
 	}
@@ -632,7 +642,8 @@ export class CodeStreamSession {
 	get versionInfo(): Readonly<VersionInfo> {
 		return {
 			extension: { ...this._options.extension },
-			ide: { ...this._options.ide }
+			ide: { ...this._options.ide },
+			machine: { machineId: this._options.machineId }
 		};
 	}
 
@@ -796,6 +807,7 @@ export class CodeStreamSession {
 		this._codestreamAccessToken = token.value;
 		this._teamId = (this._options as any).teamId = token.teamId;
 		this._codestreamUserId = response.user.id;
+		this._runTimeEnvironment = response.runtimeEnvironment || "prod";
 
 		const currentTeam = response.teams.find(t => t.id === this._teamId)!;
 		this.registerApiCapabilities(response.capabilities || {}, currentTeam);
@@ -810,9 +822,7 @@ export class CodeStreamSession {
 			}
 		}
 
-		// note that there are no integrations if the api host is using http (as opposed to https),
-		// because OAuth won't work when calling back to http
-		this._providers = this._httpAgent ? {} : currentTeam.providerHosts || {};
+		this._providers = currentTeam.providerHosts || {};
 		registerProviders(this._providers, this);
 
 		const cc = Logger.getCorrelationContext();
@@ -837,8 +847,6 @@ export class CodeStreamSession {
 
 		this.setStatus(SessionStatus.SignedIn);
 
-		await setGitPath(this._options.gitPath);
-
 		this.api.onDidReceiveMessage(e => this.onRTMessageReceived(e), this);
 
 		Logger.log(cc, `Subscribing to real-time events...`);
@@ -850,7 +858,7 @@ export class CodeStreamSession {
 		);
 
 		SessionContainer.instance().git.onRepositoryCommitHashChanged(repo => {
-			SessionContainer.instance().markerLocations.flushUncommittedLocations(repo);
+			this.repositoryCommitHashChanged(repo);
 		});
 
 		SessionContainer.instance().git.onRepositoryChanged(data => {
@@ -866,6 +874,18 @@ export class CodeStreamSession {
 				data: data
 			});
 		});
+
+		// this needs to happen before initializing telemetry, because super-properties are dependent
+		if (this.apiCapabilities.testGroups) {
+			const company = await this.setCompanyTestGroups();
+			if (company) {
+				// replace company object in the response, so the test groups are correct
+				// for telemetry, and also what we send back to the webview
+				const index = response.companies.findIndex(c => c.id === company.id);
+				response.companies.splice(index, 1);
+				response.companies.push(company);
+			}
+		}
 
 		// Initialize tracking
 		this.initializeTelemetry(response.user, currentTeam, response.companies);
@@ -1075,6 +1095,11 @@ export class CodeStreamSession {
 					props["company"]["trialStart_at"] = new Date(company.trialStartDate).toISOString();
 					props["company"]["trialEnd_at"] = new Date(company.trialEndDate).toISOString();
 				}
+				if (company.testGroups) {
+					props["AB Test"] = Object.keys(company.testGroups).map(
+						key => `${key}|${company.testGroups![key]}`
+					);
+				}
 			}
 		}
 
@@ -1124,6 +1149,59 @@ export class CodeStreamSession {
 			) {
 				this._apiCapabilities[key] = capability;
 			}
+		}
+	}
+
+	async setCompanyTestGroups() {
+		const team = await SessionContainer.instance().teams.getByIdFromCache(this.teamId);
+		if (!team) return;
+		const company = await SessionContainer.instance().companies.getByIdFromCache(team.companyId);
+		if (!company) return;
+
+		// for each test, check if our company has been assigned a group, if not,
+		// generate a random group assignment from the possible choices and ping the server
+		const set: { [key: string]: string } = {};
+		const companyTestGroups = company.testGroups || {};
+		for (let testName in testGroups) {
+			if (!companyTestGroups[testName]) {
+				const { choices } = testGroups[testName];
+				const which = Math.floor(Math.random() * choices.length);
+				set[testName] = choices[which];
+			}
+		}
+
+		if (Object.keys(set).length > 0) {
+			return this.api.setCompanyTestGroups(company.id, set);
+		}
+		return undefined;
+	}
+
+	private async repositoryCommitHashChanged(repo: GitRepository) {
+		const { git, markerLocations, reviews, users } = SessionContainer.instance();
+		markerLocations.flushUncommittedLocations(repo);
+
+		const me = await users.getMe();
+		if (me.user.preferences?.reviewCreateOnDetectUnreviewedCommits !== false) {
+			reviews.checkUnreviewedCommits(repo).then(unreviewedCommitCount => {
+				Logger.log(`Detected ${unreviewedCommitCount} unreviewed commits`);
+			});
+		}
+
+		if (!this.apiCapabilities.autoFR) {
+			return;
+		}
+		const commit = await git.getCommit(repo.path, "HEAD");
+		const userEmail = await git.getConfig(repo.path, "user.email");
+		const twentySeconds = 20 * 1000;
+		if (
+			userEmail !== undefined &&
+			userEmail === commit?.email &&
+			commit.authorDate !== undefined &&
+			new Date().getTime() - commit.authorDate.getTime() < twentySeconds
+		) {
+			this.agent.sendNotification(UserDidCommitNotificationType, {
+				sha: commit.ref
+			});
 		}
 	}
 

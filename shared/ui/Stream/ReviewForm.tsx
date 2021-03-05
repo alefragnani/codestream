@@ -9,7 +9,6 @@ import {
 	ReposScm,
 	DidChangeDataNotificationType,
 	ChangeDataType,
-	GetUserInfoRequestType,
 	UpdateReviewResponse,
 	CodemarkPlus,
 	TelemetryRequestType,
@@ -26,6 +25,7 @@ import {
 	CodemarkStatus,
 	FileStatus
 } from "@codestream/protocols/api";
+import { LabeledSwitch } from "@codestream/webview/src/components/controls/LabeledSwitch";
 import { debounce as _debounce } from "lodash-es";
 import React, { ReactElement } from "react";
 import { connect } from "react-redux";
@@ -46,12 +46,11 @@ import Button from "./Button";
 import Tag from "./Tag";
 import Icon from "./Icon";
 import Tooltip from "./Tooltip";
-import { sortBy as _sortBy } from "lodash-es";
 import { Headshot } from "@codestream/webview/src/components/Headshot";
 import HeadshotMenu from "@codestream/webview/src/components/HeadshotMenu";
 import { SelectPeople } from "@codestream/webview/src/components/SelectPeople";
 import { getTeamMembers, getTeamTagsArray, getTeamMates } from "../store/users/reducer";
-import MessageInput from "./MessageInput";
+import MessageInput, { AttachmentField } from "./MessageInput";
 import {
 	openPanel,
 	openModal,
@@ -70,7 +69,7 @@ import { EditorRevealRangeRequestType } from "../ipc/host.protocol.editor";
 import { Range } from "vscode-languageserver-types";
 import { PostsActionsType } from "../store/posts/types";
 import { URI } from "vscode-uri";
-import { logError, logWarning } from "../logger";
+import { logError } from "../logger";
 import { DocumentData } from "../protocols/agent/agent.protocol.notifications";
 import { InlineMenu } from "../src/components/controls/InlineMenu";
 import { LoadingMessage } from "../src/components/LoadingMessage";
@@ -81,7 +80,7 @@ import Timestamp from "./Timestamp";
 import {
 	ReviewShowLocalDiffRequestType,
 	WebviewPanels,
-	WebviewModals
+	UpdateConfigurationRequestType
 } from "@codestream/protocols/webview";
 import { Checkbox } from "../src/components/Checkbox";
 import { getAllByCommit, teamReviewCount } from "../store/reviews/reducer";
@@ -136,6 +135,7 @@ interface ConnectedProps {
 	};
 	currentUser: CSUser;
 	skipPostCreationModal?: boolean;
+	currentReviewOptions?: any;
 	teamTagsArray: any;
 	textEditorUri?: string;
 	createPostAndReview?: Function;
@@ -162,6 +162,9 @@ interface ConnectedProps {
 	statusLabel: string;
 	statusIcon: string;
 	currentRepoPath?: string;
+	ideSupportsCreateReviewOnCommit: boolean;
+	isAutoFREnabled: boolean;
+	createReviewOnCommit?: boolean;
 }
 
 interface State {
@@ -224,6 +227,10 @@ interface State {
 	currentFile?: string;
 	editingReviewBranch?: string;
 	addressesIssues: { [codemarkId: string]: boolean };
+	createReviewOnCommit: boolean;
+	showCreateReviewOnCommitToggle: boolean;
+	attachments: AttachmentField[];
+	isDragging: number;
 }
 
 function merge(defaults: Partial<State>, review: CSReview): State {
@@ -277,7 +284,9 @@ class ReviewForm extends React.Component<Props, State> {
 			commitListLength: 10,
 			allReviewersMustApprove: false,
 			currentFile: "",
-			addressesIssues: {}
+			addressesIssues: {},
+			attachments: [],
+			isDragging: 0
 		};
 
 		const state = props.editingReview
@@ -414,14 +423,26 @@ class ReviewForm extends React.Component<Props, State> {
 	}
 
 	componentDidMount() {
-		const { isEditing, isAmending, textEditorUri, currentRepoPath } = this.props;
+		const {
+			isEditing,
+			isAmending,
+			textEditorUri,
+			currentRepoPath,
+			ideSupportsCreateReviewOnCommit,
+			createReviewOnCommit,
+			isAutoFREnabled
+		} = this.props;
 		if (isEditing && !isAmending) return;
 
 		this.setState({ mountedTimestamp: new Date().getTime() });
-		if (!isEditing) {
-			if (false && this.props.statusLabel) {
-				this.setState({ title: this.props.statusLabel, titleTouched: true });
-			}
+		if (!isEditing && !isAmending) {
+			const isCreatingReviewOnCommit =
+				this.props.currentReviewOptions && this.props.currentReviewOptions.includeLatestCommit;
+			const showCreateReviewOnCommitToggle =
+				ideSupportsCreateReviewOnCommit &&
+				isAutoFREnabled &&
+				(isCreatingReviewOnCommit || !createReviewOnCommit);
+			this.setState({ showCreateReviewOnCommitToggle: showCreateReviewOnCommitToggle });
 		}
 
 		if (isAmending) this.getScmInfoForRepo();
@@ -467,6 +488,8 @@ class ReviewForm extends React.Component<Props, State> {
 				editingReview
 			} = this.props;
 			const { includeSaved, includeStaged, startCommit, prevEndCommit } = this.state;
+			const includeLatestCommit =
+				this.props.currentReviewOptions && this.props.currentReviewOptions.includeLatestCommit;
 
 			const uri = repoUri || this.state.repoUri;
 			let statusInfo: GetRepoScmStatusResponse;
@@ -478,7 +501,8 @@ class ReviewForm extends React.Component<Props, State> {
 					includeSaved,
 					currentUserEmail: currentUser.email,
 					prevEndCommit,
-					reviewId: editingReview && editingReview.id
+					reviewId: editingReview && editingReview.id,
+					includeLatestCommit
 				});
 			} catch (e) {
 				logError(e);
@@ -494,6 +518,15 @@ class ReviewForm extends React.Component<Props, State> {
 					scmErrorMessage: statusInfo.error
 				});
 				return;
+			}
+
+			if (!statusInfo.scm) {
+				this.setState({
+					isLoadingScm: false,
+					isReloadingScm: false,
+					scmError: true,
+					scmErrorMessage: "Unable to retrieve Git repository information"
+				});
 			}
 
 			this._disposableDidChangeDataNotification &&
@@ -540,16 +573,35 @@ class ReviewForm extends React.Component<Props, State> {
 
 			this.setState({ repoStatus: statusInfo, repoUri: uri, currentFile: "" });
 			if (!startCommit && statusInfo.scm && statusInfo.scm.startCommit) {
+				let limitedLength: number | undefined = undefined;
+
 				this.setChangeStart(statusInfo.scm.startCommit);
+
+				if (
+					includeLatestCommit &&
+					statusInfo.scm.commits &&
+					statusInfo.scm.commits.length > 1 &&
+					statusInfo.scm.commits[0].info
+				) {
+					const splittedMessage = statusInfo.scm.commits[0].info.message.split(/(?<=^.+)\n/);
+					this.setState({ title: splittedMessage[0] ? splittedMessage[0] : "" });
+					this.setState({ text: splittedMessage[1] ? splittedMessage[1].trim() : "" });
+					// only show this 1 commit
+					limitedLength = 1;
+				}
 
 				if (statusInfo.scm.commits) {
 					const commitListLength = statusInfo.scm.commits.findIndex(
 						// @ts-ignore
 						commit => commit.info.email !== currentUser.email
 					);
-					// show at least 5 commits, but if the 6th+ commit isn't mine,
-					// hide it behind a "show more" button
-					if (commitListLength >= 5) this.setState({ commitListLength });
+					if (commitListLength) {
+						// show only commits from the user logged in (limited to 10)
+						this.setState({ commitListLength: Math.min(commitListLength, limitedLength || 10) });
+					} else {
+						// show last 10 commits from any author, since none of them are from the user logged in
+						this.setState({ commitListLength: Math.min(10, statusInfo.scm.commits.length) });
+					}
 				}
 			}
 			// if (isAmending && statusInfo.scm && statusInfo.scm.branch !== this.state.editingReviewBranch) {
@@ -715,7 +767,8 @@ class ReviewForm extends React.Component<Props, State> {
 			allReviewersMustApprove,
 			includeSaved,
 			includeStaged,
-			reviewerEmails
+			reviewerEmails,
+			attachments
 		} = this.state;
 
 		// FIXME first, process the email-only reviewers
@@ -770,7 +823,7 @@ class ReviewForm extends React.Component<Props, State> {
 						editingReview.reviewChangesets.map(_ => (_.checkpoint === undefined ? 0 : _.checkpoint))
 					) + 1;
 
-				if (this.props.isAmending) {
+				if (this.props.isAmending && repoStatus) {
 					// if we're amending, don't edit the text of the review,
 					// but pass in an arg so that a reply can be created
 					delete attributes.text;
@@ -810,7 +863,7 @@ class ReviewForm extends React.Component<Props, State> {
 						this.props.onClose();
 					}
 				}
-			} else if (this.props.createPostAndReview) {
+			} else if (this.props.createPostAndReview && repoStatus) {
 				const { scm } = repoStatus;
 				const authorsById = {};
 				reviewerEmails.forEach(email => {
@@ -843,7 +896,8 @@ class ReviewForm extends React.Component<Props, State> {
 							includeStaged: includeStaged && scm!.stagedFiles.length > 0,
 							checkpoint: 0
 						}
-					]
+					],
+					files: attachments
 				} as any;
 
 				const { type: createResult } = await this.props.createPostAndReview(
@@ -907,6 +961,8 @@ class ReviewForm extends React.Component<Props, State> {
 			this.props.setNewPostEntry(undefined);
 		}
 	};
+
+	setAttachments = (attachments: AttachmentField[]) => this.setState({ attachments });
 
 	isFormInvalid = () => {
 		const { text, title } = this.state;
@@ -1095,6 +1151,9 @@ class ReviewForm extends React.Component<Props, State> {
 				selectedTags={this.state.selectedTags}
 				__onDidRender={__onDidRender}
 				autoFocus={isAmending ? true : false}
+				attachments={this.state.attachments}
+				attachmentContainerType="review"
+				setAttachments={this.setAttachments}
 			/>
 		);
 	};
@@ -1139,6 +1198,28 @@ class ReviewForm extends React.Component<Props, State> {
 						>
 							{!isAmending && <CancelButton onClick={this.confirmCancel} />}
 							<div className={cx({ "review-container": !isAmending })}>
+								{this.state.showCreateReviewOnCommitToggle && (
+									<div style={{ margin: "-30px 30px 10px 0", display: "flex" }}>
+										<span className="subhead muted">Auto-prompt for feedback when committing </span>
+										<span
+											key="toggle-review-create-on-commit"
+											className="headline-flex"
+											style={{ display: "inline-block", marginLeft: "10px" }}
+										>
+											<LabeledSwitch
+												key="review-create-on-commit-toggle"
+												on={this.props.createReviewOnCommit}
+												offLabel="No"
+												onLabel="Yes"
+												onChange={this.toggleCreateReviewOnCommitEnabled}
+												height={20}
+												width={60}
+											/>
+										</span>
+									</div>
+								)}
+								<div style={{ height: "5px" }}></div>
+
 								<div className="codemark-form-container">{this.renderReviewForm()}</div>
 								{this.renderExcludedFiles()}
 								<div style={{ height: "5px" }}></div>
@@ -1151,6 +1232,7 @@ class ReviewForm extends React.Component<Props, State> {
 										</CSText>
 									</>
 								)}
+
 								{!this.props.isEditing && totalModifiedLines > 200 && (
 									<div style={{ display: "flex", padding: "10px 0 0 2px" }}>
 										<Icon name="alert" muted />
@@ -1292,6 +1374,7 @@ class ReviewForm extends React.Component<Props, State> {
 	};
 
 	setChangeStart = (sha: string, callback?) => {
+		if (!this.state.repoStatus) return;
 		const { scm } = this.state.repoStatus;
 		if (!scm) return;
 		const { commits } = scm;
@@ -1540,7 +1623,7 @@ class ReviewForm extends React.Component<Props, State> {
 						style={{ marginTop: "5px", cursor: "pointer" }}
 						onClick={e => this.setState({ commitListLength: this.state.commitListLength + 10 })}
 					>
-						Show More
+						Show Earlier Commits
 					</div>
 				)}
 			</div>
@@ -1844,6 +1927,11 @@ class ReviewForm extends React.Component<Props, State> {
 		this.setState({ title, titleTouched: true });
 	}
 
+	toggleCreateReviewOnCommitEnabled = (value: boolean) => {
+		this.props.setUserPreference(["reviewCreateOnCommit"], value);
+		this.setState({ createReviewOnCommit: value });
+	};
+
 	renderReviewForm() {
 		const { isEditing, isAmending, currentUser, repos } = this.props;
 		const {
@@ -1939,6 +2027,10 @@ class ReviewForm extends React.Component<Props, State> {
 			});
 		}
 
+		const hasChanges =
+			repoStatus &&
+			repoStatus.scm &&
+			repoStatus.scm.modifiedFiles.filter(f => !this.excluded(f.file)).length;
 		const showChanges = (!isEditing || isAmending) && !isLoadingScm && !scmError && !branchError;
 		// @ts-ignore
 		const latestCommit: { shortMessage: string } | undefined =
@@ -2030,6 +2122,7 @@ class ReviewForm extends React.Component<Props, State> {
 							</div>
 							{this.renderTextHelp()}
 							{this.renderMessageInput()}
+							<div style={{ clear: "both" }} />
 						</div>
 					)}
 					{!isAmending && this.renderTags()}
@@ -2045,6 +2138,7 @@ class ReviewForm extends React.Component<Props, State> {
 								</div>
 							</div>
 							{this.renderMessageInput()}
+							<div style={{ clear: "both" }} />
 							{this.renderAddressesIssues()}
 						</div>
 					)}
@@ -2182,6 +2276,7 @@ class ReviewForm extends React.Component<Props, State> {
 										}}
 										className={cx("control-button", { cancel: !this.state.title })}
 										type="submit"
+										disabled={isEditing ? false : !hasChanges}
 										loading={isReloadingScm || this.state.isLoading}
 										onClick={this.handleClickSubmit}
 									>
@@ -2223,7 +2318,17 @@ class ReviewForm extends React.Component<Props, State> {
 const EMPTY_OBJECT = {};
 
 const mapStateToProps = (state: CodeStreamState, props): ConnectedProps => {
-	const { context, editorContext, users, teams, session, preferences, repos, documents } = state;
+	const {
+		context,
+		editorContext,
+		users,
+		teams,
+		session,
+		preferences,
+		repos,
+		documents,
+		ide
+	} = state;
 	const user = users[session.userId!] as CSMe;
 	const channel = context.currentStreamId
 		? getStreamForId(state.streams, context.currentTeamId, context.currentStreamId) ||
@@ -2274,6 +2379,7 @@ const mapStateToProps = (state: CodeStreamState, props): ConnectedProps => {
 		providerInfo: (user.providerInfo && user.providerInfo[context.currentTeamId]) || EMPTY_OBJECT,
 		currentUser: user,
 		skipPostCreationModal,
+		currentReviewOptions: state.context.currentReviewOptions,
 		textEditorUri: editorContext.textEditorUri,
 		teamTagsArray,
 		repos,
@@ -2284,7 +2390,10 @@ const mapStateToProps = (state: CodeStreamState, props): ConnectedProps => {
 		isCurrentUserAdmin,
 		statusLabel,
 		statusIcon,
-		currentRepoPath: context.currentRepo && context.currentRepo.path
+		currentRepoPath: context.currentRepo && context.currentRepo.path,
+		ideSupportsCreateReviewOnCommit: ide.name === "JETBRAINS" || ide.name === "VSC",
+		isAutoFREnabled: isFeatureEnabled(state, "autoFR"),
+		createReviewOnCommit: state.preferences.reviewCreateOnCommit !== false
 	};
 };
 

@@ -25,7 +25,8 @@ import {
 	DidChangeDataNotificationType,
 	ReportingMessageType,
 	RepoScmStatus,
-	UpdateInvisibleRequest
+	UpdateInvisibleRequest,
+	UpdatePostSharingDataRequest
 } from "../../protocol/agent.protocol";
 import {
 	AccessToken,
@@ -136,6 +137,8 @@ import {
 	UpdateTeamSettingsRequestType,
 	UpdateTeamTagRequestType,
 	UpdateUserRequest,
+	UploadFileRequest,
+	UploadFileRequestType,
 	VerifyConnectivityResponse
 } from "../../protocol/agent.protocol";
 import {
@@ -148,6 +151,7 @@ import {
 	CSApiCapabilities,
 	CSApiFeatures,
 	CSChannelStream,
+	CSCompany,
 	CSCompleteSignupRequest,
 	CSConfirmRegistrationRequest,
 	CSCreateChannelStreamRequest,
@@ -234,6 +238,8 @@ import {
 	CSUpdateCodemarkResponse,
 	CSUpdateMarkerRequest,
 	CSUpdateMarkerResponse,
+	CSUpdatePostSharingDataRequest,
+	CSUpdatePostSharingDataResponse,
 	CSUpdatePresenceRequest,
 	CSUpdatePresenceResponse,
 	CSUpdateReviewRequest,
@@ -264,6 +270,7 @@ import {
 import { CodeStreamPreferences } from "../preferences";
 import { BroadcasterEvents } from "./events";
 import { CodeStreamUnreads } from "./unreads";
+import FormData from "form-data";
 
 @lsp
 export class CodeStreamApiProvider implements ApiProvider {
@@ -529,7 +536,7 @@ export class CodeStreamApiProvider implements ApiProvider {
 		this._user = response.user;
 		this._userId = response.user.id;
 		this._features = response.features;
-		this._runTimeEnvironment = response.runTimeEnvironment;
+		this._runTimeEnvironment = response.runtimeEnvironment;
 
 		const token: AccessToken = {
 			email: response.user.email,
@@ -544,6 +551,9 @@ export class CodeStreamApiProvider implements ApiProvider {
 	}
 
 	async register(request: CSRegisterRequest) {
+		if (this._version.machine?.machineId) {
+			request.machineId = this._version.machine.machineId;
+		}
 		const response = await this.post<CSRegisterRequest, CSRegisterResponse | CSLoginResponse>(
 			"/no-auth/register",
 			request
@@ -858,28 +868,14 @@ export class CodeStreamApiProvider implements ApiProvider {
 
 	@log()
 	async setModifiedReposDebounced(request: SetModifiedReposRequest) {
-		// eventually, when support for compactified modifiedRepos is full (both cloud and on-prem),
-		// we'll eliminate this completely and go only with compactified, below
-		const prunedModifiedRepos = SessionContainer.instance().users.pruneModifiedRepos(
+		const compactModifiedRepos = SessionContainer.instance().users.compactifyModifiedRepos(
 			request.modifiedRepos
 		);
 		this.put<{ [key: string]: any }, any>(
 			"/users/me",
-			{ modifiedRepos: { [request.teamId]: prunedModifiedRepos } },
+			{ compactModifiedRepos: { [request.teamId]: compactModifiedRepos } },
 			this._token
 		);
-
-		const capabilities = SessionContainer.instance().session.apiCapabilities;
-		if (capabilities.compactModifiedRepos) {
-			const compactModifiedRepos = SessionContainer.instance().users.compactifyModifiedRepos(
-				request.modifiedRepos
-			);
-			this.put<{ [key: string]: any }, any>(
-				"/users/me",
-				{ compactModifiedRepos: { [request.teamId]: compactModifiedRepos } },
-				this._token
-			);
-		}
 	}
 
 	@log()
@@ -1170,6 +1166,19 @@ export class CodeStreamApiProvider implements ApiProvider {
 			request,
 			this._token
 		);
+		const [post] = await SessionContainer.instance().posts.resolve({
+			type: MessageType.Streams,
+			data: [response.post]
+		});
+		return { ...response, post };
+	}
+
+	@log()
+	async updatePostSharingData(request: UpdatePostSharingDataRequest) {
+		const response = await this.put<
+			CSUpdatePostSharingDataRequest,
+			CSUpdatePostSharingDataResponse
+		>(`/posts/${request.postId}`, request, this._token);
 		const [post] = await SessionContainer.instance().posts.resolve({
 			type: MessageType.Streams,
 			data: [response.post]
@@ -1635,6 +1644,22 @@ export class CodeStreamApiProvider implements ApiProvider {
 		return this.get<CSGetCompanyResponse>(`/companies/${request.companyId}`, this._token);
 	}
 
+	async setCompanyTestGroups(
+		companyId: string,
+		request: { [key: string]: string }
+	): Promise<CSCompany> {
+		const response = await this.put<{ [key: string]: string }, { company: any }>(
+			`/company-test-group/${companyId}`,
+			request,
+			this._token
+		);
+		const companies = (await SessionContainer.instance().companies.resolve({
+			type: MessageType.Companies,
+			data: [response.company]
+		})) as CSCompany[];
+		return companies[0];
+	}
+
 	@lspHandler(CreateTeamTagRequestType)
 	async createTeamTag(request: CSTeamTagRequest) {
 		await this.post(`/team-tags/${request.team.id}`, { ...request.tag }, this._token);
@@ -2062,6 +2087,37 @@ export class CodeStreamApiProvider implements ApiProvider {
 		});
 	}
 
+	@lspHandler(UploadFileRequestType)
+	async uploadFile(request: UploadFileRequest) {
+		const formData = new FormData();
+		if (request.buffer) {
+			const base64String = request.buffer;
+			// string off dataUri / content info from base64 string
+			var bareString = "";
+			var commaIndex = base64String.indexOf(",");
+			if (commaIndex == -1) {
+				bareString = base64String;
+			} else {
+				bareString = base64String.substring(commaIndex + 1);
+			}
+			formData.append("file", Buffer.from(bareString, "base64"), {
+				filename: request.name,
+				contentType: request.mimetype
+			});
+		} else {
+			formData.append("file", require("fs").createReadStream(request.path));
+		}
+		const url = `${this.baseUrl}/upload-file/${this.teamId}`;
+		const headers = new Headers({
+			Authorization: `Bearer ${this._token}`
+		});
+
+		// note, this bypasses the built-in fetch wrapper and calls node fetch directly,
+		// because we're not dealing with json data in the request
+		const response = await fetch(url, { method: "post", body: formData, headers });
+		return await response.json();
+	}
+
 	async delete<R extends object>(url: string, token?: string): Promise<R> {
 		if (!token && url.indexOf("/no-auth/") === -1) token = this._token;
 		let resp = undefined;
@@ -2116,7 +2172,6 @@ export class CodeStreamApiProvider implements ApiProvider {
 		const start = process.hrtime();
 
 		const sanitizedUrl = CodeStreamApiProvider.sanitizeUrl(url);
-
 		let traceResult;
 		try {
 			if (init !== undefined || token !== undefined) {

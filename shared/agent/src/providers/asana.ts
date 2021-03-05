@@ -47,7 +47,8 @@ export class AsanaProvider extends ThirdPartyIssueProviderBase<CSAsanaProviderIn
 		};
 	}
 
-	async onConnected() {
+	async onConnected(providerInfo?: CSAsanaProviderInfo) {
+		super.onConnected(providerInfo);
 		this._asanaUser = await this.getMe();
 	}
 
@@ -221,7 +222,7 @@ export class AsanaProvider extends ThirdPartyIssueProviderBase<CSAsanaProviderIn
 		const cardData = {
 			data: {
 				name: data.name,
-				notes: data.description,
+				html_notes: data.description,
 				projects: data.boardId,
 				memberships: [
 					{

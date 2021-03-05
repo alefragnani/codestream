@@ -8,12 +8,12 @@ import { CodeStreamSession } from "session";
 import { URI } from "vscode-uri";
 import { InternalError, ReportSuppressedMessages } from "../agentError";
 import { SessionContainer } from "../container";
-import { Logger, TraceLevel } from "../logger";
+import { Logger } from "../logger";
 import {
 	CreateThirdPartyCardRequest,
 	DidChangePullRequestCommentsNotificationType,
 	DocumentMarker,
-	EnterpriseConfigurationData,
+	ProviderConfigurationData,
 	FetchReposResponse,
 	FetchThirdPartyBoardsRequest,
 	FetchThirdPartyBoardsResponse,
@@ -57,6 +57,8 @@ import {
 	ThirdPartyProviderSupportsIssues,
 	ThirdPartyProviderSupportsPullRequests
 } from "./provider";
+import { toRepoName } from "../git/utils";
+import { performance } from "perf_hooks";
 
 interface GitHubRepo {
 	id: string;
@@ -97,7 +99,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		super(session, providerConfig);
 	}
 
-	async getRemotePaths(repo: any, _projectsByRemotePath: any) {
+	async getRemotePaths(repo: any, _projectsByRemotePath: any): Promise<string[] | undefined> {
 		// TODO don't need this ensureConnected -- doesn't hit api
 		await this.ensureConnected();
 		const remotePaths = await getRemotePaths(
@@ -164,7 +166,11 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 	protected _client: GraphQLClient | undefined;
 	protected async client(): Promise<GraphQLClient> {
 		if (this._client === undefined) {
-			this._client = new GraphQLClient(this.graphQlBaseUrl);
+			const options: { [key: string]: any } = {};
+			if (this._httpsAgent) {
+				options.agent = this._httpsAgent;
+			}
+			this._client = new GraphQLClient(this.graphQlBaseUrl, options);
 		}
 		if (!this.accessToken) {
 			throw new Error("Could not get a GitHub personal access token");
@@ -181,7 +187,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		return this._client;
 	}
 
-	async onConnected() {
+	async onConnected(providerInfo?: CSGitHubProviderInfo) {
+		super.onConnected(providerInfo);
 		this._knownRepos = new Map<string, GitHubRepo>();
 	}
 
@@ -194,24 +201,24 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 
 	async ensureInitialized() {}
 
-	_queryLogger: {
-		restApi: {
-			rateLimit?: { remaining: number; limit: number; used: number; reset: number };
-			fns: any;
-		};
-		graphQlApi: {
-			rateLimit?: {
-				remaining: number;
-				resetAt: string;
-				resetInMinutes: number;
-				last?: { name: string; cost: number };
-			};
-			fns: any;
-		};
-	} = {
-		graphQlApi: { fns: {} },
-		restApi: { fns: {} }
-	};
+	// _queryLogger: {
+	// 	restApi: {
+	// 		rateLimit?: { remaining: number; limit: number; used: number; reset: number };
+	// 		fns: any;
+	// 	};
+	// 	graphQlApi: {
+	// 		rateLimit?: {
+	// 			remaining: number;
+	// 			resetAt: string;
+	// 			resetInMinutes: number;
+	// 			last?: { name: string; cost: number };
+	// 		};
+	// 		fns: any;
+	// 	};
+	// } = {
+	// 	graphQlApi: { fns: {} },
+	// 	restApi: { fns: {} }
+	// };
 
 	_isSuppressedException(ex: any): ReportSuppressedMessages | undefined {
 		const networkErrors = [
@@ -221,7 +228,9 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			"ECONNRESET",
 			"ECONNREFUSED",
 			"ENETDOWN",
-			"socket disconnected before secure"
+			"ENETUNREACH",
+			"socket disconnected before secure",
+			"socket hang up"
 		];
 
 		if (ex.message && networkErrors.some(e => ex.message.match(new RegExp(e)))) {
@@ -234,7 +243,15 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				ex.response.error.toLowerCase().indexOf("cookies must be enabled to use github") > -1)
 		) {
 			return ReportSuppressedMessages.ConnectionError;
-		} else if (
+		}
+		// else if (
+		// 	(ex?.response?.message || ex?.message || "").indexOf(
+		// 		"enabled OAuth App access restrictions"
+		// 	) > -1
+		// ) {
+		// 	return ReportSuppressedMessages.OAuthAppAccessRestrictionError;
+		// }
+		else if (
 			(ex.response && ex.response.message === "Bad credentials") ||
 			(ex.response &&
 				ex.response.errors instanceof Array &&
@@ -252,28 +269,16 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			throw new InternalError(ReportSuppressedMessages.AccessTokenInvalid);
 		}
 
+		const starting = performance.now();
 		let response;
 		try {
-			response = await (await this.client()).request<any>(query, variables);
+			response = await (await this.client()).request<T>(query, variables);
 		} catch (ex) {
-			Logger.warn("GitHub query caught:", ex);
+			Logger.warn(`GitHub query caught (elapsed=${performance.now() - starting}ms):`, ex);
 			const exType = this._isSuppressedException(ex);
 			if (exType !== undefined) {
-				if (exType !== ReportSuppressedMessages.NetworkError) {
-					// we know about this error, and we want to give the user a chance to correct it
-					// (but throwing up a banner), rather than logging the error to sentry
-					this.session.api.setThirdPartyProviderInfo({
-						providerId: this.providerConfig.id,
-						data: {
-							tokenError: {
-								error: ex,
-								occurredAt: Date.now(),
-								isConnectionError: exType === ReportSuppressedMessages.ConnectionError
-							}
-						}
-					});
-					delete this._client;
-				}
+				this.trySetThirdPartyProviderInfo(ex, exType);
+
 				// this throws the error but won't log to sentry (for ordinary network errors that seem temporary)
 				throw new InternalError(exType, { error: ex });
 			} else {
@@ -282,232 +287,232 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			}
 		}
 
-		try {
-			if (Logger.level === TraceLevel.Debug && response && response.rateLimit) {
-				this._queryLogger.graphQlApi.rateLimit = {
-					remaining: response.rateLimit.remaining,
-					resetAt: response.rateLimit.resetAt,
-					resetInMinutes: Math.floor(
-						(new Date(new Date(response.rateLimit.resetAt).toString()).getTime() -
-							new Date().getTime()) /
-							1000 /
-							60
-					)
-				};
-				const e = new Error();
-				if (e.stack) {
-					let functionName;
-					try {
-						functionName = e.stack
-							.split("\n")
-							.filter(
-								_ =>
-									(_.indexOf("GitHubProvider") > -1 ||
-										_.indexOf("GitHubEnterpriseProvider") > -1) &&
-									_.indexOf(".query") === -1
-							)![0]
-							.match(/GitHubProvider\.(\w+)/)![1];
-					} catch (err) {
-						functionName = "unknown";
-						Logger.warn(err);
-					}
-					this._queryLogger.graphQlApi.rateLimit.last = {
-						name: functionName,
-						cost: response.rateLimit.cost
-					};
-					if (!this._queryLogger.graphQlApi.fns[functionName]) {
-						this._queryLogger.graphQlApi.fns[functionName] = {
-							count: 1,
-							cumulativeCost: response.rateLimit.cost,
-							averageCost: response.rateLimit.cost
-						};
-					} else {
-						const existing = this._queryLogger.graphQlApi.fns[functionName];
-						existing.count++;
-						existing.cumulativeCost += response.rateLimit.cost;
-						existing.averageCost = Math.floor(existing.cumulativeCost / existing.count);
-						this._queryLogger.graphQlApi.fns[functionName] = existing;
-					}
-				}
+		// try {
+		// 	if (Logger.level === TraceLevel.Debug && response && response.rateLimit) {
+		// 		this._queryLogger.graphQlApi.rateLimit = {
+		// 			remaining: response.rateLimit.remaining,
+		// 			resetAt: response.rateLimit.resetAt,
+		// 			resetInMinutes: Math.floor(
+		// 				(new Date(new Date(response.rateLimit.resetAt).toString()).getTime() -
+		// 					new Date().getTime()) /
+		// 					1000 /
+		// 					60
+		// 			)
+		// 		};
+		// 		const e = new Error();
+		// 		if (e.stack) {
+		// 			let functionName;
+		// 			try {
+		// 				functionName = e.stack
+		// 					.split("\n")
+		// 					.filter(
+		// 						_ =>
+		// 							(_.indexOf("GitHubProvider") > -1 ||
+		// 								_.indexOf("GitHubEnterpriseProvider") > -1) &&
+		// 							_.indexOf(".query") === -1
+		// 					)![0]
+		// 					.match(/GitHubProvider\.(\w+)/)![1];
+		// 			} catch (err) {
+		// 				functionName = "unknown";
+		// 				Logger.warn(err);
+		// 			}
+		// 			this._queryLogger.graphQlApi.rateLimit.last = {
+		// 				name: functionName,
+		// 				cost: response.rateLimit.cost
+		// 			};
+		// 			if (!this._queryLogger.graphQlApi.fns[functionName]) {
+		// 				this._queryLogger.graphQlApi.fns[functionName] = {
+		// 					count: 1,
+		// 					cumulativeCost: response.rateLimit.cost,
+		// 					averageCost: response.rateLimit.cost
+		// 				};
+		// 			} else {
+		// 				const existing = this._queryLogger.graphQlApi.fns[functionName];
+		// 				existing.count++;
+		// 				existing.cumulativeCost += response.rateLimit.cost;
+		// 				existing.averageCost = Math.floor(existing.cumulativeCost / existing.count);
+		// 				this._queryLogger.graphQlApi.fns[functionName] = existing;
+		// 			}
+		// 		}
 
-				Logger.log(JSON.stringify(this._queryLogger, null, 4));
-			}
-		} catch (err) {
-			Logger.warn(err);
-		}
+		// 		Logger.log(JSON.stringify(this._queryLogger, null, 4));
+		// 	}
+		// } catch (err) {
+		// 	Logger.warn(err);
+		// }
 
 		return response;
 	}
 
 	async mutate<T>(query: string, variables: any = undefined) {
 		const response = await (await this.client()).request<T>(query, variables);
-		if (Logger.level === TraceLevel.Debug) {
-			try {
-				const e = new Error();
-				if (e.stack) {
-					let functionName;
-					try {
-						functionName = e.stack
-							.split("\n")
-							.filter(
-								_ =>
-									(_.indexOf("GitHubProvider") > -1 ||
-										_.indexOf("GitHubEnterpriseProvider") > -1) &&
-									_.indexOf(".mutate") === -1
-							)![0]
-							.match(/GitHubProvider\.(\w+)/)![1];
-					} catch (err) {
-						Logger.warn(err);
-						functionName = "unknown";
-					}
-					if (!this._queryLogger.graphQlApi.rateLimit) {
-						this._queryLogger.graphQlApi.rateLimit = {
-							remaining: -1,
-							resetAt: "",
-							resetInMinutes: -1
-						};
-					}
-					this._queryLogger.graphQlApi.rateLimit.last = {
-						name: functionName,
-						// mutate costs are 1
-						cost: 1
-					};
-					if (!this._queryLogger.graphQlApi.fns[functionName]) {
-						this._queryLogger.graphQlApi.fns[functionName] = {
-							count: 1
-						};
-					} else {
-						const existing = this._queryLogger.graphQlApi.fns[functionName];
-						existing.count++;
+		// if (Logger.level === TraceLevel.Debug) {
+		// 	try {
+		// 		const e = new Error();
+		// 		if (e.stack) {
+		// 			let functionName;
+		// 			try {
+		// 				functionName = e.stack
+		// 					.split("\n")
+		// 					.filter(
+		// 						_ =>
+		// 							(_.indexOf("GitHubProvider") > -1 ||
+		// 								_.indexOf("GitHubEnterpriseProvider") > -1) &&
+		// 							_.indexOf(".mutate") === -1
+		// 					)![0]
+		// 					.match(/GitHubProvider\.(\w+)/)![1];
+		// 			} catch (err) {
+		// 				Logger.warn(err);
+		// 				functionName = "unknown";
+		// 			}
+		// 			if (!this._queryLogger.graphQlApi.rateLimit) {
+		// 				this._queryLogger.graphQlApi.rateLimit = {
+		// 					remaining: -1,
+		// 					resetAt: "",
+		// 					resetInMinutes: -1
+		// 				};
+		// 			}
+		// 			this._queryLogger.graphQlApi.rateLimit.last = {
+		// 				name: functionName,
+		// 				// mutate costs are 1
+		// 				cost: 1
+		// 			};
+		// 			if (!this._queryLogger.graphQlApi.fns[functionName]) {
+		// 				this._queryLogger.graphQlApi.fns[functionName] = {
+		// 					count: 1
+		// 				};
+		// 			} else {
+		// 				const existing = this._queryLogger.graphQlApi.fns[functionName];
+		// 				existing.count++;
 
-						this._queryLogger.graphQlApi.fns[functionName] = existing;
-					}
-				}
+		// 				this._queryLogger.graphQlApi.fns[functionName] = existing;
+		// 			}
+		// 		}
 
-				Logger.log(JSON.stringify(this._queryLogger, null, 4));
-			} catch (err) {
-				Logger.warn(err);
-			}
-		}
+		// 		Logger.log(JSON.stringify(this._queryLogger, null, 4));
+		// 	} catch (err) {
+		// 		Logger.warn(err);
+		// 	}
+		// }
 		return response;
 	}
 
 	async restPost<T extends object, R extends object>(url: string, variables: any) {
 		const response = await this.post<T, R>(url, variables);
-		if (
-			response &&
-			response.response &&
-			response.response.headers &&
-			Logger.level === TraceLevel.Debug
-		) {
-			try {
-				const rateLimit: any = {};
-				["limit", "remaining", "used", "reset"].forEach(key => {
-					try {
-						rateLimit[key] = parseInt(
-							response.response.headers.get(`x-ratelimit-${key}`) as string,
-							10
-						);
-					} catch (e) {
-						Logger.warn(e);
-					}
-				});
+		// if (
+		// 	response &&
+		// 	response.response &&
+		// 	response.response.headers &&
+		// 	Logger.level === TraceLevel.Debug
+		// ) {
+		// 	try {
+		// 		const rateLimit: any = {};
+		// 		["limit", "remaining", "used", "reset"].forEach(key => {
+		// 			try {
+		// 				rateLimit[key] = parseInt(
+		// 					response.response.headers.get(`x-ratelimit-${key}`) as string,
+		// 					10
+		// 				);
+		// 			} catch (e) {
+		// 				Logger.warn(e);
+		// 			}
+		// 		});
 
-				this._queryLogger.restApi.rateLimit = rateLimit;
+		// 		this._queryLogger.restApi.rateLimit = rateLimit;
 
-				const e = new Error();
-				if (e.stack) {
-					let functionName;
-					try {
-						functionName = e.stack
-							.split("\n")
-							.filter(
-								_ => _.indexOf("GitHubProvider") > -1 && _.indexOf("GitHubProvider.restPost") === -1
-							)![0]
-							.match(/GitHubProvider\.(\w+)/)![1];
-					} catch (ex) {
-						functionName = "unknown";
-					}
+		// 		const e = new Error();
+		// 		if (e.stack) {
+		// 			let functionName;
+		// 			try {
+		// 				functionName = e.stack
+		// 					.split("\n")
+		// 					.filter(
+		// 						_ => _.indexOf("GitHubProvider") > -1 && _.indexOf("GitHubProvider.restPost") === -1
+		// 					)![0]
+		// 					.match(/GitHubProvider\.(\w+)/)![1];
+		// 			} catch (ex) {
+		// 				functionName = "unknown";
+		// 			}
 
-					if (!this._queryLogger.restApi.fns[functionName]) {
-						this._queryLogger.restApi.fns[functionName] = {
-							count: 1
-						};
-					} else {
-						const existing = this._queryLogger.restApi.fns[functionName];
-						existing.count++;
-						this._queryLogger.restApi.fns[functionName] = existing;
-					}
-				}
+		// 			if (!this._queryLogger.restApi.fns[functionName]) {
+		// 				this._queryLogger.restApi.fns[functionName] = {
+		// 					count: 1
+		// 				};
+		// 			} else {
+		// 				const existing = this._queryLogger.restApi.fns[functionName];
+		// 				existing.count++;
+		// 				this._queryLogger.restApi.fns[functionName] = existing;
+		// 			}
+		// 		}
 
-				Logger.log(JSON.stringify(this._queryLogger, null, 4));
-			} catch (err) {
-				console.warn(err);
-			}
-		}
+		// 		Logger.log(JSON.stringify(this._queryLogger, null, 4));
+		// 	} catch (err) {
+		// 		console.warn(err);
+		// 	}
+		// }
 
 		return response;
 	}
 
 	async restGet<T extends object>(url: string) {
 		const response = await this.get<T>(url);
-		if (
-			response &&
-			response.response &&
-			response.response.headers &&
-			Logger.level === TraceLevel.Debug
-		) {
-			try {
-				const rateLimit: any = {};
-				["limit", "remaining", "used", "reset"].forEach(key => {
-					try {
-						rateLimit[key] = parseInt(
-							response.response.headers.get(`x-ratelimit-${key}`) as string,
-							10
-						);
-					} catch (e) {
-						Logger.warn(e);
-					}
-				});
+		// if (
+		// 	response &&
+		// 	response.response &&
+		// 	response.response.headers &&
+		// 	Logger.level === TraceLevel.Debug
+		// ) {
+		// 	try {
+		// 		const rateLimit: any = {};
+		// 		["limit", "remaining", "used", "reset"].forEach(key => {
+		// 			try {
+		// 				rateLimit[key] = parseInt(
+		// 					response.response.headers.get(`x-ratelimit-${key}`) as string,
+		// 					10
+		// 				);
+		// 			} catch (e) {
+		// 				Logger.warn(e);
+		// 			}
+		// 		});
 
-				this._queryLogger.restApi.rateLimit = rateLimit;
+		// 		this._queryLogger.restApi.rateLimit = rateLimit;
 
-				const e = new Error();
-				if (e.stack) {
-					let functionName;
-					try {
-						functionName = e.stack
-							.split("\n")
-							.filter(
-								_ => _.indexOf("GitHubProvider") > -1 && _.indexOf("GitHubProvider.restGet") === -1
-							)![0]
-							.match(/GitHubProvider\.(\w+)/)![1];
-					} catch (ex) {
-						functionName = "unknown";
-					}
+		// 		const e = new Error();
+		// 		if (e.stack) {
+		// 			let functionName;
+		// 			try {
+		// 				functionName = e.stack
+		// 					.split("\n")
+		// 					.filter(
+		// 						_ => _.indexOf("GitHubProvider") > -1 && _.indexOf("GitHubProvider.restGet") === -1
+		// 					)![0]
+		// 					.match(/GitHubProvider\.(\w+)/)![1];
+		// 			} catch (ex) {
+		// 				functionName = "unknown";
+		// 			}
 
-					if (!this._queryLogger.restApi.fns[functionName]) {
-						this._queryLogger.restApi.fns[functionName] = {
-							count: 1
-						};
-					} else {
-						const existing = this._queryLogger.restApi.fns[functionName];
-						existing.count++;
-						this._queryLogger.restApi.fns[functionName] = existing;
-					}
-				}
+		// 			if (!this._queryLogger.restApi.fns[functionName]) {
+		// 				this._queryLogger.restApi.fns[functionName] = {
+		// 					count: 1
+		// 				};
+		// 			} else {
+		// 				const existing = this._queryLogger.restApi.fns[functionName];
+		// 				existing.count++;
+		// 				this._queryLogger.restApi.fns[functionName] = existing;
+		// 			}
+		// 		}
 
-				Logger.log(JSON.stringify(this._queryLogger, null, 4));
-			} catch (err) {
-				console.warn(err);
-			}
-		}
+		// 		Logger.log(JSON.stringify(this._queryLogger, null, 4));
+		// 	} catch (err) {
+		// 		console.warn(err);
+		// 	}
+		// }
 
 		return response;
 	}
 
 	@log()
-	async configure(request: EnterpriseConfigurationData) {
+	async configure(request: ProviderConfigurationData) {
 		await this.session.api.setThirdPartyProviderToken({
 			providerId: this.providerConfig.id,
 			token: request.token,
@@ -665,8 +670,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		}
 
 		let response = {} as FetchThirdPartyPullRequestResponse;
-		let repoOwner: string;
-		let repoName: string;
+		let repoOwner: string | undefined = undefined;
+		let repoName: string | undefined = undefined;
 		let allTimelineItems: any = [];
 		try {
 			let timelineQueryResponse;
@@ -685,57 +690,69 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					repoName,
 					pullRequestNumber,
 					timelineQueryResponse &&
-						timelineQueryResponse.repository.pullRequest &&
-						timelineQueryResponse.repository.pullRequest.timelineItems.pageInfo &&
-						timelineQueryResponse.repository.pullRequest.timelineItems.pageInfo.endCursor
+						timelineQueryResponse?.repository?.pullRequest?.timelineItems?.pageInfo?.endCursor
 				);
 				if (timelineQueryResponse === undefined) break;
 				response = timelineQueryResponse;
 
-				allTimelineItems = allTimelineItems.concat(
-					timelineQueryResponse.repository.pullRequest.timelineItems.nodes
-				);
-			} while (timelineQueryResponse.repository.pullRequest.timelineItems.pageInfo.hasNextPage);
-		} catch (ex) {
-			Logger.error(ex);
-		}
-		if (response?.repository?.pullRequest) {
-			const { repos } = SessionContainer.instance();
-			const prRepo = await this.getPullRequestRepo(
-				await repos.get(),
-				response.repository.pullRequest
+				if (timelineQueryResponse?.repository?.pullRequest?.timelineItems?.nodes) {
+					allTimelineItems = allTimelineItems.concat(
+						timelineQueryResponse.repository.pullRequest.timelineItems.nodes
+					);
+				}
+			} while (
+				timelineQueryResponse?.repository?.pullRequest?.timelineItems?.pageInfo?.hasNextPage ===
+				true
 			);
 
-			if (prRepo?.id) {
-				try {
-					const prForkPointSha = await scmManager.getForkPointRequestType({
-						repoId: prRepo.id,
-						baseSha: response.repository.pullRequest.baseRefOid,
-						headSha: response.repository.pullRequest.headRefOid
-					});
+			if (response?.repository?.pullRequest) {
+				const { repos } = SessionContainer.instance();
+				const prRepo = await this.getPullRequestRepo(
+					await repos.get(),
+					response.repository.pullRequest
+				);
 
-					response.repository.pullRequest.forkPointSha = prForkPointSha?.sha;
-				} catch (err) {
-					Logger.error(err, `Could not find forkPoint for repoId=${prRepo.id}`);
+				if (prRepo?.id) {
+					try {
+						const prForkPointSha = await scmManager.getForkPointRequestType({
+							repoId: prRepo.id,
+							baseSha: response.repository.pullRequest.baseRefOid,
+							headSha: response.repository.pullRequest.headRefOid
+						});
+
+						response.repository.pullRequest.forkPointSha = prForkPointSha?.sha;
+					} catch (err) {
+						Logger.error(err, `Could not find forkPoint for repoId=${prRepo.id}`);
+					}
 				}
+
+				if (response.repository.pullRequest.timelineItems != null) {
+					response.repository.pullRequest.timelineItems.nodes = allTimelineItems;
+				}
+				response.repository.pullRequest.repoUrl = response.repository.url;
+				response.repository.pullRequest.baseUrl = response.repository.url.replace(
+					response.repository.resourcePath,
+					""
+				);
+
+				response.repository.repoOwner = repoOwner!;
+				response.repository.repoName = repoName!;
+
+				response.repository.pullRequest.providerId = this.providerConfig.id;
+				response.repository.providerId = this.providerConfig.id;
+
+				this._pullRequestCache.set(request.pullRequestId, response);
 			}
+		} catch (ex) {
+			Logger.error(ex, "getPullRequest", {
+				request: request
+			});
+			return {
+				error: {
+					message: ex.message
+				}
+			} as any;
 		}
-		if (response?.repository?.pullRequest?.timelineItems != null) {
-			response.repository.pullRequest.timelineItems.nodes = allTimelineItems;
-		}
-		response.repository.pullRequest.repoUrl = response.repository.url;
-		response.repository.pullRequest.baseUrl = response.repository.url.replace(
-			response.repository.resourcePath,
-			""
-		);
-
-		response.repository.repoOwner = repoOwner!;
-		response.repository.repoName = repoName!;
-
-		response.repository.pullRequest.providerId = this.providerConfig.id;
-		response.repository.providerId = this.providerConfig.id;
-
-		this._pullRequestCache.set(request.pullRequestId, response);
 		return response;
 	}
 
@@ -964,9 +981,11 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				   		id
 						name
 						nameWithOwner
+						url
 						parent {
 							id
 							nameWithOwner
+							url
 						}
 						defaultBranchRef {
 							name
@@ -1024,11 +1043,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			// if this is a fork, get the forks of the parent
 			if (response.repository.parent && !recurseFailsafe) {
 				Logger.log("Getting parent forked repos");
-				const result = await this.getForkedRepos(
-					// this use of "example.com" is just to provide the URL parser something to parse
-					{ remote: "https://example.com/" + response.repository.parent.nameWithOwner },
-					true
-				);
+				const result = await this.getForkedRepos({ remote: response.repository.parent.url }, true);
 				return {
 					parent: result.parent,
 					forks: result.forks
@@ -1065,7 +1080,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		const uri = URI.parse(remote);
 		const split = uri.path.split("/");
 		const owner = split[1];
-		const name = split[2].replace(".git", "");
+		const name = toRepoName(split[2]);
 		return {
 			owner,
 			name
@@ -1099,6 +1114,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 				// NOTE: Keep this await here, so any errors are caught here
 				return await cachedComments.comments;
 			}
+			super.invalidatePullRequestDocumentMarkersCache();
 
 			const remotePath = await getRemotePaths(
 				repo,
@@ -2064,80 +2080,15 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		return query;
 	}
 
-	// _getMyPullRequestsCache = new Map<string, GetMyPullRequestsResponse[][]>();
-	async getMyPullRequests(
-		request: GetMyPullRequestsRequest
-	): Promise<GetMyPullRequestsResponse[][] | undefined> {
-		void (await this.ensureConnected());
-		// const cacheKey = JSON.stringify({ ...request, providerId: this.providerConfig.id });
-		// if (!request.force) {
-		// 	const cached = this._getMyPullRequestsCache.get(cacheKey);
-		// 	if (cached) {
-		// 		Logger.debug(`github getMyPullRequests got from cache, key=${cacheKey}`);
-		// 		return cached!;
-		// 	} else {
-		// 		Logger.debug(`github getMyPullRequests cache miss, key=${cacheKey}`);
-		// 	}
-		// } else {
-		// 	Logger.debug(`github getMyPullRequests removed from cache, key=${cacheKey}`);
-		// 	this._getMyPullRequestsCache.delete(cacheKey);
-		// }
-		let repoQuery =
-			request && request.owner && request.repo ? `repo:${request.owner}/${request.repo} ` : "";
-		if (request.isOpen) {
-			try {
-				const { scm, providerRegistry } = SessionContainer.instance();
-				const reposResponse = await scm.getRepos({ inEditorOnly: true, includeProviders: true });
-				const repos = [];
-				if (reposResponse?.repositories) {
-					for (const repo of reposResponse.repositories) {
-						if (repo.remotes) {
-							for (const remote of repo.remotes) {
-								const urlToTest = `anything://${remote.domain}/${remote.path}`;
-								const results = await providerRegistry.queryThirdParty({ url: urlToTest });
-								if (results && results.providerId === this.providerConfig.id) {
-									const ownerData = this.getOwnerFromRemote(urlToTest);
-									if (ownerData) {
-										repos.push(`${ownerData.owner}/${ownerData.name}`);
-									}
-								}
-							}
-						}
-					}
-				}
-				if (repos.length) {
-					repoQuery = repos.map(_ => `repo:${_}`).join(" ") + " ";
-				} else {
-					Logger.log(`getMyPullRequests: request.isOpen=true, but no repos found, returning empty`);
-					return [];
-				}
-			} catch (ex) {
-				Logger.error(ex);
-			}
-		}
-
-		const queries = request.queries;
-		const buildQuery = (query: string, repoQuery: string) => {
-			const limit = query === "recent" ? 5 : 100;
-			// recent is kind of a magic string, where we just look
-			// for some random PR activity to at least show you
-			// something. if you have the repo query checked, and
-			// we can query by repo, then use that. otherwise github
-			// needs at least one qualifier so we query for PRs
-			// that you were the author of
-			// https://trello.com/c/XIg6MKWy/4813-add-4th-default-pr-query-recent
-			if (query === "recent") {
-				if (repoQuery.length > 0) query = "is:pr";
-				else query = "is:pr author:@me";
-			}
-			return `query Search {
+	private buildSearchQuery(query: string, limit: number) {
+		return `query Search {
 			rateLimit {
 				limit
 				cost
 				remaining
 				resetAt
 			}
-			search(query: "${repoQuery}${query}", type: ISSUE, last: ${limit}) {
+			search(query: "${query}", type: ISSUE, last: ${limit}) {
 			edges {
 			  node {
 				... on PullRequest {
@@ -2180,7 +2131,64 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			}
 		  }
 		}`;
-		};
+	}
+
+	// _getMyPullRequestsCache = new Map<string, GetMyPullRequestsResponse[][]>();
+	async getMyPullRequests(
+		request: GetMyPullRequestsRequest
+	): Promise<GetMyPullRequestsResponse[][] | undefined> {
+		void (await this.ensureConnected());
+		// const cacheKey = JSON.stringify({ ...request, providerId: this.providerConfig.id });
+		// if (!request.force) {
+		// 	const cached = this._getMyPullRequestsCache.get(cacheKey);
+		// 	if (cached) {
+		// 		Logger.debug(`github getMyPullRequests got from cache, key=${cacheKey}`);
+		// 		return cached!;
+		// 	} else {
+		// 		Logger.debug(`github getMyPullRequests cache miss, key=${cacheKey}`);
+		// 	}
+		// } else {
+		// 	Logger.debug(`github getMyPullRequests removed from cache, key=${cacheKey}`);
+		// 	this._getMyPullRequestsCache.delete(cacheKey);
+		// }
+		let repoQuery =
+			request && request.owner && request.repo ? `repo:${request.owner}/${request.repo} ` : "";
+		if (request.isOpen) {
+			try {
+				const { scm, providerRegistry } = SessionContainer.instance();
+				const reposResponse = await scm.getRepos({ inEditorOnly: true, includeProviders: true });
+				const repos = [];
+				if (reposResponse?.repositories) {
+					for (const repo of reposResponse.repositories) {
+						if (repo.remotes) {
+							for (const remote of repo.remotes) {
+								const urlToTest = remote.webUrl;
+								const results = await providerRegistry.queryThirdParty({ url: urlToTest });
+								if (results && results.providerId === this.providerConfig.id) {
+									const ownerData = this.getOwnerFromRemote(urlToTest);
+									if (ownerData) {
+										repos.push(`${ownerData.owner}/${ownerData.name}`);
+									}
+								}
+							}
+						}
+					}
+				}
+				if (repos.length) {
+					repoQuery = repos.map(_ => `repo:${_}`).join(" ") + " ";
+				} else {
+					Logger.warn(
+						`getMyPullRequests: request.isOpen=true, but no repos found, returning empty`
+					);
+					return [];
+				}
+			} catch (ex) {
+				Logger.error(ex);
+			}
+		}
+
+		const queries = request.queries;
+
 		// NOTE: there is also `reviewed-by` which `review-requested` translates to after the user
 		// has started or completed the review.
 
@@ -2191,11 +2199,34 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 		// 	{ name: "Created by Me", query: `is:pr author:@me` }
 		// ];
 
+		const providerId = this.providerConfig?.id;
 		// see: https://docs.github.com/en/github/searching-for-information-on-github/searching-issues-and-pull-requests
 		const items = await Promise.all(
-			queries.map(_ => this.query<any>(buildQuery(_, repoQuery)))
+			queries.map(_query => {
+				let query = _query;
+				let limit = 100;
+				// recent is kind of a magic string, where we just look
+				// for some random PR activity to at least show you
+				// something. if you have the repo query checked, and
+				// we can query by repo, then use that. otherwise github
+				// needs at least one qualifier so we query for PRs
+				// that you were the author of
+				// https://trello.com/c/XIg6MKWy/4813-add-4th-default-pr-query-recent
+				if (query === "recent") {
+					if (repoQuery.length > 0) {
+						query = "is:pr";
+					} else {
+						query = "is:pr author:@me";
+					}
+					limit = 5;
+				}
+
+				const finalQuery = repoQuery + query;
+				Logger.log(`getMyPullRequests providerId="${providerId}" query="${finalQuery}"`);
+				return this.query<any>(this.buildSearchQuery(finalQuery, limit));
+			})
 		).catch(ex => {
-			Logger.error(ex);
+			Logger.error(ex, "getMyPullRequests");
 			let errString;
 			if (ex.response) {
 				errString = JSON.stringify(ex.response);
@@ -2212,7 +2243,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					.filter((_: any) => _.id)
 					.map((pr: { createdAt: string }) => ({
 						...pr,
-						providerId: this.providerConfig?.id,
+						providerId: providerId,
 						createdAt: new Date(pr.createdAt).getTime()
 					}));
 				if (!queries[index].match(/\bsort:/)) {
@@ -2221,11 +2252,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					);
 				}
 			}
-			// if (item.rateLimit) {
-			// 	Logger.debug(`github getMyPullRequests rateLimit=${JSON.stringify(item.rateLimit)}`);
-			// }
 		});
-		// results = _uniqBy(results, (_: { id: string }) => _.id);
+
 		// this._getMyPullRequestsCache.set(cacheKey, response);
 		return response;
 	}
@@ -3779,6 +3807,9 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			  messageBodyHTML
 			  abbreviatedOid
 			  authoredDate
+			  ${this._transform(`[statusCheckRollup {
+			  	state
+			  }:>=3.0.0]`)}
 			}
 		  }`,
 			// 	`... on PullRequestCommitCommentThread {
@@ -4170,9 +4201,45 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 						  }
 						}
 					  }
-					commits(first: 100) {
+					commits(last: 1) {
 						totalCount
-					  }
+						${this._transform(`[
+							nodes {
+							  commit {
+								statusCheckRollup {
+									state
+									contexts(first: 100) {
+										nodes {
+											... on CheckRun {
+												__typename
+												conclusion
+												status
+												name
+												title
+												detailsUrl
+												startedAt
+												completedAt
+												checkSuite {
+												  app {
+													logoUrl(size: 40)
+													slug
+												  }
+												}
+											}
+											... on StatusContext {
+												__typename
+												avatarUrl(size: 40)
+												context
+												description
+												state
+												targetUrl
+											}
+										}
+									}
+								}
+							  }						
+							}:>=3.0.0]`)}
+					}
 					headRefName
 					headRefOid
 					labels(first: 10) {
@@ -4317,11 +4384,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			// MORE here: https://github.community/t/bug-v4-graphql-api-trouble-retrieving-pull-request-review-comments/13708/2
 
 			if (
-				response.repository.pullRequest.timelineItems.nodes &&
-				response.repository &&
-				response.repository.pullRequest &&
-				response.repository.pullRequest.reviewThreads &&
-				response.repository.pullRequest.reviewThreads.edges
+				response?.repository?.pullRequest?.timelineItems?.nodes &&
+				response?.repository?.pullRequest?.reviewThreads?.edges
 			) {
 				// find all the PullRequestReview timelineItems as we will attach
 				// additional data to them
@@ -4381,8 +4445,8 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			// note the graphql for this.. it's the _first_ X not the _last_ X
 			// you'd think last would mean the last as in most recent, but it's actually the opposite
 			if (
-				response.repository.pullRequest.reviews &&
-				response.repository.pullRequest.reviews.nodes
+				response?.repository?.pullRequest?.reviews &&
+				response?.repository?.pullRequest?.reviews?.nodes
 			) {
 				// here we're looking for your last pending review as you can only have 1 pending review
 				// per user per PR
@@ -4394,7 +4458,9 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 					response.repository.pullRequest.pendingReview = myPendingReview;
 				}
 			}
-			response.repository.pullRequest.viewer = { ...response.viewer };
+			if (response?.repository?.pullRequest) {
+				response.repository.pullRequest.viewer = { ...response.viewer };
+			}
 
 			Logger.debug(
 				`pullRequestTimelineQuery rateLimit=${JSON.stringify(response.rateLimit)} cursor=${cursor}`
@@ -4454,6 +4520,7 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 							}
 							message
 							authoredDate
+							oid
 						  }
 						}
 					  }
@@ -4584,6 +4651,37 @@ export class GitHubProvider extends ThirdPartyIssueProviderBase<CSGitHubProvider
 			throw ex;
 		}
 	}
+
+	private trySetThirdPartyProviderInfo(ex: Error, exType?: ReportSuppressedMessages | undefined) {
+		if (!ex) return;
+
+		exType = exType || this._isSuppressedException(ex);
+		if (exType !== undefined && exType !== ReportSuppressedMessages.NetworkError) {
+			// we know about this error, and we want to give the user a chance to correct it
+			// (but throwing up a banner), rather than logging the error to sentry
+			this.session.api.setThirdPartyProviderInfo({
+				providerId: this.providerConfig.id,
+				data: {
+					tokenError: {
+						error: ex,
+						occurredAt: Date.now(),
+						isConnectionError: exType === ReportSuppressedMessages.ConnectionError,
+						providerMessage:
+							exType === ReportSuppressedMessages.OAuthAppAccessRestrictionError ? ex.message : null
+					}
+				}
+			});
+			if (this._client) {
+				delete this._client;
+			}
+		}
+	}
+
+	// protected async handleErrorResponse(response: Response): Promise<Error> {
+	// 	const ex = await super.handleErrorResponse(response);
+	// 	this.trySetThirdPartyProviderInfo(ex);
+	// 	return ex;
+	// }
 }
 
 interface GitHubPullRequest {

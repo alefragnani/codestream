@@ -1,33 +1,45 @@
 import React from "react";
 import { connect } from "react-redux";
 import cx from "classnames";
-import Button from "./Button";
 import PostList from "./PostList";
 import Icon from "./Icon";
 import Tooltip from "./Tooltip";
-import MessageInput from "./MessageInput";
+import MessageInput, { AttachmentField } from "./MessageInput";
 import { findMentionedUserIds, getTeamMembers } from "../store/users/reducer";
 import CodemarkActions from "./CodemarkActions";
-import { CodemarkPlus, Capabilities } from "@codestream/protocols/agent";
-import { createPost } from "./actions";
-import { CSUser, CSMe, CSPost } from "@codestream/protocols/api";
+import {
+	CodemarkPlus,
+	Capabilities,
+	CreateThirdPartyPostRequestType,
+	PostPlus
+} from "@codestream/protocols/agent";
+import { createPost, setCodemarkStatus, setCodemarkPinned, setUserPreference } from "./actions";
+import { CSUser, CSMe, CSPost, CodemarkType } from "@codestream/protocols/api";
 import { getTeamProvider } from "../store/teams/reducer";
 import { replaceHtml } from "../utils";
 import { DelayedRender } from "../Container/DelayedRender";
 import { localStore } from "../utilities/storage";
 import { CodeStreamState } from "../store";
 import { HostApi } from "../webview-api";
+import { DropdownButton } from "./Review/DropdownButton";
+import { Button } from "../src/components/Button";
+import { ButtonRow } from "../src/components/Dialog";
+import { getPost } from "../store/posts/reducer";
 
 interface State {
 	editingPostId?: string;
 	text: string;
 	formatCode: boolean;
 	isLoadingReplies: boolean;
+	attachments: AttachmentField[];
+	isDragging: number;
+	resolveMethod: "ARCHIVE" | "RESOLVE";
 }
 
 interface Props {
 	author: CSUser;
 	codemark: CodemarkPlus;
+	post?: PostPlus;
 	teammates: CSUser[];
 	currentUserId: string;
 	teamProvider: "codestream" | "slack" | "msteams" | string;
@@ -38,10 +50,18 @@ interface Props {
 	teamId: string;
 	displayType?: "collapsed" | "default" | "activity";
 	skipMarkers?: number[];
+	defaultResolveAction: "resolve" | "archive";
 
 	onSubmitPost?: any;
 	createPost(...args: Parameters<typeof createPost>): ReturnType<ReturnType<typeof createPost>>;
+	setCodemarkStatus(
+		...args: Parameters<typeof setCodemarkStatus>
+	): ReturnType<ReturnType<typeof setCodemarkStatus>>;
+	setCodemarkPinned(
+		...args: Parameters<typeof setCodemarkPinned>
+	): ReturnType<ReturnType<typeof setCodemarkPinned>>;
 	postAction?(...args: any[]): any;
+	setUserPreference?: Function;
 }
 
 export class CodemarkDetails extends React.Component<Props, State> {
@@ -52,7 +72,10 @@ export class CodemarkDetails extends React.Component<Props, State> {
 		this.state = {
 			text: this.getCachedText(),
 			formatCode: false,
-			isLoadingReplies: true
+			isLoadingReplies: true,
+			attachments: [],
+			isDragging: 0,
+			resolveMethod: "RESOLVE"
 		};
 	}
 
@@ -84,12 +107,11 @@ export class CodemarkDetails extends React.Component<Props, State> {
 	handleClickPost() {}
 
 	submitReply = async () => {
-		const { codemark } = this.props;
-		const { text, formatCode } = this.state;
+		const { codemark, createPost } = this.props;
+		const { text, formatCode, attachments } = this.state;
 		const mentionedUserIds = findMentionedUserIds(this.props.teammates, text);
 		const threadId = codemark ? codemark.postId : "";
-		const { createPost } = this.props;
-		this.setState({ text: "" });
+		this.setState({ text: "", attachments: [] });
 		this.cacheText("");
 
 		// don't create empty replies
@@ -97,8 +119,40 @@ export class CodemarkDetails extends React.Component<Props, State> {
 
 		let replyText = formatCode ? "```" + text + "```" : text;
 		await createPost(codemark.streamId, threadId, replaceHtml(replyText)!, null, mentionedUserIds, {
-			entryPoint: "Codemark"
+			entryPoint: "Codemark",
+			files: attachments
 		});
+	};
+
+	resolveCodemark = async (type: "resolve" | "archive") => {
+		const { codemark, post } = this.props;
+		const { text = "" } = this.state;
+		await this.submitReply();
+		await this.props.setCodemarkStatus(this.props.codemark.id, "closed");
+		if (type === "archive") {
+			await this.props.setCodemarkPinned(this.props.codemark, false);
+		}
+		if (this.props.setUserPreference) this.props.setUserPreference(["defaultResolveAction"], type);
+		HostApi.instance.track("Codemark Resolved", {
+			"Codemark ID": this.props.codemark.id,
+			"Codemark Type": this.props.codemark.type,
+			Archived: type === "archive"
+		});
+
+		const thing = text ? "" : " this discussion";
+		const action = type === "archive" ? "resolved & archived" : "resolved";
+		const message = `_${action}${thing}_\n${text}`;
+		if (post && post.sharedTo && post.sharedTo.length > 0) {
+			for (const target of post.sharedTo) {
+				await HostApi.instance.send(CreateThirdPartyPostRequestType, {
+					providerId: target.providerId,
+					channelId: target.channelId,
+					providerTeamId: target.teamId,
+					parentPostId: target.postId,
+					text: message
+				});
+			}
+		}
 	};
 
 	handleOnChange = (text: string, formatCode: boolean) => {
@@ -124,6 +178,13 @@ export class CodemarkDetails extends React.Component<Props, State> {
 		this.setState({ isLoadingReplies: false });
 	};
 
+	setAttachments = (attachments: AttachmentField[]) => this.setState({ attachments });
+	handleDragEnter = () => this.setState({ isDragging: this.state.isDragging + 1 });
+	handleDragLeave = () => this.setState({ isDragging: this.state.isDragging - 1 });
+	handleDrop = () => this.setState({ isDragging: 0 });
+
+	setResolveMethod = resolveMethod => this.setState({ resolveMethod });
+
 	render() {
 		const { codemark, capabilities, author, currentUserId } = this.props;
 
@@ -135,9 +196,17 @@ export class CodemarkDetails extends React.Component<Props, State> {
 			</span>
 		);
 
+		const typeLabel = codemark.type === CodemarkType.Issue ? "Issue" : "Discussion";
+
 		const threadId = codemark.postId || "";
 		return (
-			<div className="codemark-details">
+			<div
+				className={cx("codemark-details", { "active-drag": this.state.isDragging > 0 })}
+				onDragEnter={this.handleDragEnter}
+				onDrop={this.handleDrop}
+				onDragOver={e => e.preventDefault()}
+				onDragLeave={this.handleDragLeave}
+			>
 				{this.props.children}
 				<CodemarkActions
 					codemark={codemark}
@@ -201,33 +270,56 @@ export class CodemarkDetails extends React.Component<Props, State> {
 							</div>
 
 							<MessageInput
-								teamProvider={this.props.teamProvider}
 								text={this.state.text}
 								placeholder="Reply..."
 								onChange={this.handleOnChange}
 								onSubmit={this.submitReply}
 								multiCompose={true}
+								attachments={this.state.attachments}
+								attachmentContainerType="reply"
+								setAttachments={this.setAttachments}
 							/>
-							<div style={{ display: "flex" }}>
-								<div style={{ textAlign: "right", flexGrow: 1 }}>
+							<ButtonRow>
+								{codemark.status !== "closed" && (
 									<Tooltip title={submitTip} placement="bottom" delay={1}>
-										<Button
-											key="submit"
-											style={{
-												// fixed width to handle the isLoading case
-												width: "80px",
-												margin: "10px 0",
-												float: "right"
-											}}
-											className={cx("control-button", { cancel: !this.state.text })}
-											type="submit"
-											onClick={this.submitReply}
-										>
-											Submit
-										</Button>
+										<DropdownButton
+											items={[
+												{
+													key: "resolve",
+													label: `Resolve ${this.state.text ? "with Comment" : typeLabel}`,
+													subtext: "Save as documentation",
+													onSelect: () => this.setResolveMethod("RESOLVE"),
+													action: () => this.resolveCodemark("resolve")
+												},
+												{ label: "-" },
+												{
+													key: "archive",
+													label: `Resolve & Archive ${
+														this.state.text ? "with Comment" : typeLabel
+													}`,
+													subtext: "Remove glyph from editor (still searchable)",
+													onSelect: () => this.setResolveMethod("ARCHIVE"),
+													action: () => this.resolveCodemark("archive")
+												}
+											]}
+											selectedKey={this.props.defaultResolveAction}
+											variant="secondary"
+											splitDropdown
+											wrap
+										/>
 									</Tooltip>
-								</div>
-							</div>
+								)}
+								<Tooltip title={submitTip} placement="bottom" delay={1}>
+									<Button
+										key="submit"
+										variant={this.state.text ? "primary" : "secondary"}
+										onClick={this.submitReply}
+									>
+										Comment
+									</Button>
+								</Tooltip>
+							</ButtonRow>
+							<div style={{ height: "10px" }} />
 						</div>
 					)}
 				</div>
@@ -242,7 +334,7 @@ export class CodemarkDetails extends React.Component<Props, State> {
 
 const EMPTY_OBJECT = {};
 const mapStateToProps = (state: CodeStreamState, props: { codemark: CodemarkPlus }) => {
-	const { capabilities, configs, connectivity, session, context, users, teams } = state;
+	const { capabilities, connectivity, session, context, users, teams, preferences } = state;
 
 	const team = teams[context.currentTeamId];
 	const teamProvider = getTeamProvider(team);
@@ -255,7 +347,6 @@ const mapStateToProps = (state: CodeStreamState, props: { codemark: CodemarkPlus
 
 	return {
 		threadId: context.threadId,
-		configs,
 		capabilities,
 		isOffline: connectivity.offline,
 		teammates: teamMembers,
@@ -265,8 +356,14 @@ const mapStateToProps = (state: CodeStreamState, props: { codemark: CodemarkPlus
 		hasFocus: context.hasFocus,
 		currentUserId: user.id,
 		currentUserName: user.username,
-		teamProvider: teamProvider
+		teamProvider: teamProvider,
+		defaultResolveAction: preferences.defaultResolveAction || "resolve"
 	};
 };
 
-export default connect(mapStateToProps, { createPost })(CodemarkDetails);
+export default connect(mapStateToProps, {
+	createPost,
+	setCodemarkStatus,
+	setCodemarkPinned,
+	setUserPreference
+})(CodemarkDetails);

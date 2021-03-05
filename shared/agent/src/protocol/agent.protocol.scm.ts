@@ -1,5 +1,6 @@
 "use strict";
 import { Range, RequestType } from "vscode-languageserver-protocol";
+import { FetchThirdPartyPullRequestFilesResponse } from "./agent.protocol.providers";
 import { CSRepository, CSTeam, CSUser, ModifiedFile } from "./api.protocol";
 
 export interface GetBranchesRequest {
@@ -88,6 +89,7 @@ export interface GetRepoScmStatusRequest {
 	 */
 	uri: string;
 	startCommit?: string;
+	endCommit?: string;
 	/**
 	 * If set, the hard-start to a commit list: don't return commits before this
 	 */
@@ -97,6 +99,7 @@ export interface GetRepoScmStatusRequest {
 	includeStaged: boolean;
 	currentUserEmail: string;
 	skipAuthorsCalculation?: boolean;
+	includeLatestCommit?: boolean;
 }
 
 export interface CoAuthors {
@@ -109,7 +112,7 @@ export interface RepoScmStatus {
 	repoPath: string;
 	repoId?: string;
 	branch?: string;
-	commits?: { sha: string; info: {}; localOnly: boolean }[];
+	commits?: { sha: string; info: any; localOnly: boolean }[];
 	modifiedFiles: ModifiedFile[];
 	savedFiles: string[];
 	stagedFiles: string[];
@@ -172,7 +175,7 @@ export interface ReposScm {
 	/**
 	 * this has a subset of what GitRemote has
 	 */
-	remotes?: { repoPath: string; path: string; domain: string }[];
+	remotes?: { repoPath: string; path: string; domain: string; webUrl: string }[];
 	/**
 	 * If this repo has a remote that is managed and connected to a provider,
 	 * return the providerId
@@ -411,6 +414,37 @@ export const FetchAllRemotesRequestType = new RequestType<
 	void
 >("codestream/scm/remotes");
 
+export interface FetchRemoteBranchRequest {
+	/**
+	 * CodeStream repositoryId
+	 * */
+	repoId: string;
+	branchName: string;
+}
+export interface FetchRemoteBranchResponse {}
+
+export const FetchRemoteBranchRequestType = new RequestType<
+	FetchRemoteBranchRequest,
+	FetchRemoteBranchResponse,
+	void,
+	void
+>("codestream/scm/remoteBranch");
+
+export interface FetchBranchCommitsStatusRequest {
+	repoId: string;
+	branchName: string;
+}
+export interface FetchBranchCommitsStatusResponse {
+	commitsBehindOrigin: string;
+}
+
+export const FetchBranchCommitsStatusRequestType = new RequestType<
+	FetchBranchCommitsStatusRequest,
+	FetchBranchCommitsStatusResponse,
+	void,
+	void
+>("codestream/scm/commitsStatus");
+
 export interface GetFileContentsAtRevisionRequest {
 	/**
 	 * CodeStream repositoryId
@@ -429,6 +463,7 @@ export interface GetFileContentsAtRevisionRequest {
 }
 
 export interface GetFileContentsAtRevisionResponse {
+	repoRoot: string;
 	content: string;
 	error?: string;
 }
@@ -447,6 +482,7 @@ export interface FetchForkPointRequest {
 	repoId: string;
 	baseSha: string;
 	headSha: string;
+	ref?: string;
 }
 
 export interface FetchForkPointResponse {
@@ -519,3 +555,17 @@ export const CommitAndPushRequestType = new RequestType<
 	void,
 	void
 >("codestream/scm/commitAndPush");
+
+export interface GetCommitsFilesRequest {
+	repoId: string;
+	commits: string[];
+}
+
+export interface GetCommitsFilesResponse extends FetchThirdPartyPullRequestFilesResponse {}
+
+export const GetCommitsFilesRequestType = new RequestType<
+	GetCommitsFilesRequest,
+	GetCommitsFilesResponse[],
+	void,
+	void
+>("codestream/scm/commits/files");

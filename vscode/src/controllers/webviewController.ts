@@ -80,7 +80,8 @@ import {
 	ShowPullRequestNotificationType,
 	WebviewPanels,
 	SidebarLocation,
-	HostDidChangeLayoutNotificationType
+	HostDidChangeLayoutNotificationType,
+	NewPullRequestBranch
 } from "@codestream/protocols/webview";
 import { gate } from "system/decorators/gate";
 import {
@@ -172,11 +173,7 @@ export class WebviewController implements Disposable {
 		if (this._lastEditor === editor) return;
 		// If the new editor is not a real editor ignore it
 		if (editor !== undefined && !Editor.isTextEditor(editor)) return;
-
-		// Ignore left side of review diffs
-		const uri = editor && editor.document.uri;
-		const csReviewDiffInfo = uri && Strings.parseCSReviewDiffUrl(uri.toString());
-		if (csReviewDiffInfo && csReviewDiffInfo.version !== "right") return;
+		if (editor !== undefined && !this.isSupportedEditor(editor)) return;
 
 		this._lastEditor = editor;
 		this._notifyActiveEditorChangedDebounced(editor);
@@ -333,7 +330,8 @@ export class WebviewController implements Disposable {
 	@log()
 	async newReviewRequest(
 		editor: TextEditor | undefined = this._lastEditor,
-		source: string
+		source: string,
+		includeLatestCommit?: boolean
 	): Promise<void> {
 		if (this.visible) {
 			await this._webview!.show();
@@ -350,14 +348,16 @@ export class WebviewController implements Disposable {
 		this._webview!.notify(NewReviewNotificationType, {
 			uri: editor ? editor.document.uri.toString() : undefined,
 			range: editor ? Editor.toSerializableRange(editor.selection) : undefined,
-			source: source
+			source: source,
+			includeLatestCommit: includeLatestCommit
 		});
 	}
 
 	@log()
 	async newPullRequestRequest(
 		editor: TextEditor | undefined = this._lastEditor,
-		source: string
+		source: string,
+		branch?: NewPullRequestBranch
 	): Promise<void> {
 		if (this.visible) {
 			await this._webview!.show();
@@ -374,7 +374,8 @@ export class WebviewController implements Disposable {
 		this._webview!.notify(NewPullRequestNotificationType, {
 			uri: editor ? editor.document.uri.toString() : undefined,
 			range: editor ? Editor.toSerializableRange(editor.selection) : undefined,
-			source: source
+			source: source,
+			branch: branch
 		});
 	}
 
@@ -414,7 +415,7 @@ export class WebviewController implements Disposable {
 	@log()
 	async openReview(
 		reviewId: string,
-		options: { onlyWhenVisible?: boolean; sourceUri?: Uri } = {}
+		options: { onlyWhenVisible?: boolean; sourceUri?: Uri; openFirstDiff?: boolean } = {}
 	): Promise<void> {
 		if (!this.visible) {
 			if (options.onlyWhenVisible) return;
@@ -430,7 +431,8 @@ export class WebviewController implements Disposable {
 		// TODO: Change this to be a request vs a notification
 		this._webview!.notify(ShowReviewNotificationType, {
 			reviewId: reviewId,
-			sourceUri: options.sourceUri && options.sourceUri.toString()
+			sourceUri: options.sourceUri && options.sourceUri.toString(),
+			openFirstDiff: options.openFirstDiff
 		});
 	}
 
@@ -454,6 +456,26 @@ export class WebviewController implements Disposable {
 			providerId,
 			id: pullRequestId,
 			commentId: commentId
+		});
+	}
+
+	@log()
+	async openPullRequestByUrl(url: string, source?: string): Promise<void> {
+		if (!this.visible) {
+			await this.show();
+		}
+
+		if (!this._webview) {
+			// it's possible that the webview is closing...
+			return;
+		}
+
+		// TODO: Change this to be a request vs a notification
+		this._webview!.notify(ShowPullRequestNotificationType, {
+			providerId: "",
+			id: "",
+			url: url,
+			source: source
 		});
 	}
 
@@ -651,10 +673,10 @@ export class WebviewController implements Disposable {
 	}
 
 	private async onEditorSelectionChanged(webview: WebviewLike, e: TextEditorSelectionChangeEvent) {
-		if (e.textEditor !== this._lastEditor) return;
+		if (e.textEditor !== this._lastEditor || !this.isSupportedEditor(e.textEditor)) return;
 
 		webview.notify(HostDidChangeEditorSelectionNotificationType, {
-			uri: e.textEditor.document.uri.toString(),
+			uri: e.textEditor.document.uri.toString(true),
 			selections: Editor.toEditorSelections(e.selections),
 			visibleRanges: Editor.toSerializableRange(e.textEditor.visibleRanges),
 			lineCount: e.textEditor.document.lineCount
@@ -665,20 +687,29 @@ export class WebviewController implements Disposable {
 		webview: WebviewLike,
 		e: TextEditorVisibleRangesChangeEvent
 	) {
-		if (e.textEditor !== this._lastEditor) return;
-
-		const uri = e.textEditor.document.uri;
-		if (uri.scheme !== "file" && uri.scheme !== "codestream-diff") return;
-
-		const csRangeDiffInfo = Strings.parseCSReviewDiffUrl(uri.toString());
-		if (csRangeDiffInfo && csRangeDiffInfo.version !== "right") return;
+		if (e.textEditor !== this._lastEditor || !this.isSupportedEditor(e.textEditor)) return;
 
 		webview.notify(HostDidChangeEditorVisibleRangesNotificationType, {
-			uri: uri.toString(),
+			uri: e.textEditor.document.uri.toString(true),
 			selections: Editor.toEditorSelections(e.textEditor.selections),
 			visibleRanges: Editor.toSerializableRange(e.visibleRanges),
 			lineCount: e.textEditor.document.lineCount
 		});
+	}
+
+	private isSupportedEditor(textEditor: TextEditor): boolean {
+		const uri = textEditor.document.uri;
+		if (uri.scheme !== "file" && uri.scheme !== "codestream-diff") return false;
+
+		const csRangeDiffInfo = Strings.parseCSReviewDiffUrl(uri.toString());
+		if (
+			csRangeDiffInfo &&
+			(csRangeDiffInfo.reviewId === "local" || csRangeDiffInfo.version !== "right")
+		) {
+			return false;
+		}
+
+		return true;
 	}
 
 	private onWebviewClosed() {
@@ -1107,7 +1138,8 @@ export class WebviewController implements Disposable {
 		const currentTeamId = this.session.signedIn ? this.session.team.id : undefined;
 		return {
 			session: {
-				userId: userId
+				userId: userId,
+				machineId: env.machineId
 			},
 			capabilities: this.session.capabilities,
 			configs: {
@@ -1259,14 +1291,16 @@ export class WebviewController implements Disposable {
 		} catch {}
 	}
 
-	private async connectToGitHub () {
-		const session = await authentication.getSession("github", ["read:user", "user:email", "repo"], { createIfNone: true });
-		Logger.log(`Connected to GitHub session ${  session.id}`);
+	private async connectToGitHub() {
+		const session = await authentication.getSession("github", ["read:user", "user:email", "repo"], {
+			createIfNone: true
+		});
+		Logger.log(`Connected to GitHub session ${session.id}`);
 		this._providerSessionIds.github = session.id;
 		return { accessToken: session.accessToken, sessionId: session.id };
 	}
 
-	private async disconnectFromGitHub () {
+	private async disconnectFromGitHub() {
 		if (this._providerSessionIds.github) {
 			Logger.log(`Disconnected from GitHub session ${this._providerSessionIds.github}`);
 
@@ -1279,7 +1313,9 @@ export class WebviewController implements Disposable {
 				Logger.log(`Disconnecting from GitHub, session ${this._providerSessionIds.github}`);
 				await (authentication as any).logout("github", this._providerSessionIds.github);
 			} else {
-				Logger.log("logout() method not detected in VSCode engine, unable to invalidate GitHub session");
+				Logger.log(
+					"logout() method not detected in VSCode engine, unable to invalidate GitHub session"
+				);
 			}
 			delete this._providerSessionIds.github;
 		} else {

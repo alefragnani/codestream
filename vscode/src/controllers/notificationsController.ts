@@ -3,7 +3,7 @@ import { PullRequestsChangedEvent } from "api/sessionEvents";
 import { Disposable, MessageItem, window } from "vscode";
 import { Post, PostsChangedEvent } from "../api/session";
 import { Container } from "../container";
-import { CodemarkPlus, ReviewPlus } from "../protocols/agent/agent.protocol";
+import { CodemarkPlus, CreateReviewsForUnreviewedCommitsRequestType, DidDetectUnreviewedCommitsNotification, ReviewPlus } from "../protocols/agent/agent.protocol";
 import { Functions } from "../system";
 import { vslsUrlRegex } from "./liveShareController";
 
@@ -15,7 +15,8 @@ export class NotificationsController implements Disposable {
 	constructor() {
 		this._disposable = Disposable.from(
 			Container.session.onDidChangePosts(this.onSessionPostsReceived, this),
-			Container.session.onDidChangePullRequests(this.onSessionPullRequestsReceived, this)
+			Container.session.onDidChangePullRequests(this.onSessionPullRequestsReceived, this),
+			Container.agent.onDidDetectUnreviewedCommits(this.onUnreviewedCommitsDetected, this)
 		);
 	}
 
@@ -94,6 +95,27 @@ export class NotificationsController implements Disposable {
 		}
 	}
 
+	private async onUnreviewedCommitsDetected(notification: DidDetectUnreviewedCommitsNotification) {
+		const actions: MessageItem[] = [
+			{ title: "Review" },
+			{ title: "Ignore", isCloseAffordance: true }
+		];
+
+		const result = await window.showInformationMessage(
+			`${notification.message}`,
+			...actions
+		);
+
+		if (result === actions[0]) {
+			const result = await Container.agent.sendRequest(CreateReviewsForUnreviewedCommitsRequestType, { repoId: notification.repoId });
+			const reviewId = result.reviewIds[0];
+			if (reviewId) {
+				Container.webview.openReview(reviewId, { openFirstDiff: true });
+			}
+		}
+
+	}
+
 	async showNotification(
 		post: Post,
 		codemark?: CodemarkPlus,
@@ -104,7 +126,8 @@ export class NotificationsController implements Disposable {
 
 		const emote = post.text.startsWith("/me ");
 		const colon = emote ? "" : ":";
-		const text = post.text.replace(/^\/me /, "");
+		let text = post.text.replace(/^\/me /, "");
+		text = review ? text.replace("this", review.title) : text;
 		if (mentioned && sender !== undefined) {
 			const match = vslsUrlRegex.exec(text);
 			if (match != null) {

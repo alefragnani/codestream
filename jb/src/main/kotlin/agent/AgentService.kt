@@ -8,6 +8,8 @@ import com.codestream.gson
 import com.codestream.protocols.agent.CSUser
 import com.codestream.protocols.agent.CreatePermalinkParams
 import com.codestream.protocols.agent.CreatePermalinkResult
+import com.codestream.protocols.agent.CreateReviewsForUnreviewedCommitsParams
+import com.codestream.protocols.agent.CreateReviewsForUnreviewedCommitsResult
 import com.codestream.protocols.agent.DocumentMarkersParams
 import com.codestream.protocols.agent.DocumentMarkersResult
 import com.codestream.protocols.agent.GetAllReviewContentsParams
@@ -26,6 +28,8 @@ import com.codestream.protocols.agent.InitializationOptions
 import com.codestream.protocols.agent.Post
 import com.codestream.protocols.agent.PullRequestFile
 import com.codestream.protocols.agent.Review
+import com.codestream.protocols.agent.ReviewCoverageParams
+import com.codestream.protocols.agent.ReviewCoverageResult
 import com.codestream.protocols.agent.SetServerUrlParams
 import com.codestream.protocols.agent.SetServerUrlResult
 import com.codestream.protocols.agent.Stream
@@ -314,6 +318,16 @@ class AgentService(private val project: Project) : Disposable {
         return result
     }
 
+    suspend fun reviewCoverage(params: ReviewCoverageParams): ReviewCoverageResult {
+        val json = remoteEndpoint
+            .request("codestream/review/coverage", params)
+            .await() as JsonObject
+        val result = gson.fromJson<ReviewCoverageResult>(json)
+
+        return result
+
+    }
+
     suspend fun getStream(id: String): Stream {
         val json = remoteEndpoint
             .request("codestream/stream", GetStreamParams(id))
@@ -389,6 +403,13 @@ class AgentService(private val project: Project) : Disposable {
     suspend fun getFileContentsAtRevision(params: GetFileContentsAtRevisionParams): GetFileContentsAtRevisionResult {
         val json = remoteEndpoint
             .request("codestream/scm/file/diff", params)
+            .await() as JsonObject
+        return gson.fromJson(json)
+    }
+
+    suspend fun createReviewsForUnreviewedCommits(params: CreateReviewsForUnreviewedCommitsParams): CreateReviewsForUnreviewedCommitsResult {
+        val json = remoteEndpoint
+            .request("codestream/review/createForUnreviewedCommits", params)
             .await() as JsonObject
         return gson.fromJson(json)
     }

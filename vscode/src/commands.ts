@@ -2,6 +2,7 @@ import * as paths from "path";
 import { CodemarkType, CSMarkerIdentifier, CSReviewCheckpoint } from "@codestream/protocols/api";
 import { Editor } from "extensions/editor";
 import { commands, Disposable, env, Range, Uri, ViewColumn, window, workspace } from "vscode";
+import { openUrl } from "urlHandler";
 import { SessionSignedOutReason, StreamThread } from "./api/session";
 import { TokenManager } from "./api/tokenManager";
 import { WorkspaceState } from "./common";
@@ -75,6 +76,7 @@ export interface OpenPullRequestCommandArgs {
 	// optionally open to a particular comment
 	commentId?: string;
 	sourceUri?: Uri;
+	externalUrl?: string;
 }
 
 export interface OpenReviewCommandArgs {
@@ -474,10 +476,22 @@ export class Commands implements Disposable {
 	async openPullRequest(args: OpenPullRequestCommandArgs): Promise<void> {
 		if (args === undefined) return;
 
-		Container.agent.telemetry.track("PullRequest Clicked", {
-			"PullRequest Location": "Source File"
-		});
+		const trackParams: {[k: string]: any} = {
+			Host: args.providerId
+		};
+		const editor = window.activeTextEditor;
+		if (editor && editor.document.uri.scheme === "file"){
+			trackParams["Comment Location"] = "Source Gutter";
+		}
+		if (editor && editor.document.uri.scheme === "codestream-diff"){
+			trackParams["Comment Location"] = "Diff Gutter";
+		}
 
+		Container.agent.telemetry.track("PR Comment Clicked", trackParams);
+
+		if (args.externalUrl) {
+			return openUrl(args.externalUrl);
+		}
 		return Container.webview.openPullRequest(args.providerId, args.pullRequestId, args.commentId);
 	}
 

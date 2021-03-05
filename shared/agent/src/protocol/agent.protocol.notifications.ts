@@ -136,6 +136,11 @@ export interface UnreadsChangedNotification {
 	data: Unreads;
 }
 
+export interface PreferencesChangedNotification {
+	type: ChangeDataType.Preferences;
+	data: CSMePreferences;
+}
+
 export interface UsersChangedNotification {
 	type: ChangeDataType.Users;
 	data: CSUser[];
@@ -313,3 +318,21 @@ export const DidChangeServerUrlNotificationType = new NotificationType<
 export const AgentInitializedNotificationType = new NotificationType<void, void>(
 	"codestream/agentInitialized"
 );
+
+export interface UserDidCommitNotification {
+	sha: string;
+}
+
+export const UserDidCommitNotificationType = new NotificationType<UserDidCommitNotification, void>(
+	"codestream/userDidCommit"
+);
+
+export interface DidDetectUnreviewedCommitsNotification {
+	repoId: string;
+	message: string;
+}
+
+export const DidDetectUnreviewedCommitsNotificationType = new NotificationType<
+	DidDetectUnreviewedCommitsNotification,
+	void
+>("codestream/didDetectUnreviewedCommits");

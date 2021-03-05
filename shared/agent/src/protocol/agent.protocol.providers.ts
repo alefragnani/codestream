@@ -17,6 +17,7 @@ export interface ThirdPartyProviderConfig {
 	hasSharing?: boolean;
 	supportsAuth?: boolean;
 	needsConfigure?: boolean;
+	needsConfigureForOnPrem?: boolean;
 	oauthData?: { [key: string]: any };
 	scopes?: string[];
 	canFilterByAssignees?: boolean;
@@ -220,9 +221,12 @@ export interface CreateThirdPartyPostRequest {
 	entryPoint?: string;
 	crossPostIssueValues?: CrossPostIssueValues;
 	mentionedUserIds?: string[];
+	parentPostId?: string;
 }
 export interface CreateThirdPartyPostResponse {
 	post: any;
+	ts?: string;
+	permalink?: string;
 }
 
 export const CreateThirdPartyPostRequestType = new RequestType<
@@ -327,7 +331,7 @@ export interface RemoveEnterpriseProviderHostRequest {
 	teamId: string;
 }
 
-export interface EnterpriseConfigurationData {
+export interface ProviderConfigurationData {
 	host?: string;
 	baseUrl?: string;
 	token: string;
@@ -365,6 +369,46 @@ export interface FetchThirdPartyPullRequestFilesResponse {
 	patch?: string;
 }
 
+export type CheckConclusionState =
+	| "ACTION_REQUIRED"
+	| "TIMED_OUT"
+	| "CANCELLED"
+	| "FAILURE"
+	| "SUCCESS"
+	| "NEUTRAL"
+	| "SKIPPED"
+	| "STARTUP_FAILURE"
+	| "STALE";
+
+export type StatusState = "EXPECTED" | "ERROR" | "FAILURE" | "PENDING" | "SUCCESS" | "NEUTRAL";
+export type CheckStatusState = "QUEUED" | "IN_PROGRESS" | "COMPLETED" | "WAITING" | "REQUESTED";
+
+export interface CheckRun {
+	__typename: string;
+	conclusion: CheckConclusionState;
+	status: CheckStatusState;
+	name: string;
+	title: string;
+	detailsUrl: string;
+	startedAt: string;
+	completedAt: string;
+	checkSuite: {
+		app: {
+			logoUrl: string;
+			slug: string;
+		};
+	};
+}
+
+export interface StatusContext {
+	__typename: string;
+	avatarUrl: string;
+	context: string;
+	description: string;
+	state: StatusState;
+	targetUrl: string;
+}
+
 export interface FetchThirdPartyPullRequestPullRequest {
 	id: string;
 	providerId: string; // e.g. "github*com"
@@ -396,6 +440,16 @@ export interface FetchThirdPartyPullRequestPullRequest {
 	createdAt: string;
 	commits: {
 		totalCount: number;
+		nodes: {
+			commit: {
+				statusCheckRollup?: {
+					state: StatusState;
+					contexts: {
+						nodes: CheckRun | StatusContext;
+					};
+				};
+			};
+		};
 	};
 	files: {
 		totalCount: number;
@@ -555,6 +609,9 @@ interface RateLimit {
 }
 
 export interface FetchThirdPartyPullRequestResponse {
+	error?: {
+		message: string;
+	};
 	rateLimit: RateLimit;
 	repository: FetchThirdPartyPullRequestRepository;
 	viewer: {
@@ -594,6 +651,7 @@ export interface FetchThirdPartyPullRequestCommitsResponse {
 	};
 	message: string;
 	authoredDate: string;
+	oid: string;
 }
 
 export const FetchThirdPartyPullRequestCommitsType = new RequestType<
@@ -715,7 +773,7 @@ export interface ProviderTokenRequest {
 		teamId: string;
 		repoId: string;
 		commitHash: string;
-	}
+	};
 	noSignup?: boolean;
 	signupToken?: string;
 	data?: {

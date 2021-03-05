@@ -1,4 +1,6 @@
 "use strict";
+
+import * as fs from "fs";
 import { CodeStreamDiffUriData } from "@codestream/protocols/agent";
 import { PullRequestCommentsChangedEvent } from "api/sessionEvents";
 import {
@@ -42,19 +44,26 @@ const positionStyleMap: { [key: string]: string } = {
 		"display: inline-block; left: 0; position: absolute; top: 50%; transform: translateY(-50%)"
 };
 
-const buildDecoration = (position: string, type: string, color: string, _status: string) => ({
-	contentText: "",
-	height: "16px",
-	width: "16px",
-	textDecoration: `none; background-image: url(${Uri.file(
-		Container.context.asAbsolutePath(`assets/images/marker-${type}-${color}.png`)
-	).toString()}); background-position: center; background-repeat: no-repeat; background-size: contain; ${
-		positionStyleMap[position]
-	}`
-});
+const buildDecoration = (position: string, type: string, color: string, _status: string) => {
+	const pngPath = Container.context.asAbsolutePath(`assets/images/marker-${type}-${color}.png`);
+	try {
+		const pngBase64 = fs.readFileSync(pngPath, { encoding: "base64" });
+		const pngInlineUrl = `data:image/png;base64,${pngBase64}`;
+
+		return {
+			contentText: "",
+			height: "16px",
+			width: "16px",
+
+			textDecoration: `none; background-image: url(${pngInlineUrl}); background-position: center; background-repeat: no-repeat; background-size: contain; ${positionStyleMap[position]}`
+		};
+	} catch (e) {
+		return;
+	}
+};
 
 const MarkerPositions = ["inline", "overlay"];
-const MarkerTypes = ["comment", "question", "issue", "trap", "bookmark"];
+const MarkerTypes = ["comment", "question", "issue", "trap", "bookmark", "prcomment"];
 const MarkerColors = ["blue", "green", "yellow", "orange", "red", "purple", "aqua", "gray"];
 const MarkerStatuses = ["open", "closed"];
 const MarkerHighlights: { [key: string]: string } = {
@@ -136,9 +145,19 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 				this.disable();
 				break;
 
-			case SessionStatus.SignedIn:
+			case SessionStatus.SignedIn: {
+				const preferences = Container.session.user.preferences;
+				if (preferences) {
+					this._lastPreferences = {
+						codemarksShowPRComments: !!preferences.codemarksShowPRComments,
+						codemarksHideReviews: !!preferences.codemarksHideReviews,
+						codemarksHideResolved: !!preferences.codemarksHideResolved,
+						codemarksShowArchived: !!preferences.codemarksShowArchived
+					};
+				}
 				this.ensure();
 				break;
+			}
 		}
 	}
 
@@ -183,9 +202,12 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 					for (const color of MarkerColors) {
 						for (const status of MarkerStatuses) {
 							const key = `${position}-${type}-${color}-${status}`;
-							decorationTypes[key] = window.createTextEditorDecorationType({
-								before: buildDecoration(position, type, color, status)
-							});
+							const before = buildDecoration(position, type, color, status);
+							if (before) {
+								decorationTypes[key] = window.createTextEditorDecorationType({
+									before
+								});
+							}
 						}
 					}
 				}
@@ -213,7 +235,21 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 			Container.session.onDidChangePullRequestComments(this.onPullRequestCommentsChanged, this),
 			Container.session.onDidChangeSessionStatus(this.onSessionStatusChanged, this),
 			window.onDidChangeVisibleTextEditors(this.onEditorVisibilityChanged, this),
-			workspace.onDidCloseTextDocument(this.onDocumentClosed, this)
+			workspace.onDidCloseTextDocument(this.onDocumentClosed, this),
+			Container.session.onDidChangePreferences(e => {
+				const preferences = e.preferences();
+				const currentPreferences = {
+					codemarksShowPRComments: !!preferences.codemarksShowPRComments,
+					codemarksHideReviews: !!preferences.codemarksHideReviews,
+					codemarksHideResolved: !!preferences.codemarksHideResolved,
+					codemarksShowArchived: !!preferences.codemarksShowArchived
+				};
+				if (JSON.stringify(currentPreferences) !== JSON.stringify(this._lastPreferences)) {
+					// set the reset flag to true if we need to re-fetch
+					this.ensure(true);
+				}
+				this._lastPreferences = currentPreferences;
+			}, this)
 		];
 
 		if (!this._suspended) {
@@ -225,6 +261,13 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 
 		this.applyToApplicableVisibleEditors();
 	}
+
+	private _lastPreferences?: {
+		codemarksShowPRComments?: boolean;
+		codemarksHideReviews?: boolean;
+		codemarksHideResolved?: boolean;
+		codemarksShowArchived?: boolean;
+	};
 
 	private async onDocumentClosed(e: TextDocument) {
 		this._markersCache.delete(e.uri.toString());
@@ -343,10 +386,15 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 			if (!this._suspended) {
 				// && marker.codemarkId != null) {
 				// Determine if the marker needs to be inline (i.e. part of the content or overlayed)
-				const position =
-					editor.document.lineAt(start).firstNonWhitespaceCharacterIndex === 0
+				let position = "inline";
+				try {
+					position = editor.document.lineAt(start).firstNonWhitespaceCharacterIndex === 0
 						? "inline"
 						: "overlay";
+				} catch (e) {
+					Logger.error(e);
+				}
+
 				const key = `${position}-${marker.type}-${marker.color}-${marker.status}`;
 				if (!decorations[key]) {
 					decorations[key] = [];
@@ -416,21 +464,23 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 							sourceUri: uri
 						};
 
+						let inReplyTo = "";
 						const typeString = Strings.toTitleCase(m.type);
-						const markerColor = m.color || "blue";
-						message += `__${m.creatorName}__, ${m.fromNow()} &nbsp; _(${m.formatDate()})_ \n\n`;
+						message += `__${m.creatorName}__, ${m.fromNow()} \n\n`;
 						switch (true) {
 							case m.type === "issue":
-								message += `![issue codemark](${Container.context.asAbsolutePath(`assets/images/icons16/marker-issue-${markerColor}.png`)})`;
+								message += "  $(bug) ";
 								break;
-							case m.type === "comment" && m.isReviewDescendant:
-								message += `![FR codemark](${Container.context.asAbsolutePath(`assets/images/icons16/marker-fr-${markerColor}.png`)})`;
+							case m.type === "comment" && m.isReviewDescendant && !!m.title:
+								inReplyTo = `\n\n  __FEEDBACK REQUEST__ \n\n  $(search) ${m.title} \n\n`;
 								break;
 							default:
-								message += `![regular codemark](${Container.context.asAbsolutePath(`assets/images/icons16/marker-comment-${markerColor}.png`)})`;
+								// message += "  $(comment) ";
 								break;
 						}
-						message += ` ${m.summaryMarkdown} \n\n[__View ${typeString} \u2197__](command:codestream.openCodemark?${encodeURIComponent(
+						message += ` ${
+							m.summaryMarkdown
+						} \n\n${inReplyTo}[__View ${typeString} \u2197__](command:codestream.openCodemark?${encodeURIComponent(
 							JSON.stringify(viewCommandArgs)
 						)} "View ${typeString}")`;
 
@@ -446,12 +496,37 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 							sourceUri: uri
 						};
 
-						const typeString = Strings.toTitleCase(m.type);
-						message += `__${m.creatorName}__, ${m.fromNow()} &nbsp; _(${m.formatDate()})_ \n\n`;
-						message += `![PR codemark](${Container.context.asAbsolutePath(`assets/images/icons16/marker-pr-${m.color}.png`)})`;
-						message += ` ${m.summaryMarkdown} \n\n[__View ${typeString} \u2197__](command:codestream.openPullRequest?${encodeURIComponent(
-							JSON.stringify(viewCommandArgs)
-						)} "View ${typeString}")`;
+						let typeString = "Comment";
+						if (m.type === "prcomment") {
+							if (["gitlab*com", "gitlab/enterprise"].includes(m.externalContent.provider.id)) {
+								typeString = "MR Comment";
+							} else {
+								typeString = "PR Comment";
+							}
+						}
+						message += `__${m.creatorName}__, ${m.fromNow()} \n\n ${
+							m.summaryMarkdown
+						} \n\n __PULL REQUEST__\n\n`;
+						if (externalContent.provider.id === "github*com") {
+							message += "  $(github-inverted) ";
+						}
+						message += m.title  ? m.title : "";
+						if (["github*com", "github/enterprise"].includes(m.externalContent.provider.id)) {
+							message += ` \n\n[__View ${typeString} \u2197__](command:codestream.openPullRequest?${encodeURIComponent(
+								JSON.stringify(viewCommandArgs)
+							)} "View ${typeString}")`;
+						}
+
+						if (m.externalContent.actions && m.externalContent.actions.length) {
+							m.externalContent.actions.map(action => {
+								if (action.label === "Open Comment" || action.label === "Open Note") {
+									viewCommandArgs.externalUrl = action.uri;
+									message += ` \n\n[__View ${typeString} \u2197__](command:codestream.openPullRequest?${encodeURIComponent(
+										JSON.stringify(viewCommandArgs)
+									)} "View ${typeString}")`;
+								}
+							});
+						}
 
 						// TODO: Add actions from the external content
 						// message += `__${m.creatorName}__, ${m.fromNow()} &nbsp; _(${m.formatDate()})_ ${
@@ -471,7 +546,7 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 
 			if (message === undefined || range === undefined) return undefined;
 
-			const markdown = new MarkdownString(message);
+			const markdown = new MarkdownString(message, true);
 			markdown.isTrusted = true;
 
 			return new Hover(markdown, range);
@@ -498,7 +573,7 @@ export class CodemarkDecorationProvider implements HoverProvider, Disposable {
 
 	private async getMarkersCore(uri: Uri) {
 		try {
-			const resp = await Container.agent.documentMarkers.fetch(uri, true);
+			const resp = await Container.agent.documentMarkers.fetch(uri);
 			if (resp === undefined) return emptyArray;
 
 			return resp.markers.map(m => new DocMarker(Container.session, m));

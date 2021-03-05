@@ -1,9 +1,11 @@
 "use strict";
-import { applyPatch } from "diff";
+import { ParsedDiff } from "diff";
+import { flatten } from "lodash-es";
 import * as path from "path";
+import { URI } from "vscode-uri";
 import { MessageType } from "../api/apiProvider";
 import { Container, SessionContainer } from "../container";
-import { EMPTY_TREE_SHA, GitRemote, GitRepository } from "../git/gitService";
+import { EMPTY_TREE_SHA, GitCommit, GitRemote, GitRepository } from "../git/gitService";
 import { Logger } from "../logger";
 import {
 	CheckPullRequestBranchPreconditionsRequest,
@@ -18,8 +20,13 @@ import {
 	CreatePullRequestRequest,
 	CreatePullRequestRequestType,
 	CreatePullRequestResponse,
+	CreateReviewRequest,
+	CreateReviewsForUnreviewedCommitsRequest,
+	CreateReviewsForUnreviewedCommitsRequestType,
+	CreateReviewsForUnreviewedCommitsResponse,
 	DeleteReviewRequest,
 	DeleteReviewRequestType,
+	DidDetectUnreviewedCommitsNotificationType,
 	EndReviewRequest,
 	EndReviewRequestType,
 	EndReviewResponse,
@@ -35,6 +42,9 @@ import {
 	GetReviewContentsRequest,
 	GetReviewContentsRequestType,
 	GetReviewContentsResponse,
+	GetReviewCoverageRequest,
+	GetReviewCoverageRequestType,
+	GetReviewCoverageResponse,
 	GetReviewRequest,
 	GetReviewRequestType,
 	GetReviewResponse,
@@ -66,10 +76,11 @@ import {
 	ThirdPartyProvider,
 	ThirdPartyProviderSupportsPullRequests
 } from "../providers/provider";
-import { log, lsp, lspHandler, Strings } from "../system";
+import { Arrays, log, lsp, lspHandler, Strings } from "../system";
 import { gate } from "../system/decorators/gate";
 import { xfs } from "../xfs";
 import { CachedEntityManagerBase, Id } from "./entityManager";
+import { resolveCreatePostResponse, trackReviewPostCreation } from "./postsManager";
 import Timer = NodeJS.Timer;
 
 const uriRegexp = /codestream-diff:\/\/(\w+)\/(\w+)\/(\w+)\/(\w+)\/(.+)/;
@@ -226,6 +237,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 		}
 
 		return {
+			repoRoot: repo.path,
 			left: Strings.normalizeFileContents(leftContents),
 			right: Strings.normalizeFileContents(rightContents || "")
 		};
@@ -275,10 +287,35 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 		return { repos };
 	}
 
+	@lspHandler(GetReviewCoverageRequestType)
+	@log()
+	async getCoverage(request: GetReviewCoverageRequest): Promise<GetReviewCoverageResponse> {
+		const documentUri = URI.parse(request.textDocument.uri);
+		const filePath = documentUri.fsPath;
+		const { git } = SessionContainer.instance();
+		const repo = await git.getRepositoryByFilePath(filePath);
+		const commitShas = await git.getCommitShaByLine(filePath);
+		const reviews = (await this.getAllCached()).filter(r =>
+			r.reviewChangesets?.some(c => c.repoId === repo?.id)
+		);
+		const reviewIds = commitShas.map(
+			commitSha =>
+				reviews.find(review =>
+					review.reviewChangesets.some(ch => ch.commits.some(c => c.sha === commitSha))
+				)?.id
+		);
+
+		return {
+			reviewIds
+		};
+	}
+
 	@lspHandler(GetReviewContentsRequestType)
 	@log()
 	async getContents(request: GetReviewContentsRequest): Promise<GetReviewContentsResponse> {
+		const { git } = SessionContainer.instance();
 		const { reviewId, repoId, checkpoint, path } = request;
+		const repo = await git.getRepositoryById(repoId);
 		if (checkpoint === undefined) {
 			const review = await this.getById(request.reviewId);
 
@@ -309,6 +346,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 			);
 
 			return {
+				repoRoot: repo?.path,
 				left: firstContents.left,
 				right: latestContents.right
 			};
@@ -342,6 +380,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				path
 			);
 			return {
+				repoRoot: repo?.path,
 				left: previousContents || atRequestedCheckpoint.left,
 				right: atRequestedCheckpoint.right
 			};
@@ -371,6 +410,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 		const leftDiff = diff.leftDiffs.find(
 			d => d.newFileName === fileInfo.oldFile || d.oldFileName === fileInfo.oldFile
 		);
+
 		const leftBaseRelativePath =
 			(leftDiff && leftDiff.oldFileName !== "/dev/null" && leftDiff.oldFileName) ||
 			fileInfo.oldFile;
@@ -394,23 +434,17 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 		const leftBaseContents = isNewFile
 			? ""
 			: (await git.getFileContentForRevision(leftBasePath, diff.leftBaseSha)) || "";
-		const normalizedLeftBaseContents = Strings.normalizeFileContents(leftBaseContents);
-		const leftContents =
-			leftDiff !== undefined
-				? applyPatch(normalizedLeftBaseContents, leftDiff)
-				: normalizedLeftBaseContents;
+		const leftContents = Strings.applyPatchToNormalizedContents(leftBaseContents, leftDiff);
+
 		const rightBaseContents = isNewFile
 			? ""
 			: diff.leftBaseSha === diff.rightBaseSha
 			? leftBaseContents
 			: (await git.getFileContentForRevision(rightBasePath, diff.rightBaseSha)) || "";
-		const normalizedRightBaseContents = Strings.normalizeFileContents(rightBaseContents);
-		const rightContents =
-			rightDiff !== undefined
-				? applyPatch(normalizedRightBaseContents, rightDiff)
-				: normalizedRightBaseContents;
+		const rightContents = Strings.applyPatchToNormalizedContents(rightBaseContents, rightDiff);
 
 		return {
+			repoRoot: repo.path,
 			left: leftContents,
 			right: rightContents
 		};
@@ -568,12 +602,11 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				};
 			}
 
-			const remotes = await repo!.getRemotes();
 			let remoteUrl = "";
 			let providerId = "";
 
 			const connectedProviders = await providerRegistry.getConnectedPullRequestProviders(user);
-			const _projectsByRemotePath = new Map(remotes.map(obj => [obj.path, obj]));
+
 			for (const provider of connectedProviders) {
 				const id = provider.getConfig().id;
 				if (id !== request.providerId) continue;
@@ -581,38 +614,30 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 
 				const providerRepo = await repo.getPullRequestProvider(user, connectedProviders);
 
-				if (providerRepo?.provider) {
-					const remotePaths = await getRemotePaths(
-						repo,
-						provider.getIsMatchingRemotePredicate(),
-						_projectsByRemotePath
-					);
-					if (remotePaths && remotePaths.length) {
-						// just need any url here...
-						remoteUrl = "https://example.com/" + remotePaths[0];
-						const providerRepoInfo = await providerRegistry.getRepoInfo({
-							providerId: providerId,
-							remote: remoteUrl
-						});
-						if (providerRepoInfo) {
-							if (providerRepoInfo.pullRequests && request.baseRefName && request.headRefName) {
-								const existingPullRequest = providerRepoInfo.pullRequests.find(
-									(_: any) =>
-										_.baseRefName === request.baseRefName && _.headRefName === request.headRefName
-								);
-								if (existingPullRequest) {
-									return {
-										success: false,
-										error: {
-											type: "ALREADY_HAS_PULL_REQUEST",
-											url: existingPullRequest.url
-										}
-									};
-								}
+				if (providerRepo?.provider && providerRepo?.remotes?.length > 0) {
+					remoteUrl = providerRepo.remotes[0].webUrl;
+					const providerRepoInfo = await providerRegistry.getRepoInfo({
+						providerId: providerId,
+						remote: remoteUrl
+					});
+					if (providerRepoInfo) {
+						if (providerRepoInfo.pullRequests && request.baseRefName && request.headRefName) {
+							const existingPullRequest = providerRepoInfo.pullRequests.find(
+								(_: any) =>
+									_.baseRefName === request.baseRefName && _.headRefName === request.headRefName
+							);
+							if (existingPullRequest) {
+								return {
+									success: false,
+									error: {
+										type: "ALREADY_HAS_PULL_REQUEST",
+										url: existingPullRequest.url
+									}
+								};
 							}
-							// break out of providers loop
-							break;
 						}
+						// break out of providers loop
+						break;
 					}
 				}
 			}
@@ -706,9 +731,10 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 			const connectedProviders = await providerRegistry.getConnectedPullRequestProviders(user);
 			const providerRepo = await repo.getPullRequestProvider(user, connectedProviders);
 			let providerRepoDefaultBranch: string | undefined = "";
+			let baseRefName: string | undefined = request.baseRefName;
 
-			if (providerRepo?.provider) {
-				remoteUrl = "https://example.com/" + providerRepo.remotePaths[0];
+			if (providerRepo?.provider && providerRepo?.remotes?.length > 0) {
+				remoteUrl = providerRepo.remotes[0].webUrl;
 				const providerRepoInfo = await providerRegistry.getRepoInfo({
 					providerId: providerRepo.providerId,
 					remote: remoteUrl
@@ -722,7 +748,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 					}
 
 					providerRepoDefaultBranch = providerRepoInfo.defaultBranch;
-					const baseRefName = request.baseRefName || providerRepoDefaultBranch;
+					baseRefName = baseRefName || providerRepoDefaultBranch;
 					if (providerRepoInfo.pullRequests) {
 						if (baseRefName && headRefName) {
 							const existingPullRequest = providerRepoInfo.pullRequests.find(
@@ -790,6 +816,13 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				(await xfs.readText(path.join(repo.path, "docs/pull_request_template.md"))) ||
 				(await xfs.readText(path.join(repo.path, ".github/pull_request_template.md")));
 
+			const baseBranchRemote = await git.getBranchRemote(repo.path, baseRefName!);
+			const commitsBehindOrigin = await git.getBranchCommitsStatus(
+				repo.path,
+				baseBranchRemote!,
+				baseRefName!
+			);
+
 			return {
 				success: success,
 				repoId: repo.id,
@@ -810,6 +843,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				branch: headRefName,
 				branches: branches!.branches,
 				remoteBranches: remoteBranches ? remoteBranches.branches : undefined,
+				commitsBehindOriginHeadBranch: commitsBehindOrigin,
 				warning: warning
 			};
 		} catch (ex) {
@@ -1040,6 +1074,211 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				}
 			}
 		}
+	}
+
+	private readonly lastUnreviewedCommitsByRepoId = new Map<string, GitCommit[]>();
+
+	async checkUnreviewedCommits(repo: GitRepository): Promise<number> {
+		const repoId = repo.id;
+		if (repoId == undefined) {
+			return 0;
+		}
+		const { git, session } = SessionContainer.instance();
+		const allReviews = await this.getAllCached();
+		const repoChangesets = flatten(
+			allReviews
+				.filter(r => !r.deactivated && r.reviewChangesets)
+				.map(r => r.reviewChangesets.filter(rc => rc.repoId === repo?.id))
+		);
+		const commitShasInReviews = new Set(
+			flatten(repoChangesets.map(rc => rc.commits.map(c => c.sha)))
+		);
+
+		const gitLog = await git.getLog(repo, 10);
+		if (!gitLog) return 0;
+
+		const myEmail = await git.getConfig(repo.path, "user.email");
+		const unreviewedCommits = [];
+		let lastAuthorEmail = undefined;
+		for (const commit of gitLog.values()) {
+			if (lastAuthorEmail === undefined) {
+				lastAuthorEmail = commit.email;
+			}
+			if (commit.email !== lastAuthorEmail) {
+				// Notify about commits from only one author. They will be grouped in a single review.
+				break;
+			}
+			if (commitShasInReviews.has(commit.ref)) {
+				break;
+			}
+			if (commit.email === myEmail) {
+				break;
+			}
+			unreviewedCommits.push(commit);
+		}
+
+		this.lastUnreviewedCommitsByRepoId.set(repoId, unreviewedCommits);
+
+		const authors = new Set(unreviewedCommits.map(c => c.author));
+
+		if (unreviewedCommits.length) {
+			session.agent.sendNotification(DidDetectUnreviewedCommitsNotificationType, {
+				repoId,
+				message: `You have ${unreviewedCommits.length} unreviewed commit${
+					unreviewedCommits.length > 0 ? "s" : ""
+				} from ${Array.from(authors).join(", ")}`
+			});
+		}
+
+		return unreviewedCommits.length;
+	}
+
+	@lspHandler(CreateReviewsForUnreviewedCommitsRequestType)
+	@log()
+	async createReviewsForUnreviewedCommits(
+		request: CreateReviewsForUnreviewedCommitsRequest
+	): Promise<CreateReviewsForUnreviewedCommitsResponse> {
+		try {
+			const { git } = SessionContainer.instance();
+			const repo = await git.getRepositoryById(request.repoId);
+			if (!repo) {
+				return { reviewIds: [] };
+			}
+
+			const commits = this.lastUnreviewedCommitsByRepoId.get(request.repoId);
+			if (!commits) {
+				return { reviewIds: [] };
+			}
+
+			const currentUserEmail = await git.getConfig(repo.path, "user.email");
+			if (!currentUserEmail) {
+				return { reviewIds: [] };
+			}
+
+			// All these commits are from the same author, and we want to pack them together in a single review
+			const reviewIds = [];
+			const review = await this.createReviewForUnreviewedCommit(commits, repo, currentUserEmail);
+			if (review) {
+				reviewIds.push(review.id);
+			}
+
+			return {
+				reviewIds
+			};
+		} catch (ex) {
+			Logger.error(ex);
+			return {
+				reviewIds: []
+			};
+		}
+	}
+
+	private async createReviewForUnreviewedCommit(
+		commits: GitCommit[],
+		repo: GitRepository,
+		currentUserEmail: string
+	): Promise<CSReview | undefined> {
+		const { git, posts, session, scm, users } = SessionContainer.instance();
+		const newestCommit = commits[0];
+		const oldestCommit = commits[commits.length - 1];
+		const repoStatus = await scm.getRepoStatus({
+			uri: "file://" + repo.path,
+			startCommit: oldestCommit.ref + "^",
+			endCommit: newestCommit.ref,
+			includeStaged: false,
+			includeSaved: false,
+			currentUserEmail
+		});
+
+		if (!repo.id || !repoStatus.scm) {
+			return;
+		}
+
+		const codeAuthorIds = [];
+		const followerIds = [];
+		const addedUsers = [];
+		if (newestCommit.email) {
+			let author = (await users.getByEmails([newestCommit.email], { ignoreCase: true }))[0];
+			if (!author) {
+				const inviteUserResponse = await users.inviteUser({
+					email: newestCommit.email,
+					fullName: newestCommit.author,
+					dontSendEmail: true
+				});
+				author = inviteUserResponse.user;
+				addedUsers.push(newestCommit.email);
+			}
+			if (author) {
+				codeAuthorIds.push(author.id);
+				followerIds.push(author.id);
+			}
+		}
+
+		// people whose code was modified by the commits in the review
+		const authorsById: { [authorId: string]: { stomped: number; commits: number } } = {};
+		for (const impactedAuthor of repoStatus.scm.authors) {
+			const user = (await users.getByEmails([impactedAuthor.email], { ignoreCase: true }))[0];
+			if (user) {
+				authorsById[user.id] = impactedAuthor;
+			}
+		}
+
+		const firstAncestor = await git.findAncestor(repo.path, oldestCommit.ref, 1, () => true);
+
+		const reviewRequest: CreateReviewRequest = {
+			title: newestCommit.shortMessage,
+			text: commits.map(c => c.message).join("\n"),
+			reviewers: [session.userId],
+			codeAuthorIds,
+			followerIds,
+			authorsById,
+			tags: [],
+			status: "open",
+			markers: [],
+			reviewChangesets: [
+				{
+					repoId: repo.id,
+					checkpoint: 0,
+					branch: "",
+					commits: commits
+						.map(commit => repoStatus?.scm?.commits?.find(c => c.sha === commit.ref))
+						.filter(Boolean) as any,
+					modifiedFiles: repoStatus.scm.modifiedFiles,
+					modifiedFilesInCheckpoint: repoStatus.scm.modifiedFiles,
+					includeSaved: false,
+					includeStaged: false,
+					diffs: {
+						leftBaseAuthor: firstAncestor ? firstAncestor.author : "Empty Tree",
+						leftBaseSha: firstAncestor ? firstAncestor.ref : EMPTY_TREE_SHA,
+						leftDiffs: [],
+						rightBaseAuthor: newestCommit.author,
+						rightBaseSha: newestCommit.ref,
+						rightDiffs: [],
+						rightReverseDiffs: [],
+						latestCommitSha: newestCommit.ref,
+						rightToLatestCommitDiffs: [],
+						latestCommitToRightDiffs: []
+					}
+				}
+			]
+		};
+
+		const stream = await SessionContainer.instance().streams.getTeamStream();
+		const response = await this.session.api.createPost({
+			review: reviewRequest,
+			text: reviewRequest.title!,
+			streamId: stream.id,
+			dontSendEmail: false,
+			mentionedUserIds: [],
+			addedUsers: [],
+			files: []
+		});
+		const review = response.review!;
+
+		trackReviewPostCreation(review, 0, 0, "Review on pull", addedUsers);
+		await resolveCreatePostResponse(response);
+
+		return review;
 	}
 
 	protected async loadCache() {

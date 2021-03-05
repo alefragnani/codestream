@@ -94,7 +94,14 @@ export function BaseCodemark(props: BaseCodemarkProps) {
 	let { collapsed } = props;
 	// collapsed = false;
 
-	const resolve = () => dispatch(setCodemarkStatus(codemark.id, CodemarkStatus.Closed));
+	const resolve = () => {
+		dispatch(setCodemarkStatus(codemark.id, CodemarkStatus.Closed));
+		HostApi.instance.track("Codemark Resolved", {
+			"Codemark ID": codemark.id,
+			"Codemark Type": codemark.type,
+			Archived: false
+		});
+	};
 
 	const reopen = () => dispatch(setCodemarkStatus(codemark.id, CodemarkStatus.Open));
 
@@ -288,6 +295,12 @@ export function BaseCodemark(props: BaseCodemarkProps) {
 							{codemark.title && codemark.text && (
 								<span className="detail-icon">
 									<Icon title="Show description" placement="bottom" name="description" />
+								</span>
+							)}
+							{props.post && props.post.files && props.post.files.length > 0 && (
+								<span className="detail-icon">
+									<Icon title="Show attachments" placement="bottom" name="paperclip" />{" "}
+									{props.post.files.length}
 								</span>
 							)}
 							{codemark.markers && codemark.markers.length > 1 && (

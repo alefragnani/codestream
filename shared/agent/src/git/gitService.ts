@@ -18,6 +18,7 @@ import { GitAuthorParser } from "./parsers/authorParser";
 import { GitBlameRevisionParser, RevisionEntry } from "./parsers/blameRevisionParser";
 import { GitBranchParser } from "./parsers/branchParser";
 import { GitLogParser } from "./parsers/logParser";
+import { GitPatchParser, ParsedDiffPatch } from "./parsers/patchParser";
 import { GitRemoteParser } from "./parsers/remoteParser";
 import { GitRepositories } from "./repositories";
 import { RepositoryLocator } from "./repositoryLocator";
@@ -47,10 +48,6 @@ export interface IGitService extends Disposable {
 	getFileCurrentRevision(uri: URI): Promise<string | undefined>;
 	getFileCurrentRevision(path: string): Promise<string | undefined>;
 	// getFileCurrentSha(uriOrPath: Uri | string): Promise<string | undefined>;
-
-	getFileForRevision(uri: URI, ref: string): Promise<string | undefined>;
-	getFileForRevision(path: string, ref: string): Promise<string | undefined>;
-	// getFileRevision(uriOrPath: Uri | string, ref: string): Promise<string | undefined>;
 
 	getFileContentForRevision(uri: URI, ref: string): Promise<string | undefined>;
 	getFileContentForRevision(path: string, ref: string): Promise<string | undefined>;
@@ -85,11 +82,11 @@ export interface IGitService extends Disposable {
 	isValidReference(repoUri: URI, ref: string): Promise<boolean>;
 	isValidReference(repoPath: string, ref: string): Promise<boolean>;
 
-	resolveRef(uri: URI, ref: string): Promise<string | undefined>;
-	resolveRef(path: string, ref: string): Promise<string | undefined>;
-	//   resolveRef(uriOrPath: Uri | string, ref: string): Promise<string | undefined> {
-
 	getCommittersForRepo(repoPath: string, since: number): Promise<{ [email: string]: string }>;
+	getLastCommittersForRepo(
+		repoPath: string,
+		since: number
+	): Promise<{ email: string; name: string }[]>;
 }
 
 export class GitService implements IGitService, Disposable {
@@ -206,9 +203,11 @@ export class GitService implements IGitService, Disposable {
 		uriOrPath: URI | string,
 		options: { ref?: string; contents?: string; startLine?: number; endLine?: number } = {}
 	): Promise<string> {
-		const [dir, filename] = Strings.splitPath(
-			typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath
-		);
+		if (options.ref === EMPTY_TREE_SHA) return "";
+
+		const repoAndRelativePath = await this._getRepoAndRelativePath(uriOrPath);
+		if (!repoAndRelativePath) return "";
+		const { repoPath, relativePath } = repoAndRelativePath;
 
 		const params = ["blame", "--root", "--incremental", "-w"];
 
@@ -225,18 +224,56 @@ export class GitService implements IGitService, Disposable {
 			stdin = options.contents;
 		}
 
-		return git({ cwd: dir, stdin: stdin }, ...params, "--", filename);
+		return git({ cwd: repoPath, stdin: stdin }, ...params, "--", relativePath);
+	}
+
+	async getCommitShaByLine(uriOrPath: URI | string): Promise<string[]> {
+		const [dir, filename] = Strings.splitPath(
+			typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath
+		);
+
+		const data = await git({ cwd: dir }, "blame", "-l", filename);
+
+		return data
+			.trim()
+			.split("\n")
+			.map(line => line.substr(0, 40));
 	}
 
 	async getFileCurrentRevision(uri: URI): Promise<string | undefined>;
 	async getFileCurrentRevision(path: string): Promise<string | undefined>;
 	async getFileCurrentRevision(uriOrPath: URI | string): Promise<string | undefined> {
-		const [dir, filename] = Strings.splitPath(
-			typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath
+		const repoAndRelativePath = await this._getRepoAndRelativePath(uriOrPath);
+		if (!repoAndRelativePath) return undefined;
+		const { repoPath, relativePath } = repoAndRelativePath;
+
+		const data = (
+			await git({ cwd: repoPath }, "log", "-n1", "--format=%H", "--", relativePath)
+		).trim();
+		return data ? data : undefined;
+	}
+
+	private async _getRepoAndRelativePath(
+		uriOrPath: URI | string
+	): Promise<{ repoPath: string; relativePath: string } | undefined> {
+		const fsPath = typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath;
+		const repo = await this.getRepositoryByFilePath(fsPath);
+		if (!repo) return undefined;
+
+		const possiblySymlinkedRepoRoot = this._gitServiceLite.getRepoRootPreservingSymlink(
+			fsPath,
+			repo.path
 		);
 
-		const data = (await git({ cwd: dir }, "log", "-n1", "--format=%H", "--", filename)).trim();
-		return data ? data : undefined;
+		let fileRelativePath = Strings.normalizePath(path.relative(possiblySymlinkedRepoRoot, fsPath));
+		if (fileRelativePath[0] === "/") {
+			fileRelativePath = fileRelativePath.substr(1);
+		}
+
+		return {
+			repoPath: possiblySymlinkedRepoRoot,
+			relativePath: fileRelativePath
+		};
 	}
 
 	async getFileContentForRevision(uri: URI, ref: string): Promise<string | undefined>;
@@ -245,20 +282,15 @@ export class GitService implements IGitService, Disposable {
 		uriOrPath: URI | string,
 		ref: string
 	): Promise<string | undefined> {
-		const fsPath = typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath;
-		const repo = await this.getRepositoryByFilePath(fsPath);
-		if (!repo) return undefined;
-
-		let fileRelativePath = Strings.normalizePath(path.relative(repo.path, fsPath));
-		if (fileRelativePath[0] === "/") {
-			fileRelativePath = fileRelativePath.substr(1);
-		}
+		const repoAndRelativePath = await this._getRepoAndRelativePath(uriOrPath);
+		if (!repoAndRelativePath) return undefined;
+		const { repoPath, relativePath } = repoAndRelativePath;
 
 		try {
 			const data = await git(
-				{ cwd: repo.path, encoding: "utf8" },
+				{ cwd: repoPath, encoding: "utf8" },
 				"show",
-				`${ref}:./${fileRelativePath}`,
+				`${ref}:./${relativePath}`,
 				"--"
 			);
 			return Strings.normalizeFileContents(data);
@@ -314,30 +346,46 @@ export class GitService implements IGitService, Disposable {
 		}
 	}
 
+	async getCommitChanges(
+		repoPath: string,
+		commitHash: string
+	): Promise<ParsedDiffPatch[] | undefined> {
+		try {
+			const data = await git({ cwd: repoPath }, "diff", "--no-ext-diff", `${commitHash}^!`);
+
+			return GitPatchParser.parse(data);
+		} catch (err) {
+			Logger.warn(`Error getting diff from ${commitHash}`);
+			throw err;
+		}
+	}
+
 	async getDiffBetweenCommits(
 		initialCommitHash: string,
 		finalCommitHash: string,
 		filePath: string,
 		fetchIfCommitNotFound: boolean = false,
-		conetxtLines: number = 3
+		contextLines: number = 3
 	): Promise<ParsedDiff | undefined> {
-		const [dir, filename] = Strings.splitPath(filePath);
+		const repoAndRelativePath = await this._getRepoAndRelativePath(filePath);
+		if (!repoAndRelativePath) return undefined;
+		const { repoPath, relativePath } = repoAndRelativePath;
 		let data;
 		try {
 			data = await git(
-				{ cwd: dir },
+				{ cwd: repoPath },
 				"diff",
 				"--no-ext-diff",
-				`-U${conetxtLines}`,
+				`-U${contextLines}`,
 				initialCommitHash,
 				finalCommitHash,
 				"--",
-				filename
+				relativePath
 			);
 		} catch (err) {
 			if (fetchIfCommitNotFound) {
 				Logger.log("Commit not found - fetching all remotes");
-				const didFetch = await this.fetchAllRemotes(dir);
+				const didFetch = await this.fetchAllRemotes(repoPath);
 				if (didFetch) {
 					return this.getDiffBetweenCommits(initialCommitHash, finalCommitHash, filePath, false);
 				}
@@ -345,26 +393,9 @@ export class GitService implements IGitService, Disposable {
 
 			Logger.error(err);
 			Logger.warn(
-				`Error getting diff from ${initialCommitHash} to ${finalCommitHash} for ${filename}`
+				`Error getting diff from ${initialCommitHash} to ${finalCommitHash} for ${relativePath}`
 			);
 			return;
-		}
-
-		const patches = parsePatch(data);
-		if (patches.length > 1) {
-			Logger.warn("Parsed diff generated multiple patches");
-		}
-		return patches[0];
-	}
-
-	async getDiffFromHead(filePath: string): Promise<ParsedDiff> {
-		const [dir, filename] = Strings.splitPath(filePath);
-		let data;
-		try {
-			data = await git({ cwd: dir }, "diff", "--no-ext-diff", "HEAD", "--", filename);
-		} catch (err) {
-			Logger.warn(`Error getting diff from HEAD to working directory for ${filename}`);
-			throw err;
 		}
 
 		const patches = parsePatch(data);
@@ -425,7 +456,6 @@ export class GitService implements IGitService, Disposable {
 		}
 
 		const patches = parsePatch(data);
-		Logger.log("RETURNING PATCHES: ", JSON.stringify(patches, null, 4));
 		return { patches, data };
 	}
 
@@ -457,52 +487,6 @@ export class GitService implements IGitService, Disposable {
 		}
 
 		return data;
-	}
-
-	async getFileForRevision(uri: URI, ref: string): Promise<string | undefined>;
-	async getFileForRevision(path: string, ref: string): Promise<string | undefined>;
-	async getFileForRevision(uriOrPath: URI | string, ref: string): Promise<string | undefined> {
-		const [dir, filename] = Strings.splitPath(
-			typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath
-		);
-
-		let data: string | undefined;
-		try {
-			data = await git({ cwd: dir, encoding: "binary" }, "show", `${ref}:./${filename}`);
-		} catch (ex) {
-			const msg = ex && ex.toString();
-			if (!GitWarnings.notFound.test(msg) && GitWarnings.foundButNotInRevision.test(msg)) throw ex;
-		}
-
-		if (!data) return undefined;
-
-		const suffix = Strings.sanitizeForFileSystem(ref.substr(0, 8)).substr(0, 50);
-		const ext = path.extname(filename);
-
-		const tmp = await import(/* webpackChunkName: "tmp", webpackMode: "eager" */ "tmp");
-		return new Promise<string>((resolve, reject) => {
-			tmp.file(
-				{ prefix: `${path.basename(filename, ext)}-${suffix}__`, postfix: ext },
-				(err, destination, fd, cleanupCallback) => {
-					if (err) {
-						reject(err);
-						return;
-					}
-
-					fs.appendFile(destination, data, { encoding: "binary" }, err => {
-						if (err) {
-							reject(err);
-							return;
-						}
-
-						const ReadOnly = 0o100444; // 33060 0b1000000100100100
-						fs.chmod(destination, ReadOnly, err => {
-							resolve(destination);
-						});
-					});
-				}
-			);
-		});
 	}
 
 	async getHeadRevision(repoPath: string, reference: string): Promise<string | undefined> {
@@ -644,7 +628,7 @@ export class GitService implements IGitService, Disposable {
 	private async _getRepoRemotes(repoPath: string) {
 		try {
 			const data = await git({ cwd: repoPath }, "remote", "-v");
-			return GitRemoteParser.parse(data, repoPath);
+			return await GitRemoteParser.parse(data, repoPath);
 		} catch {
 			return [];
 		}
@@ -658,69 +642,16 @@ export class GitService implements IGitService, Disposable {
 		return this._gitServiceLite.getRepoRoot(filePath);
 	}
 
-	private async _getRepoRoot(filePath: string): Promise<string | undefined> {
-		let cwd;
-		if (fs.existsSync(filePath) && fs.lstatSync(filePath).isDirectory()) {
-			cwd = filePath;
-		} else {
-			[cwd] = Strings.splitPath(filePath);
-
-			if (!fs.existsSync(cwd)) {
-				Logger.log(`getRepoRoot: ${cwd} doesn't exist. Returning undefined`);
-				return undefined;
-			}
-		}
-
-		try {
-			const data = (await git({ cwd: cwd }, "rev-parse", "--show-toplevel")).trim();
-			const repoRoot = data === "" ? undefined : this._normalizePath(data);
-
-			if (repoRoot === undefined) {
-				return undefined;
-			}
-
+	async fetchReference(repo: GitRepository, ref: string): Promise<void> {
+		const remotes = await repo.getWeightedRemotes();
+		for (const remote of remotes) {
 			try {
-				cwd = this._normalizePath(cwd);
-				let relative = path.relative(repoRoot, cwd);
-				let isParentOrSelf =
-					!relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
-				if (isParentOrSelf) {
-					Logger.log(`getRepoRoot: ${repoRoot} is parent of ${cwd} or itself - returning`);
-					return repoRoot;
-				}
-
-				Logger.log(
-					`getRepoRoot: ${repoRoot} is neither parent of ${cwd} nor itself - finding symlink`
-				);
-				const realCwd = this._normalizePath(fs.realpathSync(cwd));
-				Logger.log(`getRepoRoot: ${cwd} -> ${realCwd}`);
-				relative = path.relative(repoRoot, realCwd);
-				isParentOrSelf = !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
-				if (!isParentOrSelf) {
-					Logger.log(
-						`getRepoRoot: ${repoRoot} is neither parent of ${realCwd} nor itself - returning`
-					);
-					return repoRoot;
-				}
-
-				const symlinkRepoRoot = this._normalizePath(path.resolve(cwd, relative));
-				Logger.log(
-					`getRepoRoot: found symlink repo root ${symlinkRepoRoot} -> ${repoRoot} - returning`
-				);
-
-				return symlinkRepoRoot;
-			} catch (ex) {
-				Logger.warn(ex);
-				return repoRoot;
-			}
-		} catch (ex) {
-			// If we can't find the git executable, rethrow
-			if (/spawn (.*)? ENOENT/.test(ex.message)) {
-				throw ex;
-			}
-
-			return undefined;
+				await git({ cwd: repo.path }, "fetch", remote.name, ref);
+				Logger.log(`Fetched ref ${ref} from ${remote.name} in ${repo.path}`);
+				return;
+			} catch (ignore) {}
 		}
+		Logger.log(`Could not find ref ${ref} in any remote of ${repo.path}`);
 	}
 
 	async getCommit(repoUri: URI, ref: string): Promise<GitCommit | undefined>;
@@ -804,6 +735,9 @@ export class GitService implements IGitService, Disposable {
 		remote?: boolean
 	): Promise<{ current: string; branches: string[] } | undefined> {
 		try {
+			const remotesData = await git({ cwd: repoPath }, "remote", "show");
+			const remotes = remotesData.split("\n").filter(r => !!r);
+
 			const options = ["branch"];
 			if (remote) options.push("-r");
 			const data = await git({ cwd: repoPath }, ...options);
@@ -813,7 +747,7 @@ export class GitService implements IGitService, Disposable {
 				.map(b => b.substr(2).trim())
 				.filter(b => b.length > 0)
 				.filter(b => !b.startsWith("HEAD ->"))
-				.map(b => (remote ? b.replace(/^origin\//, "") : b));
+				.map(b => (remote && remotes.length === 1 ? b.replace(/^origin\//, "") : b));
 			const current = data.split("\n").find(b => b.startsWith("* "));
 			return { branches, current: current ? current.substr(2).trim() : "" };
 		} catch (ex) {
@@ -850,6 +784,25 @@ export class GitService implements IGitService, Disposable {
 		}
 	}
 
+	async getLog(
+		repo: GitRepository,
+		limit: number = 50
+	): Promise<Map<string, GitCommit> | undefined> {
+		try {
+			const commitsData = await git(
+				{ cwd: repo.path },
+				"log",
+				`-n${limit}`,
+				`--format='${GitLogParser.defaultFormat}`,
+				"--"
+			);
+			return GitLogParser.parse(commitsData.trim(), repo.path);
+		} catch (e) {
+			Logger.error(e);
+			return undefined;
+		}
+	}
+
 	async getCommitsOnBranch(
 		repoPath: string,
 		branch: string,
@@ -860,7 +813,6 @@ export class GitService implements IGitService, Disposable {
 				{ cwd: repoPath },
 				"log",
 				branch,
-				"--first-parent",
 				"-n100",
 				`--format='${GitLogParser.defaultFormat}`,
 				"--"
@@ -928,6 +880,25 @@ export class GitService implements IGitService, Disposable {
 		}
 	}
 
+	async fetchRemoteBranch(
+		repoPath: string,
+		remoteName: string,
+		sourceBranchName: string,
+		destBranchName: string
+	): Promise<{ success: boolean; error?: string }> {
+		try {
+			const data = await git({ cwd: repoPath }, "rev-parse", "--abbrev-ref", "HEAD");
+			if (data.trim() === destBranchName) {
+				await git({ cwd: repoPath }, "pull");
+			} else {
+				await git({ cwd: repoPath }, "fetch", remoteName, `${sourceBranchName}:${destBranchName}`);
+			}
+			return { success: true };
+		} catch (err) {
+			return { success: false, error: err.message };
+		}
+	}
+
 	async getLocalCommits(
 		repoPath: string
 	): Promise<{ sha: string; info: {}; localOnly: boolean }[] | undefined> {
@@ -981,6 +952,7 @@ export class GitService implements IGitService, Disposable {
 	async getNumStat(
 		repoPath: string,
 		startCommit: string = "HEAD",
+		endCommit: string | undefined,
 		includeSaved: boolean,
 		includeStaged: boolean
 	): Promise<GitNumStat[]> {
@@ -989,7 +961,7 @@ export class GitService implements IGitService, Disposable {
 		}
 		const options = [startCommit];
 		if (!includeSaved && !includeStaged) {
-			options.push("HEAD");
+			options.push(endCommit || "HEAD");
 		} else if (!includeSaved) {
 			options.push("--staged");
 		}
@@ -1204,6 +1176,8 @@ export class GitService implements IGitService, Disposable {
 		includeStaged: boolean,
 		ref: string = "HEAD"
 	): Promise<GitAuthor[]> {
+		if (ref === EMPTY_TREE_SHA) return [];
+
 		try {
 			let data: string | undefined;
 			try {
@@ -1331,21 +1305,6 @@ export class GitService implements IGitService, Disposable {
 		}
 	}
 
-	async resolveRef(uri: URI, ref: string): Promise<string | undefined>;
-	async resolveRef(path: string, ref: string): Promise<string | undefined>;
-	async resolveRef(uriOrPath: URI | string, ref: string): Promise<string | undefined> {
-		const [dir, filename] = Strings.splitPath(
-			typeof uriOrPath === "string" ? uriOrPath : uriOrPath.fsPath
-		);
-
-		try {
-			const data = await git({ cwd: dir }, "log", "-M", "-n1", "--format=%H", ref, "--", filename);
-			return data.trim();
-		} catch {
-			return undefined;
-		}
-	}
-
 	/**
 	 * Returns true if the sha exists on the specificed branch on the specified repo
 	 *
@@ -1397,6 +1356,31 @@ export class GitService implements IGitService, Disposable {
 		return result;
 	}
 
+	async getLastCommittersForRepo(
+		repoPath: string,
+		since: number
+	): Promise<{ email: string; name: string }[]> {
+		const result: { email: string; name: string }[] = [];
+		try {
+			// this should be populated by something like
+			// git log --pretty=format:"%an|%aE" | sort -u
+			// and then filter out noreply.github.com (what else?)
+			const timeAgo = new Date().getTime() / 1000 - since;
+			(await git({ cwd: repoPath }, "log", "--pretty=format:%an|%aE", `--since=${timeAgo}`))
+				.split("\n")
+				.map(line => line.trim())
+				.filter(line => !line.match(/noreply/))
+				.forEach(line => {
+					const [name, email] = line.split("|");
+					if (!result.find(author => author.email === email)) {
+						result.push({ name, email });
+					}
+				});
+		} catch {}
+
+		return result;
+	}
+
 	async setKnownRepository(repos: { repoId: string; path: string }[]) {
 		return this._repositories.setKnownRepository(repos);
 	}
@@ -1407,6 +1391,36 @@ export class GitService implements IGitService, Disposable {
 			return data ? data.trim() : undefined;
 		} catch {
 			return undefined;
+		}
+	}
+
+	async getBranchCommitsStatus(
+		repoPath: string,
+		remoteBranch: string,
+		branch: string
+	): Promise<string> {
+		try {
+			const data = +(await git(
+				{ cwd: repoPath },
+				"rev-list",
+				`${remoteBranch}..${branch}`,
+				"--count"
+			));
+
+			if (data > 0) {
+				return (0 - data).toString();
+			}
+
+			const reverseData = await git(
+				{ cwd: repoPath },
+				"rev-list",
+				`${branch}..${remoteBranch}`,
+				"--count"
+			);
+
+			return reverseData.trim();
+		} catch {
+			return "0";
 		}
 	}
 
@@ -1452,7 +1466,6 @@ export class GitService implements IGitService, Disposable {
 			{ cwd: repoPath },
 			"log",
 			sha,
-			"--first-parent",
 			`-n${limit}`,
 			"--skip=1",
 			`--format='${GitLogParser.defaultFormat}`,

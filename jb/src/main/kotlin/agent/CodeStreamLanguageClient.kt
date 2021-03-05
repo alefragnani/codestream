@@ -6,7 +6,9 @@ import com.codestream.codeStream
 import com.codestream.editorService
 import com.codestream.extensions.workspaceFolders
 import com.codestream.gson
+import com.codestream.notificationComponent
 import com.codestream.protocols.agent.LoginResult
+import com.codestream.reviewService
 import com.codestream.sessionService
 import com.codestream.webViewService
 import com.github.salomonbrys.kotson.fromJson
@@ -63,7 +65,10 @@ class CodeStreamLanguageClient(private val project: Project) : LanguageClient {
         when (notification.type) {
             "unreads" -> session.didChangeUnreads(gson.fromJson(notification.data))
             "posts" -> session.didChangePosts(gson.fromJson(notification.data))
-            "preferences" -> session.didChangePreferences(gson.fromJson(notification.data))
+            "preferences" -> {
+                session.didChangePreferences(gson.fromJson(notification.data))
+                project.editorService?.updateMarkers()
+            }
             "pullRequests" -> session.didChangePullRequests(gson.fromJson(notification.data))
         }
     }
@@ -128,6 +133,16 @@ class CodeStreamLanguageClient(private val project: Project) : LanguageClient {
                 project.webViewService?.load(true)
             }
         }
+    }
+
+    @JsonNotification("codestream/userDidCommit")
+    fun userDidCommit(notification: UserDidCommitNotification) {
+        project.reviewService?.createReviewFromExternalCommit()
+    }
+
+    @JsonNotification("codestream/didDetectUnreviewedCommits")
+    fun didDetectUnreviewedCommits(notification: DidDetectUnreviewedCommitsNotification) {
+        project.notificationComponent?.didDetectUnreviewedCommits(notification.message, notification.repoId)
     }
 
     @JsonNotification("codestream/restartRequired")
@@ -226,6 +241,10 @@ enum class LogoutReason {
     @SerializedName("unsupportedApiVersion")
     UNSUPPORTED_API_VERSION
 }
+
+class UserDidCommitNotification(val sha: String)
+
+class DidDetectUnreviewedCommitsNotification(val message: String, val repoId: String)
 
 class DidChangeApiVersionCompatibilityNotification(
     val compatibility: ApiVersionCompatibility,

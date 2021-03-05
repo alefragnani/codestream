@@ -4,6 +4,7 @@ import com.codestream.CODESTREAM_TOOL_WINDOW_ID
 import com.codestream.agentService
 import com.codestream.codeStream
 import com.codestream.protocols.agent.Codemark
+import com.codestream.protocols.agent.CreateReviewsForUnreviewedCommitsParams
 import com.codestream.protocols.agent.Post
 import com.codestream.protocols.agent.PullRequestNotification
 import com.codestream.protocols.agent.Review
@@ -140,6 +141,23 @@ class NotificationComponent(val project: Project) {
         notification.notify(project)
     }
 
+    fun didDetectUnreviewedCommits(message: String, repoId: String) {
+        val notification = notificationGroup.createNotification("Unreviewed code", null, message, NotificationType.INFORMATION)
+
+        notification.addAction(NotificationAction.createSimple("Review") {
+            GlobalScope.launch {
+                val result = project.agentService?.createReviewsForUnreviewedCommits(CreateReviewsForUnreviewedCommitsParams(repoId))
+                result?.reviewIds?.firstOrNull()?.let {
+                    project.webViewService?.postNotification(ReviewNotifications.Show(it, null, true))
+                }
+            }
+            notification.expire()
+            // telemetry(TelemetryEvent.TOAST_CLICKED, telemetryContent)
+        })
+
+        notification.notify(project)
+    }
+
     private suspend fun showNotification(post: Post, codemark: Codemark?, review: Review?) {
         val session = project.sessionService ?: return
         val sender =
@@ -147,10 +165,14 @@ class NotificationComponent(val project: Project) {
                 session.getUser(post.creatorId)?.username ?: "Someone"
             else "Someone"
 
-        val text = if (post.text.startsWith("/me ")) {
+        var text = if (post.text.startsWith("/me ")) {
             post.text.replaceFirst("/me", sender)
         } else {
             post.text
+        }
+
+        if (review != null) {
+            text = text.replaceFirst("this", review.title)
         }
 
         val telemetryContent = when {

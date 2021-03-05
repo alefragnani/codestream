@@ -46,6 +46,7 @@ export type DocumentMarker = CSEntity &
 		// property already, however there is additional data on the location
 		// object, called `meta` that we also want to expose
 		location: CSMarkerLocation;
+		title?: string;
 		summary: string;
 		summaryMarkdown: string;
 		type: CodemarkType;
@@ -98,10 +99,7 @@ export interface MarkerNotLocated extends CSMarker {
 
 export interface FetchDocumentMarkersRequest {
 	textDocument: TextDocumentIdentifier;
-	filters?: {
-		excludeArchived?: boolean;
-		excludePRs?: boolean;
-	};
+	applyFilters: boolean;
 }
 export interface FetchDocumentMarkersResponse {
 	markers: DocumentMarker[];
@@ -133,6 +131,8 @@ export interface GetDocumentFromMarkerRequest {
 	markerId: string;
 	file?: string;
 	repoId?: string;
+	/* for debugging purposes */
+	source?: string;
 }
 export interface GetDocumentFromMarkerResponse {
 	textDocument: VersionedTextDocumentIdentifier;

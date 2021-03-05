@@ -90,7 +90,8 @@ enum class NotificationDeliveryPreference(val value: String) {
 
 class CSPreferences(
     val mutedStreams: Map<String, Boolean>?,
-    val notificationDelivery: String?
+    val notificationDelivery: String?,
+    val reviewCreateOnCommit: Boolean?
 )
 
 class CSTeam(
@@ -127,7 +128,11 @@ enum class TraceLevel(val value: String) {
     DEBUG("debug")
 }
 
-class DocumentMarkersParams(val textDocument: TextDocument)
+class ReviewCoverageParams(val textDocument: TextDocument)
+
+class ReviewCoverageResult(val reviewIds: List<String?>)
+
+class DocumentMarkersParams(val textDocument: TextDocument, val applyFilters: Boolean)
 
 class DocumentMarkersResult(val markers: List<DocumentMarker>, val markersNotLocated: Any)
 
@@ -139,13 +144,20 @@ class DocumentMarker(
     val type: String?,
     val range: Range,
     val summary: String,
+    val title: String?,
     val externalContent: DocumentMarkerExternalContent?
 )
 
 class DocumentMarkerExternalContent(
     val provider: DocumentMarkerExternalContentProvider?,
     val externalId: String,
-    val externalChildId: String?
+    val externalChildId: String?,
+    val actions: List<DocumentMarkerExternalActions>?
+)
+
+class DocumentMarkerExternalActions(
+    val label: String,
+    val uri: String
 )
 
 class DocumentMarkerExternalContentProvider(
@@ -206,6 +218,7 @@ class GetLocalReviewContentsParams(
 )
 
 class GetReviewContentsResult(
+    val repoRoot: String?,
     val leftPath: String,
     val rightPath: String,
     val left: String,
@@ -367,6 +380,15 @@ class GetFileContentsAtRevisionParams(
 )
 
 class GetFileContentsAtRevisionResult(
+    val repoRoot: String,
     val content: String,
     val error: String?
+)
+
+class CreateReviewsForUnreviewedCommitsParams(
+    val repoId: String
+)
+
+class CreateReviewsForUnreviewedCommitsResult(
+    val reviewIds: List<String>
 )

@@ -3,6 +3,7 @@ package com.codestream.editor
 import com.codestream.agentService
 import com.codestream.codeStream
 import com.codestream.editorService
+import com.codestream.extensions.file
 import com.codestream.extensions.ifNullOrBlank
 import com.codestream.extensions.uri
 import com.codestream.protocols.CodemarkType
@@ -10,18 +11,24 @@ import com.codestream.protocols.agent.DocumentMarker
 import com.codestream.protocols.agent.TelemetryParams
 import com.codestream.protocols.webview.CodemarkNotifications
 import com.codestream.protocols.webview.PullRequestNotifications
+import com.codestream.review.ReviewDiffVirtualFile
+import com.codestream.system.SPACE_ENCODED
 import com.codestream.webViewService
 import com.intellij.codeInsight.highlighting.TooltipLinkHandler
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.markup.GutterIconRenderer
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.IconLoader
+import com.intellij.ui.ColorUtil
+import com.intellij.ui.JBColor
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.Range
-import java.text.SimpleDateFormat
+import java.util.Arrays
 import java.util.Date
+import java.util.concurrent.TimeUnit
 import javax.swing.Icon
 
 class GutterIconRendererImpl(val editor: Editor, val marker: DocumentMarker) : GutterIconRenderer() {
@@ -35,40 +42,62 @@ class GutterIconRendererImpl(val editor: Editor, val marker: DocumentMarker) : G
     override fun getClickAction(): AnAction = GutterIconAction(editor, marker)
 
     override fun getTooltipText(): String? {
-        val dateFormat = SimpleDateFormat("MMMM d, YYYY h:mma")
-        var tooltip = "<b>${marker.creatorName}</b> (${dateFormat.format(Date(marker.createdAt))})" +
+        var tooltip = "<b>${marker.creatorName}</b>, ${fromNow(Date(marker.createdAt))} " +
             "\n\n"
+        val rangeString = serializeRange(marker.range);
 
         if (marker.codemark !== null) {
             if (marker.type == "issue") {
-                tooltip += "<img src='${getIconLink("issue")}'>"
+                tooltip += "<img src='${getIconLink("issue")}'> &nbsp; "
+                tooltip += marker.summary
             } else if(marker.codemark.reviewId !== null) {
-                tooltip += "<img src='${getIconLink("fr")}'>"
+                tooltip += "${marker.summary} \n\n"
+                tooltip += "<b>FEEDBACK REQUEST</b> \n\n"
+                tooltip += "<img src='${getIconLink("fr")}'> &nbsp; "
+                if (marker.title !== null) {
+                    tooltip += "${marker.title} "
+                }
             } else {
-                tooltip += "<img src='${getIconLink("comment")}'>"
+                tooltip += "<img src='${getIconLink("comment")}'> &nbsp; "
+                tooltip += marker.summary
             }
-            tooltip += " &nbsp; ${marker.summary}"
             tooltip += "\n\n<a href='#codemark/show/${marker.codemark.id}'>View Comment</a>"
+            tooltip += "<hr style='margin-top: 3px; margin-bottom: 3px;'>"
+            tooltip += "<a href='#codemark/link/${CodemarkType.COMMENT},${rangeString}'>Add Comment</a> &#183; " +
+                "<a href='#codemark/link/${CodemarkType.ISSUE},${rangeString}'>Create Issue</a> &#183; " +
+                "<a href='#codemark/link/${CodemarkType.LINK},${rangeString}'>Get Permalink</a>"
         } else if (marker.externalContent != null) {
-            tooltip += "<img src='${getIconLink("pr")}'>"
-            tooltip += " &nbsp; ${marker.summary}"
-            tooltip += "\n\n<a href='#pr/show/${marker.externalContent.provider?.id}" +
-                "/${marker.externalContent.externalId}/${marker.externalContent.externalChildId}'>View Comment</a>"
+            tooltip += "${marker.summary} \n\n"
+            tooltip += "<b>PULL REQUEST</b> \n\n"
+            tooltip += "<img src='${getIconLink("pr")}'> &nbsp; "
+            if (marker.title !== null) {
+                tooltip += "${marker.title} "
+            }
+            if (marker.externalContent.actions !== null) {
+                marker.externalContent.actions.map{
+                    if (it.label == "Open Comment" || it.label == "Open Note") {
+                        tooltip += "\n\n<a href='#pr/showExternal/${marker.externalContent.provider?.id}" +
+                            "/${it.uri}'>View Comment</a>"
+                    }
+                }
+            }
+            if (marker.externalContent.provider?.id == "github*com" ||
+                marker.externalContent.provider?.id == "github/enterprise") {
+                tooltip += "\n\n<a href='#pr/show/${marker.externalContent.provider?.id}" +
+                    "/${marker.externalContent.externalId}/${marker.externalContent.externalChildId}'>View Comment</a>"
+            }
+            tooltip += "<hr style='margin-top: 3px; margin-bottom: 3px;'>"
+            tooltip += "<a href='#codemark/link/${CodemarkType.COMMENT},${rangeString}'>Add Comment</a>"
         }
-
-        val rangeString = serializeRange(marker.range);
-        tooltip += "<hr>"
-        tooltip += "<a href='#codemark/link/${CodemarkType.COMMENT},${rangeString}'>Add Comment</a> * " +
-            "<a href='#codemark/link/${CodemarkType.ISSUE},${rangeString}'>Create Issue</a> * " +
-            "<a href='#codemark/link/${CodemarkType.LINK},${rangeString}'>Get Permalink</a>"
 
         return tooltip
     }
 
     override fun getIcon(): Icon {
         val type = marker.type.ifNullOrBlank { "comment" }
-        val color = marker.codemark?.color.ifNullOrBlank { "blue" }
-        return IconLoader.getIcon("/images/marker-$type-$color.svg")
+
+        val color = if (type == "prcomment") gray else (marker.codemark?.color() ?: green)
+        return IconLoader.getIcon("/images/marker-$type-${color.name}.svg")
     }
 
     override fun getAlignment() = Alignment.LEFT
@@ -82,9 +111,39 @@ class GutterIconRendererImpl(val editor: Editor, val marker: DocumentMarker) : G
         return id.hashCode()
     }
 
+    fun fromNow(past: Date): String {
+        val now = Date()
+        val duration = now.getTime() - past.getTime();
+        val res = StringBuffer()
+        for (i in 0 until this.times.size) {
+            val current: Long = this.times.get(i)
+            val temp: Long = duration / current
+            if (temp > 0) {
+                res.append(temp).append(" ").append(this.timesString.get(i)).append(if (temp != 1L) "s" else "")
+                    .append(" ago")
+                break
+            }
+        }
+        return if ("" == res.toString()) "0 seconds ago" else res.toString()
+    }
+
+    val times: List<Long> = Arrays.asList(
+        TimeUnit.DAYS.toMillis(365),
+        TimeUnit.DAYS.toMillis(30),
+        TimeUnit.DAYS.toMillis(1),
+        TimeUnit.HOURS.toMillis(1),
+        TimeUnit.MINUTES.toMillis(1),
+        TimeUnit.SECONDS.toMillis(1)
+    )
+    val timesString: List<String> = Arrays.asList("year", "month", "day", "hour", "minute", "second")
+
     fun getIconLink(type: String): String {
-        val color = marker.codemark?.color.ifNullOrBlank { "blue" }
-        val icon = IconLoader.getIcon("/images/icon16/marker-$type-$color.png");
+        val bg = JBColor.background()
+        var color = "dark";
+        if (ColorUtil.isDark(bg)) {
+            color = "light"
+        }
+        val icon = IconLoader.getIcon("/images/icon14/marker-$type-$color.png");
 
         return (icon as IconLoader.CachedImageIcon).url.toString()
     }
@@ -122,8 +181,9 @@ class GutterIconAction(val editor: Editor, val marker: DocumentMarker) : AnActio
                         it.externalChildId
                     )
                 )
+
+                telemetryPr(project, editor.document.file is ReviewDiffVirtualFile, provider.id)
             }
-            telemetry(project, TelemetryEvent.PR_CLICKED)
         }
     }
 }
@@ -159,7 +219,22 @@ class GutterPullRequestTooltipLinkHandler : TooltipLinkHandler() {
                 prData[2]
             )
         )
-        telemetry(project, TelemetryEvent.CODEMARK_CLICKED)
+
+        telemetryPr(project, editor.document.file is ReviewDiffVirtualFile, prData[0])
+
+        return super.handleLink(prLink, editor)
+    }
+}
+
+class GutterPullRequestTooltipExternalLinkHandler : TooltipLinkHandler() {
+    override fun handleLink(prLink: String, editor: Editor): Boolean {
+        val project = editor.project ?: return false
+
+        val prData = prLink.split("/http")
+
+        BrowserUtil.browse(("http${prData[1]}").replace(" ", SPACE_ENCODED))
+
+        telemetryPr(project, editor.document.file is ReviewDiffVirtualFile, prData[0])
 
         return super.handleLink(prLink, editor)
     }
@@ -198,8 +273,20 @@ class GutterCodemarkLinkTooltipLinkHandler : TooltipLinkHandler() {
 }
 
 private enum class TelemetryEvent(val value: String, val properties: Map<String, String>) {
-    CODEMARK_CLICKED("Codemark Clicked", mapOf("Codemark Location" to "Source File")),
-    PR_CLICKED("PR Comment Clicked", mapOf("Codemark Location" to "Source File"))
+    CODEMARK_CLICKED("Codemark Clicked", mapOf("Codemark Location" to "Source File"))
+}
+
+private fun telemetryPr(project: Project, isDiff: Boolean, host: String) {
+    var codemarkLocation = "Source Gutter"
+    if (isDiff) {
+        codemarkLocation = "Diff Gutter"
+    }
+
+    val params = TelemetryParams(
+        "PR Comment Clicked",
+        mapOf("Host" to host, "Comment Location" to codemarkLocation)
+    )
+    project.agentService?.agent?.telemetry(params)
 }
 
 private fun telemetry(project: Project, event: TelemetryEvent) {

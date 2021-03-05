@@ -5,7 +5,7 @@ import { URI } from "vscode-uri";
 import { InternalError, ReportSuppressedMessages } from "../agentError";
 import { MessageType } from "../api/apiProvider";
 import { MarkerLocation, User } from "../api/extensions";
-import { SessionContainer } from "../container";
+import { Container, SessionContainer } from "../container";
 import { GitRemote, GitRemoteLike, GitRepository } from "../git/gitService";
 import { Logger } from "../logger";
 import { Markerish, MarkerLocationManager } from "../managers/markerLocationManager";
@@ -21,6 +21,7 @@ import {
 	DocumentMarkerExternalContent,
 	FetchAssignableUsersRequest,
 	FetchAssignableUsersResponse,
+	FetchDocumentMarkersResponse,
 	FetchThirdPartyBoardsRequest,
 	FetchThirdPartyBoardsResponse,
 	FetchThirdPartyCardsRequest,
@@ -46,6 +47,7 @@ import {
 import { CodemarkType, CSMe, CSProviderInfos, CSReferenceLocation } from "../protocol/api.protocol";
 import { CodeStreamSession } from "../session";
 import { Functions, Strings } from "../system";
+import * as url from "url";
 
 export const providerDisplayNamesByNameKey = new Map<string, string>([
 	["asana", "Asana"],
@@ -63,7 +65,8 @@ export const providerDisplayNamesByNameKey = new Map<string, string>([
 	["slack", "Slack"],
 	["msteams", "Microsoft Teams"],
 	["okta", "Okta"],
-	["clubhouse", "Clubhouse"]
+	["clubhouse", "Clubhouse"],
+	["linear", "Linear"]
 ]);
 
 export interface ThirdPartyProviderSupportsIssues {
@@ -150,6 +153,7 @@ export interface ThirdPartyProvider {
 	readonly name: string;
 	readonly displayName: string;
 	readonly icon: string;
+	hasTokenError?: boolean;
 	connect(): Promise<void>;
 	configure(data: { [key: string]: any }): Promise<void>;
 	disconnect(request: ThirdPartyDisconnect): Promise<void>;
@@ -208,20 +212,7 @@ export abstract class ThirdPartyProviderBase<
 	constructor(
 		public readonly session: CodeStreamSession,
 		protected readonly providerConfig: ThirdPartyProviderConfig
-	) {
-		// only for on-prem installations ... if strictSSL is disabled for CodeStream,
-		// assume OK to have it disabled for third-party on-prem providers as well ...
-		// kind of insecure, but easier than other options ... so in this case (and
-		// this case only), establish our own HTTPS agent
-		if ((providerConfig.forEnterprise || providerConfig.isEnterprise) && session.disableStrictSSL) {
-			Logger.log(
-				`${providerConfig.name} provider will use a custom HTTPS agent with strictSSL disabled`
-			);
-			this._httpsAgent = new HttpsAgent({
-				rejectUnauthorized: false
-			});
-		}
-	}
+	) {}
 
 	async ensureInitialized() {}
 
@@ -302,6 +293,10 @@ export abstract class ThirdPartyProviderBase<
 		return false;
 	}
 
+	get hasTokenError() {
+		return this._providerInfo?.tokenError != null;
+	}
+
 	getConnectionData() {
 		return {
 			providerId: this.providerConfig.id
@@ -334,7 +329,28 @@ export abstract class ThirdPartyProviderBase<
 		this.resetReady();
 	}
 
-	protected async onConnected(providerInfo?: TProviderInfo) {}
+	protected async onConnected(providerInfo?: TProviderInfo) {
+		// if we are connecting with https, and if strictSSL is disabled for CodeStream,
+		// assume OK to have it disabled for third-party providers as well,
+		// with the one exception of on-prem CodeStream, for whom it is only disabled
+		// for self-hosted providers ...
+		// ... so in this case, establish our own HTTPS agent
+		const info = url.parse(this.baseUrl);
+		if (
+			info.protocol === "https:" &&
+			this.session.disableStrictSSL &&
+			(this.session.runTimeEnvironment !== "onprem" ||
+				this.providerConfig.forEnterprise ||
+				this.providerConfig.isEnterprise)
+		) {
+			Logger.log(
+				`${this.providerConfig.name} provider (id:"${this.providerConfig.id}") will use a custom HTTPS agent with strictSSL disabled`
+			);
+			this._httpsAgent = new HttpsAgent({
+				rejectUnauthorized: false
+			});
+		}
+	}
 
 	async configure(data: { [key: string]: any }) {}
 
@@ -358,7 +374,6 @@ export abstract class ThirdPartyProviderBase<
 			await this.refreshToken(request);
 			return;
 		}
-
 		if (this._ensuringConnection === undefined) {
 			this._ensuringConnection = this.ensureConnectedCore(request);
 		}
@@ -567,13 +582,17 @@ export abstract class ThirdPartyProviderBase<
 		}
 	}
 
-	private async handleErrorResponse(response: Response): Promise<Error> {
+	protected async handleErrorResponse(response: Response): Promise<Error> {
 		let message = response.statusText;
 		let data;
-		Logger.debug("Error Response: ", JSON.stringify(response, null, 4));
+		Logger.debug("handleErrorResponse: ", JSON.stringify(response, null, 4));
 		if (response.status >= 400 && response.status < 500) {
 			try {
 				data = await response.json();
+				// warn as not to trigger a sentry but still have it be in the user's log
+				try {
+					Logger.warn(`handleErrorResponse:json: ${JSON.stringify(data, null, 4)}`);
+				} catch {}
 				if (data.code) {
 					message += `(${data.code})`;
 				}
@@ -588,6 +607,18 @@ export abstract class ThirdPartyProviderBase<
 						if (error.message) {
 							message += `\n${error.message}`;
 						}
+						// GitHub will return these properties
+						else if (error.resource && error.field && error.code) {
+							message += `\n${error.resource} field ${error.field} ${error.code}`;
+						} else {
+							// else give _something_ to the user
+							message += `\n${JSON.stringify(error)}`;
+						}
+					}
+				}
+				if (Array.isArray(data.errorMessages)) {
+					for (const errorMessage of data.errorMessages) {
+						message += `\n${errorMessage}`;
 					}
 				}
 				if (data.error) {
@@ -606,6 +637,15 @@ export abstract class ThirdPartyProviderBase<
 export abstract class ThirdPartyIssueProviderBase<
 	TProviderInfo extends CSProviderInfos = CSProviderInfos
 > extends ThirdPartyProviderBase<TProviderInfo> implements ThirdPartyIssueProvider {
+	private _pullRequestDocumentMarkersCache = new Map<
+		string,
+		{ documentVersion: number; promise: Promise<DocumentMarker[]> }
+	>();
+
+	protected invalidatePullRequestDocumentMarkersCache() {
+		this._pullRequestDocumentMarkersCache.clear();
+	}
+
 	supportsIssues(): this is ThirdPartyIssueProvider & ThirdPartyProviderSupportsIssues {
 		return ThirdPartyIssueProvider.supportsIssues(this);
 	}
@@ -644,6 +684,29 @@ export abstract class ThirdPartyIssueProviderBase<
 			});
 			if (foundOneWithUrl) request.description += addressesText;
 		}
+		const codeStreamLink = `https://codestream.com/?utm_source=cs&utm_medium=pr&utm_campaign=${encodeURI(
+			request.providerId
+		)}`;
+		let createdFrom = "";
+		switch (request.ideName) {
+			case "VSC":
+				createdFrom = "from VS Code";
+				break;
+			case "JETBRAINS":
+				createdFrom = "from JetBrains";
+				break;
+			case "VS":
+				createdFrom = "from Visual Studio";
+				break;
+			case "ATOM":
+				createdFrom = "from Atom";
+				break;
+		}
+		let codeStreamAttribution = `Created ${createdFrom} using [CodeStream](${codeStreamLink})`;
+		if (!["bitbucket*org", "bitbucket/server"].includes(request.providerId)) {
+			codeStreamAttribution = `<sup> ${codeStreamAttribution}</sup>`;
+		}
+		request.description += `\n\n${codeStreamAttribution}`;
 		return request.description;
 	}
 
@@ -664,7 +727,37 @@ export abstract class ThirdPartyIssueProviderBase<
 		return undefined;
 	}
 
-	protected async getPullRequestDocumentMarkersCore({
+	protected getPullRequestDocumentMarkersCore(params: {
+		uri: URI;
+		repoId: string | undefined;
+		streamId: string;
+	}): Promise<DocumentMarker[]> {
+		const { documents } = Container.instance();
+		const uriAsString = params.uri.toString(true);
+		const doc = documents.get(uriAsString);
+		const cached = this._pullRequestDocumentMarkersCache.get(uriAsString);
+
+		if (cached && doc && cached.documentVersion === doc.version) {
+			Logger.log(
+				`${this.displayName}.getPullRequestDocumentMarkers: returning cached document markers for ${uriAsString} v${doc.version}`
+			);
+			return cached.promise;
+		}
+
+		Logger.log(
+			`${this.displayName}.getPullRequestDocumentMarkers: calculating document markers for ${uriAsString} v${doc?.version}`
+		);
+		const promise = this._getPullRequestDocumentMarkersCore(params);
+		if (doc?.version !== undefined) {
+			this._pullRequestDocumentMarkersCache.set(uriAsString, {
+				documentVersion: doc.version,
+				promise
+			});
+		}
+		return promise;
+	}
+
+	protected async _getPullRequestDocumentMarkersCore({
 		uri,
 		repoId,
 		streamId
@@ -806,9 +899,10 @@ export abstract class ThirdPartyIssueProviderBase<
 				externalContent: this.getPRExternalContent(comment)!,
 				range: MarkerLocation.toRange(location),
 				location: location,
+				title: comment.pullRequest.title,
 				summary: comment.text,
 				summaryMarkdown: `\n\n${Strings.escapeMarkdown(comment.text)}`,
-				type: CodemarkType.Comment
+				type: CodemarkType.PRComment
 			});
 		}
 
@@ -964,6 +1058,7 @@ export interface ProviderCreatePullRequestRequest {
 		approvedAt?: number;
 		addresses?: { title: string; url: string }[];
 	};
+	ideName?: string;
 }
 
 export interface ProviderCreatePullRequestResponse {

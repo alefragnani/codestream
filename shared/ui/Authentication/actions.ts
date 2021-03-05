@@ -87,6 +87,9 @@ export const startSSOSignin = (
 	if (info && info.hostUrl) {
 		query.hostUrl = info.hostUrl;
 	}
+	if (session.machineId) {
+		query.machineId = session.machineId;
+	}
 	const queryString = Object.keys(query)
 		.map(key => `${key}=${query[key]}`)
 		.join("&");
@@ -184,7 +187,10 @@ export const authenticate = (params: PasswordLoginParams | TokenLoginRequest) =>
 	return dispatch(onLogin(response));
 };
 
-export const onLogin = (response: LoginSuccessResponse) => async dispatch => {
+export const onLogin = (
+	response: LoginSuccessResponse,
+	isFirstPageview?: boolean
+) => async dispatch => {
 	const api = HostApi.instance;
 
 	const [bootstrapData, { editorContext }, bootstrapCore] = await Promise.all([
@@ -200,7 +206,7 @@ export const onLogin = (response: LoginSuccessResponse) => async dispatch => {
 			editorContext,
 			session: { ...bootstrapCore.session, userId: response.state.userId },
 			capabilities: response.state.capabilities,
-			context: { currentTeamId: response.state.teamId }
+			context: { currentTeamId: response.state.teamId, isFirstPageview }
 		})
 	);
 };
@@ -232,7 +238,7 @@ export const completeSignup = (
 		"Signup Type": extra.createdTeam ? "Organic" : "Viral",
 		"Auth Provider": providerName
 	});
-	dispatch(onLogin(response));
+	dispatch(onLogin(response, true));
 };
 
 export const validateSignup = (provider: string, authInfo?: SSOAuthInfo) => async (
@@ -289,6 +295,8 @@ export const validateSignup = (provider: string, authInfo?: SSOAuthInfo) => asyn
 			"Signup Type": authInfo.type === SignupType.CreateTeam ? "Organic" : "Viral",
 			"Auth Provider": providerName
 		});
+
+		return await dispatch(onLogin(response, true));
 	} else {
 		HostApi.instance.track("Signed In", { "Auth Type": provider });
 		if (localStore.get("enablingRealTime") === true) {
@@ -299,6 +307,4 @@ export const validateSignup = (provider: string, authInfo?: SSOAuthInfo) => asyn
 			return result;
 		}
 	}
-
-	return await dispatch(onLogin(response));
 };
