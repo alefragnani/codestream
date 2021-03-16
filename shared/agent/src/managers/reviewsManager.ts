@@ -813,8 +813,11 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 
 			const pullRequestTemplate =
 				(await xfs.readText(path.join(repo.path, "pull_request_template.md"))) ||
+				(await xfs.readText(path.join(repo.path, "PULL_REQUEST_TEMPLATE.md"))) ||
 				(await xfs.readText(path.join(repo.path, "docs/pull_request_template.md"))) ||
-				(await xfs.readText(path.join(repo.path, ".github/pull_request_template.md")));
+				(await xfs.readText(path.join(repo.path, "docs/PULL_REQUEST_TEMPLATE.md"))) ||
+				(await xfs.readText(path.join(repo.path, ".github/pull_request_template.md"))) ||
+				(await xfs.readText(path.join(repo.path, ".github/PULL_REQUEST_TEMPLATE.md")));
 
 			const baseBranchRemote = await git.getBranchRemote(repo.path, baseRefName!);
 			const commitsBehindOrigin = await git.getBranchCommitsStatus(
@@ -1076,9 +1079,14 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 		}
 	}
 
-	private readonly lastUnreviewedCommitsByRepoId = new Map<string, GitCommit[]>();
+	private unreviewedCommitCheckSeq = 0;
+	private readonly unreviewedCommitsBySeq = new Map<
+		number,
+		{ repoId: string; branch?: string; commits: GitCommit[] }
+	>();
 
 	async checkUnreviewedCommits(repo: GitRepository): Promise<number> {
+		const sequence = this.unreviewedCommitCheckSeq++;
 		const repoId = repo.id;
 		if (repoId == undefined) {
 			return 0;
@@ -1117,17 +1125,25 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 			unreviewedCommits.push(commit);
 		}
 
-		this.lastUnreviewedCommitsByRepoId.set(repoId, unreviewedCommits);
+		const branch = await git.getCurrentBranch(repo.path);
+		this.unreviewedCommitsBySeq.set(sequence, { repoId, branch, commits: unreviewedCommits });
 
 		const authors = new Set(unreviewedCommits.map(c => c.author));
 
 		if (unreviewedCommits.length) {
 			session.agent.sendNotification(DidDetectUnreviewedCommitsNotificationType, {
-				repoId,
+				sequence,
 				message: `You have ${unreviewedCommits.length} unreviewed commit${
 					unreviewedCommits.length > 0 ? "s" : ""
 				} from ${Array.from(authors).join(", ")}`
 			});
+		}
+
+		// clean stored data older than 50 checks ago
+		for (const storedSequence of this.unreviewedCommitsBySeq.keys()) {
+			if (storedSequence <= sequence - 50) {
+				this.unreviewedCommitsBySeq.delete(storedSequence);
+			}
 		}
 
 		return unreviewedCommits.length;
@@ -1140,13 +1156,15 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 	): Promise<CreateReviewsForUnreviewedCommitsResponse> {
 		try {
 			const { git } = SessionContainer.instance();
-			const repo = await git.getRepositoryById(request.repoId);
-			if (!repo) {
+			const unreviewedCommits = this.unreviewedCommitsBySeq.get(request.sequence);
+			if (!unreviewedCommits) {
+				Logger.warn(`No unreviewed commits entry found for sequence ${request.sequence}`);
 				return { reviewIds: [] };
 			}
+			const { repoId, branch, commits } = unreviewedCommits;
 
-			const commits = this.lastUnreviewedCommitsByRepoId.get(request.repoId);
-			if (!commits) {
+			const repo = await git.getRepositoryById(repoId);
+			if (!repo) {
 				return { reviewIds: [] };
 			}
 
@@ -1157,7 +1175,12 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 
 			// All these commits are from the same author, and we want to pack them together in a single review
 			const reviewIds = [];
-			const review = await this.createReviewForUnreviewedCommit(commits, repo, currentUserEmail);
+			const review = await this.createReviewForUnreviewedCommit(
+				commits,
+				branch,
+				repo,
+				currentUserEmail
+			);
 			if (review) {
 				reviewIds.push(review.id);
 			}
@@ -1175,10 +1198,11 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 
 	private async createReviewForUnreviewedCommit(
 		commits: GitCommit[],
+		branch: string | undefined,
 		repo: GitRepository,
 		currentUserEmail: string
 	): Promise<CSReview | undefined> {
-		const { git, posts, session, scm, users } = SessionContainer.instance();
+		const { git, posts, session, scm, users, teams } = SessionContainer.instance();
 		const newestCommit = commits[0];
 		const oldestCommit = commits[commits.length - 1];
 		const repoStatus = await scm.getRepoStatus({
@@ -1194,8 +1218,8 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 			return;
 		}
 
+		const myTeam = await teams.getById(session.teamId);
 		const codeAuthorIds = [];
-		const followerIds = [];
 		const addedUsers = [];
 		if (newestCommit.email) {
 			let author = (await users.getByEmails([newestCommit.email], { ignoreCase: true }))[0];
@@ -1203,14 +1227,14 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				const inviteUserResponse = await users.inviteUser({
 					email: newestCommit.email,
 					fullName: newestCommit.author,
-					dontSendEmail: true
+					dontSendEmail: true,
+					inviteType: "reviewAuthorNotification"
 				});
 				author = inviteUserResponse.user;
 				addedUsers.push(newestCommit.email);
 			}
-			if (author) {
+			if (author && !myTeam.removedMemberIds?.some(rmId => rmId === author.id)) {
 				codeAuthorIds.push(author.id);
-				followerIds.push(author.id);
 			}
 		}
 
@@ -1218,28 +1242,28 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 		const authorsById: { [authorId: string]: { stomped: number; commits: number } } = {};
 		for (const impactedAuthor of repoStatus.scm.authors) {
 			const user = (await users.getByEmails([impactedAuthor.email], { ignoreCase: true }))[0];
-			if (user) {
+			if (user && !myTeam.removedMemberIds?.some(rmId => rmId === user.id)) {
 				authorsById[user.id] = impactedAuthor;
 			}
 		}
 
 		const firstAncestor = await git.findAncestor(repo.path, oldestCommit.ref, 1, () => true);
 
+		const entryPoint = "Commit Toast on Pull";
 		const reviewRequest: CreateReviewRequest = {
 			title: newestCommit.shortMessage,
-			text: commits.map(c => c.message).join("\n"),
 			reviewers: [session.userId],
 			codeAuthorIds,
-			followerIds,
 			authorsById,
 			tags: [],
 			status: "open",
 			markers: [],
+			entryPoint,
 			reviewChangesets: [
 				{
 					repoId: repo.id,
 					checkpoint: 0,
-					branch: "",
+					branch: branch || "(no branch)",
 					commits: commits
 						.map(commit => repoStatus?.scm?.commits?.find(c => c.sha === commit.ref))
 						.filter(Boolean) as any,
@@ -1275,7 +1299,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 		});
 		const review = response.review!;
 
-		trackReviewPostCreation(review, 0, 0, "Review on pull", addedUsers);
+		trackReviewPostCreation(review, 0, 0, entryPoint, addedUsers);
 		await resolveCreatePostResponse(response);
 
 		return review;

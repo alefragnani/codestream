@@ -101,13 +101,15 @@ export class NotificationsController implements Disposable {
 			{ title: "Ignore", isCloseAffordance: true }
 		];
 
+		Container.agent.telemetry.track("Toast Notification", { Content: "Unreviewed Commit" });
 		const result = await window.showInformationMessage(
 			`${notification.message}`,
 			...actions
 		);
 
 		if (result === actions[0]) {
-			const result = await Container.agent.sendRequest(CreateReviewsForUnreviewedCommitsRequestType, { repoId: notification.repoId });
+			Container.agent.telemetry.track("Toast Clicked", { Content: "Unreviewed Commit" });
+			const result = await Container.agent.sendRequest(CreateReviewsForUnreviewedCommitsRequestType, { sequence: notification.sequence });
 			const reviewId = result.reviewIds[0];
 			if (reviewId) {
 				Container.webview.openReview(reviewId, { openFirstDiff: true });

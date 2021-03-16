@@ -38,6 +38,7 @@ export interface CreateReviewChangesetsRequest
 export interface CreateReviewRequest extends Omit<CSCreateReviewRequest, "teamId"> {
 	markers?: CreateMarkerRequest[];
 	reviewChangesets?: CreateReviewChangesetsRequest[];
+	entryPoint?: string;
 }
 
 export interface CreateReviewResponse {
@@ -469,7 +470,7 @@ export const EndReviewRequestType = new RequestType<
 >("codestream/review/end");
 
 export interface CreateReviewsForUnreviewedCommitsRequest {
-	repoId: string;
+	sequence: number;
 }
 
 export interface CreateReviewsForUnreviewedCommitsResponse {

@@ -181,24 +181,16 @@ const ComposeWrapper = styled.div.attrs(() => ({
 	}
 `;
 
-const MetaRepoInfo = styled.div`
-	display: flex;
-	flex-direction: column;
-	&:not(:last) {
-		margin-bottom: 2px;
-	}
-`;
-
-const RepoInfo = styled.div`
-	display: flex;
-	.icon {
-		margin-right: 5px;
-	}
-	span:not(:first-child) {
-		padding-left: 20px;
-	}
+const RepoInfo = styled.span`
 	span {
+		color: var(--text-color-highlight);
 		display: inline-block;
+	}
+	.icon {
+		padding-right: 5px;
+	}
+	.monospace {
+		// padding: 0 5px;
 	}
 `;
 
@@ -571,10 +563,12 @@ const BaseReview = (props: BaseReviewProps) => {
 
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
+		const codeAuthorId = (props.review.codeAuthorIds || [])[0];
 		return {
 			providers: state.providers,
 			isInVscode: state.ide.name === "VSC",
-			author: state.users[props.review.creatorId]
+			author: state.users[props.review.creatorId],
+			codeAuthor: state.users[codeAuthorId || props.review.creatorId]
 		};
 	}, shallowEqual);
 	const [checkpoint, setCheckpoint] = React.useState<number | undefined>(undefined);
@@ -645,7 +639,11 @@ const BaseReview = (props: BaseReviewProps) => {
 		for (var i = 0; i < numCheckpoints; i++) {
 			groups.push(
 				<Meta id={"commits-update-" + i} key={"commits-update-" + i}>
-					<MetaLabel>Commits in {i === 0 ? "Initial Review" : `Update #${i}`}</MetaLabel>
+					{numCheckpoints > 1 ? (
+						<MetaLabel>Commits in {i === 0 ? "Initial Review" : `Update #${i}`}</MetaLabel>
+					) : (
+						<MetaLabel>Commits</MetaLabel>
+					)}
 					<MetaDescriptionForAssignees>
 						<CommitList review={review} checkpoint={i} />
 					</MetaDescriptionForAssignees>
@@ -740,9 +738,22 @@ const BaseReview = (props: BaseReviewProps) => {
 				)}
 				{!props.collapsed && (
 					<ExpandedAuthor>
-						Opened
-						<Timestamp relative time={props.review.createdAt} /> by{" "}
-						<HeadshotName person={derivedState.author} highlightMe />
+						<HeadshotName person={derivedState.codeAuthor} highlightMe />
+						made changes in{" "}
+						{props.repoInfo.map(r => (
+							<RepoInfo>
+								<span className="monospace">
+									<Icon name="repo" />
+									{r.repoName}
+								</span>
+								{" on "}
+								<span className="monospace">
+									<Icon name="git-branch" />
+									{r.branch}
+								</span>
+							</RepoInfo>
+						))}
+						<Timestamp relative time={props.review.createdAt} />
 					</ExpandedAuthor>
 				)}
 
@@ -859,29 +870,6 @@ const BaseReview = (props: BaseReviewProps) => {
 									);
 								})}
 							</MetaDescriptionForAssignees>
-						</Meta>
-					)}
-					{!props.collapsed && (
-						<Meta>
-							<MetaLabel>Repository</MetaLabel>
-							<MetaDescription>
-								<MetaDescriptionForAssignees>
-									{props.repoInfo.map(r => (
-										<MetaRepoInfo key={r.repoName}>
-											<RepoInfo>
-												<span>
-													<Icon name="repo" />
-													{r.repoName}
-												</span>
-												<span>
-													<Icon name="git-branch" />
-													{r.branch}
-												</span>
-											</RepoInfo>
-										</MetaRepoInfo>
-									))}
-								</MetaDescriptionForAssignees>
-							</MetaDescription>
 						</Meta>
 					)}
 					{!props.collapsed && (
