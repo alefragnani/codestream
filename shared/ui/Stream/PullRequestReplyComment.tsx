@@ -1,39 +1,36 @@
-import React, { useState } from "react";
-import { useDispatch, useSelector } from "react-redux";
-import { CodeStreamState } from "../store";
+import React, { useEffect, useState } from "react";
+import { useDispatch } from "react-redux";
 import styled from "styled-components";
 import { PRButtonRow, PRCodeCommentReply, PRCodeCommentReplyInput } from "./PullRequestComponents";
 import { HostApi } from "../webview-api";
-import {
-	ExecuteThirdPartyTypedType,
-	FetchThirdPartyPullRequestPullRequest
-} from "@codestream/protocols/agent";
+import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/agent";
 import MessageInput from "./MessageInput";
-import { CSMe } from "@codestream/protocols/api";
 import { Button } from "../src/components/Button";
 import { confirmPopup } from "./Confirm";
-import { Headshot, PRHeadshot } from "../src/components/Headshot";
+import { PRHeadshot } from "../src/components/Headshot";
 import { api } from "../store/providerPullRequests/actions";
 import { replaceHtml } from "../utils";
 
 interface Props {
 	pr: FetchThirdPartyPullRequestPullRequest;
 	mode?: string;
-	fetch: Function;
 	className?: string;
 	databaseId: string;
+	parentId?: string;
 	isOpen: boolean;
 	__onDidRender: Function;
 }
 
 export const PullRequestReplyComment = styled((props: Props) => {
-	const { pr, fetch, databaseId } = props;
+	const { pr, databaseId, parentId } = props;
 	const dispatch = useDispatch();
 
 	const [text, setText] = useState("");
 	const [open, setOpen] = useState(props.isOpen);
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const [isPreviewing, setIsPreviewing] = useState(false);
+
+	useEffect(() => setOpen(props.isOpen), [props.isOpen]);
 
 	const handleComment = async () => {
 		try {
@@ -47,15 +44,14 @@ export const PullRequestReplyComment = styled((props: Props) => {
 
 			await dispatch(
 				api("createCommentReply", {
+					parentId: parentId,
 					commentId: databaseId,
 					text: replaceHtml(text)
 				})
 			);
 
-			fetch().then(() => {
-				setText("");
-				setOpen(false);
-			});
+			setText("");
+			setOpen(false);
 		} catch (ex) {
 			console.warn(ex);
 		} finally {
@@ -90,7 +86,7 @@ export const PullRequestReplyComment = styled((props: Props) => {
 	};
 
 	return (
-		<PRCodeCommentReply>
+		<PRCodeCommentReply className={props.className}>
 			<PRHeadshot size={30} person={pr.viewer} />
 
 			<PRCodeCommentReplyInput className={open ? "open-comment" : ""} onClick={() => setOpen(true)}>

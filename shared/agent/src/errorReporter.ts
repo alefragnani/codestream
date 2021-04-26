@@ -5,19 +5,24 @@ import { ReportSuppressedMessages } from "./agentError";
 import { Team } from "./api/extensions";
 import { SessionContainer } from "./container";
 import {
-	CodeStreamEnvironment,
 	ReportBreadcrumbRequest,
 	ReportBreadcrumbRequestType,
 	ReportMessageRequest,
-	ReportMessageRequestType
+	ReportMessageRequestType,
+	WebviewErrorRequest,
+	WebviewErrorRequestType
 } from "./protocol/agent.protocol";
 import { CodeStreamSession, SessionStatus } from "./session";
 import { lsp, lspHandler } from "./system";
+import { Logger } from "./logger";
 
 @lsp
 export class ErrorReporter {
+	private _errorCache = new Set<string>();
+
 	constructor(session: CodeStreamSession) {
-		if (session.environment === CodeStreamEnvironment.Production) {
+		if (session.isProductionCloud) {
+			Logger.log("Initializing Sentry...");
 			Sentry.init({
 				dsn: "https://7c34949981cc45848fc4e3548363bb17@sentry.io/1314159",
 				release: session.versionInfo.extension.versionFormatted,
@@ -39,11 +44,27 @@ export class ErrorReporter {
 				// for rejects promises
 				const suppressMessages = Object.values(ReportSuppressedMessages).map(v => v as string);
 				scope.addEventProcessor(event => {
-					if (event.exception?.values?.find(value => {
-						return value.value && suppressMessages.indexOf(value.value) !== -1;
-					})) {
-						return null;
+					if (event.exception?.values) {
+						for (const value of event.exception.values) {
+							if (value.value) {
+								if (this._errorCache.has(value.value)) {
+									Logger.warn("Ignoring duplicate error", {
+										key: value.value
+									});
+									return null;
+								} else {
+									this._errorCache.add(value.value);
+								}
+								if (suppressMessages.indexOf(value.value) !== -1) {
+									return null;
+								}
+							}
+							if (value.type === "InternalError") {
+								return null;
+							}
+						}
 					}
+
 					return event;
 				});
 			});
@@ -69,11 +90,22 @@ export class ErrorReporter {
 					});
 				});
 			});
+		} else {
+			Logger.log("Not initializing Sentry, this is not production");
 		}
 	}
 
 	@lspHandler(ReportMessageRequestType)
 	reportMessage(request: ReportMessageRequest) {
+		const key = `${request.message}`;
+		if (this._errorCache.has(key)) {
+			Logger.warn("Ignoring duplicate error", {
+				key: key
+			});
+			return;
+		}
+
+		this._errorCache.add(key);
 		Sentry.captureEvent({
 			level: Severity.fromString(request.type),
 			timestamp: Date.now(),
@@ -95,4 +127,8 @@ export class ErrorReporter {
 		});
 	}
 
+	@lspHandler(WebviewErrorRequestType)
+	webviewError(request: WebviewErrorRequest) {
+		Logger.log(`Webview error: ${request.error.message}\n${request.error.stack}`);
+	}
 }

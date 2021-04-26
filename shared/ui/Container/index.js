@@ -18,7 +18,8 @@ import { ApiVersioningActionsType } from "../store/apiVersioning/types";
 import { errorDismissed } from "@codestream/webview/store/connectivity/actions";
 import { ThemeProvider } from "styled-components";
 import { darkTheme, createTheme } from "../src/themes";
-import { isOnPrem } from "../store/configs/reducer";
+import { closeAllPanels } from "../store/context/actions";
+import { WebviewErrorRequestType } from "@codestream/protocols/agent";
 
 const mapStateToProps = state => {
 	const team = state.teams[state.context.currentTeamId];
@@ -32,7 +33,7 @@ const mapStateToProps = state => {
 		apiVersioning: state.apiVersioning,
 		ide: state.ide && state.ide.name ? state.ide.name : undefined,
 		serverUrl: state.configs.serverUrl,
-		isOnPrem: isOnPrem(state.configs)
+		isOnPrem: state.configs.isOnPrem
 	};
 };
 
@@ -115,7 +116,8 @@ const Root = connect(mapStateToProps)(props => {
 			<RoadBlock title="Update Required">
 				<p>
 					We're all for vintage, but your version of CodeStream is simply too old! Please update to
-					the latest version to continue. You may need to update your IDE as well if it isn't recent.
+					the latest version to continue. You may need to update your IDE as well if it isn't
+					recent.
 				</p>
 				{getIdeInstallationInstructions(props)}
 			</RoadBlock>
@@ -236,6 +238,13 @@ export default class Container extends React.Component {
 	_mutationObserver;
 
 	static getDerivedStateFromError(error) {
+		// note, the Error object itself doesn't seem to survive lsp
+		HostApi.instance.send(WebviewErrorRequestType, {
+			error: {
+				message: error.message,
+				stack: error.stack
+			}
+		});
 		return { hasError: true };
 	}
 
@@ -268,6 +277,10 @@ export default class Container extends React.Component {
 
 	handleClickReload = event => {
 		event.preventDefault();
+
+		// reset view state in case the error was tied to a piece of bad data
+		this.props.store.dispatch(closeAllPanels());
+
 		HostApi.instance.send(ReloadWebviewRequestType);
 	};
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import {
 	FetchThirdPartyPullRequestPullRequest,
 	GetReposScmRequestType,
@@ -14,7 +14,6 @@ import {
 	ShowPreviousChangedFileNotificationType,
 	EditorRevealRangeRequestType
 } from "@codestream/protocols/webview";
-import { WriteTextFileRequestType, ReadTextFileRequestType } from "@codestream/protocols/agent";
 import { useDidMount } from "../utilities/hooks";
 import { CompareLocalFilesRequestType } from "../ipc/host.protocol";
 import * as path from "path-browserify";
@@ -24,7 +23,10 @@ import { parseCodeStreamDiffUri } from "../store/codemarks/actions";
 import { Link } from "./Link";
 import { Meta, MetaLabel } from "./Codemark/BaseCodemark";
 import { MetaIcons } from "./Review";
-import { getProviderPullRequestRepo } from "../store/providerPullRequests/reducer";
+import {
+	getProviderPullRequestRepo,
+	getPullRequestId
+} from "../store/providerPullRequests/reducer";
 import { CompareFilesProps } from "./PullRequestFilesChangedList";
 import { TernarySearchTree } from "../utilities/searchTree";
 import { PRErrorBox } from "./PullRequestComponents";
@@ -58,10 +60,12 @@ interface Props extends CompareFilesProps {
 		[path: string]: any;
 	};
 	commitBased?: boolean;
+	accessRawDiffs?: boolean;
+	setAccessRawDiffs?: Function;
 }
 
 export const PullRequestFilesChanged = (props: Props) => {
-	const { pr, filesChanged } = props;
+	const { pr, filesChanged, accessRawDiffs, setAccessRawDiffs } = props;
 	// const dispatch = useDispatch<Dispatch>();
 	const [repoId, setRepoId] = useState("");
 	const derivedState = useSelector((state: CodeStreamState) => {
@@ -79,13 +83,17 @@ export const PullRequestFilesChanged = (props: Props) => {
 		const parsedDiffUri = parseCodeStreamDiffUri(matchFile || "");
 
 		return {
+			currentPullRequestProviderId: state.context.currentPullRequest
+				? state.context.currentPullRequest.providerId
+				: undefined,
 			matchFile,
 			parsedDiffUri,
 			userId,
 			repos: state.repos,
 			currentRepo: getProviderPullRequestRepo(state),
 			numFiles: props.filesChanged.length,
-			isInVscode: state.ide.name === "VSC"
+			isInVscode: state.ide.name === "VSC",
+			pullRequestId: getPullRequestId(state)
 		};
 	});
 
@@ -107,8 +115,8 @@ export const PullRequestFilesChanged = (props: Props) => {
 					"A commit required to perform this review was not found in the local git repository. Fetch all remotes and try again."
 				) : pr && forkPointResponse.error.type === "REPO_NOT_FOUND" ? (
 					<>
-						Repo <span className="monospace highlight">{pr.repository.name}</span> not found in your
-						editor. Open it, or <Link href={pr.repository.url}>clone the repo</Link>.
+						Repo <span className="monospace highlight">{pr.repository?.name}</span> not found in
+						your editor. Open it, or <Link href={pr.repository?.url}>clone the repo</Link>.
 					</>
 				) : (
 					<span>Could not get fork point.</span>
@@ -121,6 +129,19 @@ export const PullRequestFilesChanged = (props: Props) => {
 		}
 	};
 
+	const getRef = useMemo(() => {
+		if (props.pr && derivedState.currentPullRequestProviderId) {
+			if (derivedState.currentPullRequestProviderId.indexOf("github") > -1) {
+				return `refs/pull/${props.pr.number}/head`;
+			} else if (derivedState.currentPullRequestProviderId.indexOf("gitlab") > -1) {
+				return `merge-requests/${props.pr.iid}/head`;
+			} else if (derivedState.currentPullRequestProviderId.indexOf("bitbucket") > -1) {
+				return "";
+			}
+		}
+		return "";
+	}, [derivedState.currentPullRequestProviderId, props.pr]);
+
 	useDidMount(() => {
 		if (derivedState.currentRepo) {
 			(async () => {
@@ -131,13 +152,12 @@ export const PullRequestFilesChanged = (props: Props) => {
 						repoId: derivedState.currentRepo!.id!,
 						baseSha: props.baseRef,
 						headSha: props.headRef,
-						// TODO check ref format for GitLab and Bitbucket
-						ref: props.pr && `refs/pull/${props.pr.number}/head`
+						ref: getRef
 					});
+					handleForkPointResponse(forkPointResponse);
 				} catch (ex) {
 					console.error(ex);
 				} finally {
-					handleForkPointResponse(forkPointResponse);
 					setLoading(false);
 					setIsMounted(true);
 				}
@@ -188,7 +208,7 @@ export const PullRequestFilesChanged = (props: Props) => {
 						? {
 								pullRequest: {
 									providerId: pr.providerId,
-									id: pr.id
+									id: derivedState.pullRequestId
 								}
 						  }
 						: undefined
@@ -196,6 +216,7 @@ export const PullRequestFilesChanged = (props: Props) => {
 				try {
 					await HostApi.instance.send(CompareLocalFilesRequestType, request);
 				} catch (err) {
+					console.warn(err);
 					setErrorMessage(err || "Could not open file diff");
 				}
 
@@ -206,7 +227,7 @@ export const PullRequestFilesChanged = (props: Props) => {
 				});
 			})(i);
 		},
-		[derivedState.currentRepo, repoId, visitedFiles, forkPointSha, pr]
+		[derivedState.currentRepo, repoId, visitedFiles, forkPointSha, pr, derivedState.pullRequestId]
 	);
 
 	const nextFile = useCallback(() => {
@@ -449,13 +470,31 @@ export const PullRequestFilesChanged = (props: Props) => {
 				<span>
 					Repo <span className="monospace highlight">{pr.repository.name}</span> not found in your
 					editor. Open it, or <Link href={pr.repository.url}>clone the repo</Link>.
+					<p style={{ margin: "5px 0 0 0" }}>
+						Changes can be viewed under <Icon name="diff" /> Diff Hunks view.
+					</p>
 				</span>
 			);
 			setIsDisabled(true);
+		} else if (pr && (pr as any).overflow && !accessRawDiffs && setAccessRawDiffs) {
+			setRepoErrorMessage(
+				<span>
+					GitLab only permits the first {(pr as any).changesCount} files of this merge request to be
+					displayed.&nbsp;
+					<Link
+						onClick={() => {
+							setAccessRawDiffs(true);
+						}}
+					>
+						Load more from Gitaly
+					</Link>
+					.
+				</span>
+			);
 		} else {
 			setRepoErrorMessage("");
 		}
-	}, [pr, derivedState.currentRepo]);
+	}, [pr, derivedState.currentRepo, accessRawDiffs]);
 
 	const isMacintosh = navigator.appVersion.includes("Macintosh");
 	const nextFileKeyboardShortcut = () => (isMacintosh ? `⌥ F6` : "Alt-F6");
@@ -466,12 +505,7 @@ export const PullRequestFilesChanged = (props: Props) => {
 			{(errorMessage || repoErrorMessage) && (
 				<PRErrorBox>
 					<Icon name="alert" className="alert" />
-					<div className="message">
-						{errorMessage || repoErrorMessage}
-						<p style={{ margin: "5px 0 0 0" }}>
-							Changes can be viewed under <Icon name="diff" /> Diff Hunks view.
-						</p>
-					</div>
+					<div className="message">{errorMessage || repoErrorMessage}</div>
 				</PRErrorBox>
 			)}
 			{changedFiles.length > 0 && (

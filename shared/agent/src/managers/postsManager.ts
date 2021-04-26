@@ -5,6 +5,7 @@ import * as fs from "fs";
 import { groupBy, last, orderBy } from "lodash-es";
 import sizeof from "object-sizeof";
 import * as path from "path";
+import { Directives } from "../providers/directives";
 import { TextDocumentIdentifier } from "vscode-languageserver";
 import { URI } from "vscode-uri";
 import { MessageType } from "../api/apiProvider";
@@ -53,6 +54,9 @@ import {
 	GetPostResponse,
 	GetPostsRequest,
 	GetPostsRequestType,
+	MarkItemReadRequest,
+	MarkItemReadRequestType,
+	MarkItemReadResponse,
 	MarkPostUnreadRequest,
 	MarkPostUnreadRequestType,
 	MarkPostUnreadResponse,
@@ -952,6 +956,38 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 				_ => endLine >= _.newStart && endLine <= _.newStart + _.newLines
 			);
 
+			let fileWithUrl;
+			const codeBlock = request.attributes.codeBlocks[0];
+			const repo = await repos.getById(parsedUri.repoId);
+			let remoteList: string[] | undefined;
+			if (repo && repo.remotes && repo.remotes.length) {
+				// if we have a list of remotes from the marker / repo (a.k.a. server)... use that
+				remoteList = repo.remotes.map(_ => _.normalizedUrl);
+			}
+			let remoteUrl;
+			if (remoteList) {
+				for (const remote of remoteList) {
+					remoteUrl = Marker.getRemoteCodeUrl(
+						remote,
+						parsedUri.rightSha,
+						codeBlock.scm?.file!,
+						startLine,
+						endLine
+					);
+
+					if (remoteUrl !== undefined) {
+						break;
+					}
+				}
+			}
+
+			if (remoteUrl) {
+				fileWithUrl = `[${codeBlock.scm?.file}](${remoteUrl.url})`;
+			} else {
+				fileWithUrl = codeBlock.scm?.file;
+			}
+
+			let result: Promise<Directives>;
 			// only fall in here if we don't have a start OR we dont have both
 			if (!startHunk || (!startHunk && !endHunk)) {
 				// if we couldn't find a hunk, we're going to go down the path of using
@@ -961,37 +997,8 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 						parsedUri.context
 					)}`
 				);
-				const codeBlock = request.attributes.codeBlocks[0];
-				const repo = await repos.getById(parsedUri.repoId);
-				let remoteList: string[] | undefined;
-				if (repo && repo.remotes && repo.remotes.length) {
-					// if we have a list of remotes from the marker / repo (a.k.a. server)... use that
-					remoteList = repo.remotes.map(_ => _.normalizedUrl);
-				}
-				let remoteUrl;
-				if (remoteList) {
-					for (const remote of remoteList) {
-						remoteUrl = Marker.getRemoteCodeUrl(
-							remote,
-							parsedUri.rightSha,
-							codeBlock.scm?.file!,
-							startLine,
-							endLine
-						);
 
-						if (remoteUrl !== undefined) {
-							break;
-						}
-					}
-				}
-				let fileWithUrl;
-				if (remoteUrl) {
-					fileWithUrl = `[${codeBlock.scm?.file}](${remoteUrl.url})`;
-				} else {
-					fileWithUrl = codeBlock.scm?.file;
-				}
-
-				const result = await providerRegistry.executeMethod({
+				result = await providerRegistry.executeMethod({
 					method: "addComment",
 					providerId: parsedUri.context.pullRequest.providerId,
 					params: {
@@ -1003,7 +1010,8 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 				return {
 					isPassThrough: true,
 					pullRequest: parsedUri.context.pullRequest,
-					success: result != null
+					success: result != null,
+					directives: result
 				};
 			}
 
@@ -1018,7 +1026,7 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 				},
 				diff
 			);
-			let result;
+
 			if (request.isProviderReview) {
 				if (lineWithMetadata) {
 					result = await providerRegistry.executeMethod({
@@ -1028,7 +1036,10 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 							pullRequestId: parsedUri.context.pullRequest.id,
 							// pullRequestReviewId will be looked up
 							text: request.attributes.text || "",
+							leftSha: parsedUri.leftSha,
+							sha: parsedUri.rightSha,
 							filePath: parsedUri.path,
+							startLine: startLine,
 							position: lineWithMetadata.position
 						}
 					});
@@ -1044,26 +1055,34 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 					calculatedEndLine = endHunk ? endLine : undefined;
 				}
 				// is a single comment against a commit
-				result = await providerRegistry.executeMethod({
+				result = (await providerRegistry.executeMethod({
 					method: "createCommitComment",
 					providerId: parsedUri.context.pullRequest.providerId,
 					params: {
 						pullRequestId: parsedUri.context.pullRequest.id,
+						leftSha: parsedUri.leftSha,
 						sha: parsedUri.rightSha,
 						text: request.attributes.text || "",
 						path: parsedUri.path,
 						startLine: startLine,
 						endLine: calculatedEndLine,
 						// legacy servers will need this
-						position: lineWithMetadata?.position
+						position: lineWithMetadata?.position,
+						metadata: {
+							contents: codeBlock.contents,
+							fileWithUrl: fileWithUrl,
+							startLine: startLine,
+							endLine: endLine
+						}
 					}
-				});
+				})) as Promise<Directives>;
 			}
 
 			return {
 				isPassThrough: true,
 				pullRequest: parsedUri.context.pullRequest,
-				success: result != null
+				success: result != null,
+				directives: result
 			};
 		}
 
@@ -1237,8 +1256,8 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 		}
 
 		const reviewChangesetsSizeInBytes = sizeof(reviewRequest.reviewChangesets);
-		if (reviewChangesetsSizeInBytes > 19 * 1024 * 1024) {
-			throw new Error("Cannot create review. Payload exceeds 19MB");
+		if (reviewChangesetsSizeInBytes > 10 * 1024 * 1024) {
+			throw new Error("Cannot create review. Payload exceeds 10MB");
 		}
 
 		// FIXME -- not sure if this is the right way to do this
@@ -1801,6 +1820,11 @@ export class PostsManager extends EntityManagerBase<CSPost> {
 	@lspHandler(MarkPostUnreadRequestType)
 	markPostUnread(request: MarkPostUnreadRequest): Promise<MarkPostUnreadResponse> {
 		return this.session.api.markPostUnread(request);
+	}
+
+	@lspHandler(MarkItemReadRequestType)
+	markItemRead(request: MarkItemReadRequest): Promise<MarkItemReadResponse> {
+		return this.session.api.markItemRead(request);
 	}
 
 	@lspHandler(ReactToPostRequestType)

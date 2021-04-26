@@ -249,7 +249,15 @@ export class BitbucketServerProvider extends ThirdPartyIssueProviderBase<CSBitbu
 				owner,
 				name
 			};
+		} else if (split.length > 4 && split[1] === "bitbucket" && split[2] === "scm") {
+			// https://trello.com/c/qmGVBexf - has a case where path seems to be like:
+			// bitbucket/scm/owner/repo.git ... speculation is that where multiple atlassian
+			// services are present, this part of the path distinguishes them
+			const owner = split[3];
+			const name = toRepoName(split[4]);
+			return { owner, name };
 		}
+
 		const owner = split[1];
 		const name = toRepoName(split[2]);
 		return {
@@ -377,7 +385,7 @@ export class BitbucketServerProvider extends ThirdPartyIssueProviderBase<CSBitbu
 	getIsMatchingRemotePredicate() {
 		const baseUrl = this._providerInfo?.data?.baseUrl || this.getConfig().host;
 		const configDomain = baseUrl ? URI.parse(baseUrl).authority : "";
-		return (r: GitRemoteLike) => configDomain !== "" && r.uri.authority === configDomain;
+		return (r: GitRemoteLike) => configDomain !== "" && r.domain === configDomain;
 	}
 
 	@log()

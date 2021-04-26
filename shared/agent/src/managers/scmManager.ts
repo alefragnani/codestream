@@ -9,13 +9,21 @@ import { EMPTY_TREE_SHA, GitRemote, GitRepository } from "../git/gitService";
 import { GitNumStat } from "../git/models/numstat";
 import { Logger } from "../logger";
 import {
+	BlameAuthor,
+	CoAuthors,
 	CodeStreamDiffUriData,
 	CommitAndPushRequest,
 	CommitAndPushRequestType,
 	CommitAndPushResponse,
+	CreateBranchRequest,
+	CreateBranchRequestType,
+	CreateBranchResponse,
 	DiffBranchesRequest,
 	DiffBranchesRequestType,
 	DiffBranchesResponse,
+	FetchAllRemotesRequest,
+	FetchAllRemotesRequestType,
+	FetchAllRemotesResponse,
 	FetchBranchCommitsStatusRequest,
 	FetchBranchCommitsStatusRequestType,
 	FetchBranchCommitsStatusResponse,
@@ -25,43 +33,28 @@ import {
 	FetchRemoteBranchRequest,
 	FetchRemoteBranchRequestType,
 	FetchRemoteBranchResponse,
-	FetchThirdPartyPullRequestFilesResponse,
-	GetCommitsFilesRequest,
-	GetCommitsFilesRequestType,
-	GetCommitsFilesResponse,
-	GetLatestCommitScmRequest,
-	GetLatestCommitScmRequestType,
-	GetLatestCommitScmResponse,
-	GetRangeRequest,
-	GetRangeRequestType,
-	GetRangeResponse,
-	GetShaDiffsRangesRequest,
-	GetShaDiffsRangesRequestType,
-	GetShaDiffsRangesResponse
-} from "../protocol/agent.protocol";
-import {
-	BlameAuthor,
-	CoAuthors,
-	CreateBranchRequest,
-	CreateBranchRequestType,
-	CreateBranchResponse,
-	FetchAllRemotesRequest,
-	FetchAllRemotesRequestType,
-	FetchAllRemotesResponse,
 	GetBranchesRequest,
 	GetBranchesRequestType,
 	GetBranchesResponse,
 	GetCommitScmInfoRequest,
 	GetCommitScmInfoRequestType,
 	GetCommitScmInfoResponse,
+	GetCommitsFilesRequest,
+	GetCommitsFilesRequestType,
+	GetCommitsFilesResponse,
 	GetFileContentsAtRevisionRequest,
 	GetFileContentsAtRevisionRequestType,
 	GetFileContentsAtRevisionResponse,
 	GetFileScmInfoRequest,
 	GetFileScmInfoRequestType,
 	GetFileScmInfoResponse,
+	GetLatestCommitScmRequest,
+	GetLatestCommitScmRequestType,
+	GetLatestCommitScmResponse,
 	GetLatestCommittersRequestType,
 	GetLatestCommittersResponse,
+	GetRangeRequest,
+	GetRangeResponse,
 	GetRangeScmInfoRequest,
 	GetRangeScmInfoRequestType,
 	GetRangeScmInfoResponse,
@@ -77,6 +70,9 @@ import {
 	GetReposScmRequest,
 	GetReposScmRequestType,
 	GetReposScmResponse,
+	GetShaDiffsRangesRequest,
+	GetShaDiffsRangesRequestType,
+	GetShaDiffsRangesResponse,
 	RepoScmStatus,
 	SwitchBranchRequest,
 	SwitchBranchRequestType,
@@ -704,10 +700,14 @@ export class ScmManager {
 				);
 				if (latestCommitToRightDiff) {
 					// in the last checkpoint where it was included, file had uncommitted changes
-					const previousCheckpointLatestCommitContents = await git.getFileContentForRevision(
-						paths.join(repoPath, latestCommitToRightDiff.oldFileName!),
-						diff.latestCommitSha
-					);
+					const fileName =
+						latestCommitToRightDiff.oldFileName || latestCommitToRightDiff.newFileName;
+					const previousCheckpointLatestCommitContents =
+						fileName &&
+						(await git.getFileContentForRevision(
+							paths.join(repoPath, fileName),
+							diff.latestCommitSha
+						));
 					const previousCheckpointRightContents = applyPatch(
 						Strings.normalizeFileContents(previousCheckpointLatestCommitContents || ""),
 						latestCommitToRightDiff
@@ -1279,7 +1279,6 @@ export class ScmManager {
 		);
 	}
 
-	@lspHandler(GetRangeRequestType)
 	async getRange({ uri, range }: GetRangeRequest): Promise<GetRangeResponse> {
 		// Ensure range end is >= start
 		range = Ranges.ensureStartBeforeEnd(range);
@@ -1512,6 +1511,22 @@ export class ScmManager {
 				}
 			};
 		}
+		if (!request.baseSha)
+			return {
+				sha: "",
+				error: {
+					message: "baseSha is required",
+					type: "REPO_NOT_FOUND"
+				}
+			};
+		if (!request.headSha)
+			return {
+				sha: "",
+				error: {
+					message: "headSha is required",
+					type: "REPO_NOT_FOUND"
+				}
+			};
 		try {
 			if (repo && request.ref) {
 				await git.fetchReference(repo, request.ref);
@@ -1577,7 +1592,12 @@ export class ScmManager {
 			throw new Error(`Could not load repo with ID ${request.repoId}`);
 		}
 		if (request.commits.length > 1) {
-			const firstCommitAncestor = await git.findAncestor(repoPath, request.commits[0], 1, () => true);
+			const firstCommitAncestor = await git.findAncestor(
+				repoPath,
+				request.commits[0],
+				1,
+				() => true
+			);
 			request.commits[0] = firstCommitAncestor ? firstCommitAncestor.ref : EMPTY_TREE_SHA;
 		}
 

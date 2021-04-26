@@ -8,6 +8,8 @@ import { PullRequestInlineComment } from "./PullRequestInlineComment";
 import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/agent";
 import { PullRequestCodeComment } from "./PullRequestCodeComment";
 import { PRComment, PRCommentsInPatch, PRCard } from "./PullRequestComponents";
+import { CodeStreamState } from "../store";
+import { useSelector } from "react-redux";
 
 export const PRPatchRoot = styled.div`
 	font-size: 12px;
@@ -100,6 +102,8 @@ export const PRInlineComment = styled.div`
 	border-bottom: 1px solid var(--base-border-color);
 `;
 
+const Ellipsis = styled.span``;
+
 export interface Hunk {
 	oldStart: number;
 	oldLines: number;
@@ -113,7 +117,6 @@ export const PullRequestPatch = (props: {
 	patch?: string;
 	mode?: string;
 	hunks?: Hunk[];
-	fetch?: Function;
 	filename: string;
 	className?: string;
 	noHeader?: boolean;
@@ -125,7 +128,16 @@ export const PullRequestPatch = (props: {
 	truncateLargePatches?: boolean;
 	quote?: Function;
 }) => {
-	const { fetch, patch, filename, hunks } = props;
+	const { patch, filename, hunks } = props;
+
+	const derivedState = useSelector((state: CodeStreamState) => {
+		return {
+			isGitLab:
+				state && state.context && state.context.currentPullRequest
+					? state.context.currentPullRequest.providerId.indexOf("gitlab") > -1
+					: false
+		};
+	});
 
 	const [commentOpen, setCommentOpen] = React.useState<boolean[]>([]);
 
@@ -185,16 +197,32 @@ export const PullRequestPatch = (props: {
 
 						if (_ === "\\ No newline at end of file") return null;
 
-						const commentForm =
-							props.pr && props.fetch && commentOpen[index] ? (
-								<PRInlineComment>
+						const renderCommentForm = (
+							oldLineNumber: number | undefined = undefined,
+							type: "-" | "+" | undefined = undefined
+						) =>
+							props.pr && commentOpen[index] ? (
+								<PRInlineComment key={"ic-" + index}>
 									<PullRequestInlineComment
 										pr={props.pr}
 										mode={props.mode}
 										filename={filename}
-										lineNumber={rightLine + 1}
+										contents={_}
+										// gitlab needs an old line number
+										// if commenting on non-new code
+										oldLineNumber={
+											derivedState.isGitLab
+												? oldLineNumber != null
+													? oldLineNumber
+													: undefined
+												: undefined
+										}
+										// gitlab doesn't need a lineNumber (right side or + side)
+										// if you're commenting on code that was removed
+										lineNumber={
+											derivedState.isGitLab ? (type !== "-" ? rightLine : undefined) : rightLine + 1
+										}
 										lineOffsetInHunk={index}
-										fetch={props.fetch}
 										setIsLoadingMessage={() => {}}
 										__onDidRender={() => {}}
 										onClose={() => closeComment(index)}
@@ -202,17 +230,30 @@ export const PullRequestPatch = (props: {
 								</PRInlineComment>
 							) : null;
 
-						const commentsOnLine = (props.comments || []).filter(_ => _.comment.position == index);
-						const comments =
-							commentsOnLine.length === 0 ? null : (
-								<PRCommentsInPatch>
+						const renderComments = (type?: "-" | "+" | undefined) => {
+							let commentsOnLine;
+							if (derivedState.isGitLab && type === "-") {
+								// ensure we are rendering comments in the correct
+								// spot for comments that are tied to lines of code
+								// that have been removed.
+								commentsOnLine = (props.comments || []).filter(
+									_ => _.comment.position.oldLine == leftLine
+								);
+							} else {
+								commentsOnLine = (props.comments || []).filter(_ =>
+									typeof _.comment.position === "number"
+										? _.comment.position == index
+										: _.comment.position.newLine == rightLine
+								);
+							}
+							return commentsOnLine.length === 0 ? null : (
+								<PRCommentsInPatch key={"cip-" + index}>
 									{commentsOnLine.map(({ comment, review }, index) => (
 										<PRComment key={index} style={{ margin: 0 }} data-comment-id={comment.id}>
 											<PRCard>
 												<PullRequestCodeComment
 													pr={props.pr!}
 													mode={props.mode}
-													fetch={props.fetch!}
 													setIsLoadingMessage={props.setIsLoadingMessage!}
 													item={review}
 													comment={comment}
@@ -223,6 +264,7 @@ export const PullRequestPatch = (props: {
 									))}
 								</PRCommentsInPatch>
 							);
+						};
 
 						if (_.indexOf("@@ ") === 0) {
 							const matches = _.match(/@@ \-(\d+).*? \+(\d+)/);
@@ -239,15 +281,15 @@ export const PullRequestPatch = (props: {
 										{renderLineNum("")}
 										<pre className="prettyprint">{_}</pre>
 									</div>
-									{comments}
-									{commentForm}
+									{renderComments()}
+									{renderCommentForm()}
 								</React.Fragment>
 							);
 						} else if (_.indexOf("+") === 0) {
 							rightLine++;
 							switch (true) {
 								case shouldSkipLine && index === patchLength - patchShowContextLines - 1:
-									return <>...</>;
+									return <Ellipsis key={index}>...</Ellipsis>;
 								case shouldSkipLine:
 									return undefined;
 								default:
@@ -258,8 +300,8 @@ export const PullRequestPatch = (props: {
 												{renderLineNum(rightLine)}
 												{syntaxHighlight(_, index)}
 											</div>
-											{comments}
-											{commentForm}
+											{renderComments()}
+											{renderCommentForm()}
 										</React.Fragment>
 									);
 							}
@@ -267,7 +309,7 @@ export const PullRequestPatch = (props: {
 							leftLine++;
 							switch (true) {
 								case shouldSkipLine && index === patchLength - patchShowContextLines - 1:
-									return <>...</>;
+									return <Ellipsis key={index}>...</Ellipsis>;
 								case shouldSkipLine:
 									return undefined;
 								default:
@@ -278,8 +320,8 @@ export const PullRequestPatch = (props: {
 												{renderLineNum("")}
 												{syntaxHighlight(_, index)}
 											</div>
-											{comments}
-											{commentForm}
+											{renderComments("-")}
+											{renderCommentForm(leftLine, "-")}
 										</React.Fragment>
 									);
 							}
@@ -288,7 +330,7 @@ export const PullRequestPatch = (props: {
 							rightLine++;
 							switch (true) {
 								case shouldSkipLine && index === patchLength - patchShowContextLines - 1:
-									return <>...</>;
+									return <Ellipsis key={index}>...</Ellipsis>;
 								case shouldSkipLine:
 									return undefined;
 								default:
@@ -299,8 +341,8 @@ export const PullRequestPatch = (props: {
 												{renderLineNum(rightLine)}
 												{syntaxHighlight(_, index)}
 											</div>
-											{comments}
-											{commentForm}
+											{renderComments()}
+											{renderCommentForm(leftLine)}
 										</React.Fragment>
 									);
 							}
@@ -318,20 +360,20 @@ export const PullRequestPatch = (props: {
 						rightLine = hunk.newStart - 1;
 						width = Math.max(4, rightLine.toString().length + 1);
 						return (
-							<>
-								<div className="line header">
+							<React.Fragment key={index}>
+								<div className="line header" key="line-header">
 									{renderLineNum("")}
 									{renderLineNum("")}
 									<pre className="prettyprint">
 										@@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
 									</pre>
 								</div>
-								{hunk.lines.map(_ => {
+								{hunk.lines.map((_, i) => {
 									if (_ === "\\ No newline at end of file") return null;
 									if (_.indexOf("+") === 0) {
 										rightLine++;
 										return (
-											<div className="line added">
+											<div className="line added" key={`line-added-${i}`}>
 												{renderLineNum("")}
 												{renderLineNum(rightLine)}
 												{syntaxHighlight(_, index)}
@@ -340,7 +382,7 @@ export const PullRequestPatch = (props: {
 									} else if (_.indexOf("-") === 0) {
 										leftLine++;
 										return (
-											<div className="line deleted">
+											<div className="line deleted" key={`line-deleted-${i}`}>
 												{renderLineNum(leftLine)}
 												{renderLineNum("")}
 												{syntaxHighlight(_, index)}
@@ -350,7 +392,7 @@ export const PullRequestPatch = (props: {
 										leftLine++;
 										rightLine++;
 										return (
-											<div className="line same">
+											<div className="line same" key={`line-same-${i}`}>
 												{renderLineNum(leftLine)}
 												{renderLineNum(rightLine)}
 												{syntaxHighlight(_, index)}
@@ -358,7 +400,7 @@ export const PullRequestPatch = (props: {
 										);
 									}
 								})}
-							</>
+							</React.Fragment>
 						);
 					})}
 				</div>

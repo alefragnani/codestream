@@ -11,6 +11,7 @@ import { FileStatus } from "@codestream/protocols/api";
 import { CodeStreamState } from "../store";
 import styled from "styled-components";
 import { Modal } from "./Modal";
+import { useDidMount } from "../utilities/hooks";
 
 const Root = styled.div`
 	background: var(--app-background-color);
@@ -26,7 +27,7 @@ const STATUS_MAP = {
 
 interface Props {
 	pr: FetchThirdPartyPullRequestPullRequest;
-	fetch: Function;
+
 	setIsLoadingMessage: Function;
 	commentId: string;
 	quote: Function;
@@ -34,13 +35,16 @@ interface Props {
 }
 
 export const PullRequestFileComments = (props: PropsWithChildren<Props>) => {
-	const { quote, fetch, setIsLoadingMessage, pr } = props;
+	const { quote, pr } = props;
 	const dispatch = useDispatch();
 
 	const derivedState = useSelector((state: CodeStreamState) => {
 		return {
 			providerPullRequests: state.providerPullRequests.pullRequests,
 			pullRequestFilesChangedMode: state.preferences.pullRequestFilesChangedMode || "files",
+			currentPullRequestProviderId: state.context.currentPullRequest
+				? state.context.currentPullRequest.providerId
+				: undefined,
 			currentPullRequestId: state.context.currentPullRequest
 				? state.context.currentPullRequest.id
 				: undefined
@@ -68,34 +72,59 @@ export const PullRequestFileComments = (props: PropsWithChildren<Props>) => {
 		setIsLoading(false);
 	};
 
-	useEffect(() => {
-		// re-render if providerPullRequests changes
+	useDidMount(() => {
 		(async () => {
 			const data = await dispatch(
 				getPullRequestFiles(pr.providerId, derivedState.currentPullRequestId!)
 			);
 			_mapData(data);
 		})();
-	}, [derivedState.providerPullRequests]);
-
-	const openFile = file => {};
+	});
 
 	const commentMap = React.useMemo(() => {
 		const map = {} as any;
-		const reviews = pr
-			? pr.timelineItems.nodes.filter(node => node.__typename === "PullRequestReview")
-			: [];
-		reviews.forEach(review => {
-			if (!review.comments) return;
-			review.comments.nodes.forEach(comment => {
-				if (!map[comment.path]) map[comment.path] = [];
-				map[comment.path].push({ review, comment });
-				if (comment.id === props.commentId || comment.threadId === props.commentId)
-					setFilename(comment.path);
+		if (
+			derivedState.currentPullRequestProviderId === "gitlab*com" ||
+			derivedState.currentPullRequestProviderId === "gitlab/enterprise"
+		) {
+			(pr as any).discussions.nodes.forEach((review: any) => {
+				if (review.notes && review.notes.nodes) {
+					review.notes.nodes.forEach((comment: any) => {
+						const position = comment.position;
+						if (position) {
+							if (!map[position.newPath]) map[position.newPath] = [];
+							map[position.newPath].push({
+								review: {
+									state: comment.state
+								},
+								comment: comment
+							});
+							if (
+								comment.id === props.commentId ||
+								comment.id.toString().replace("gid://gitlab/DiffNote/", "") === props.commentId
+							) {
+								setFilename(comment.position.newPath);
+							}
+						}
+					});
+				}
 			});
-		});
+		} else {
+			const reviews = pr
+				? pr.timelineItems.nodes.filter(node => node.__typename === "PullRequestReview")
+				: [];
+			reviews.forEach(review => {
+				if (!review.comments) return;
+				review.comments.nodes.forEach(comment => {
+					if (!map[comment.path]) map[comment.path] = [];
+					map[comment.path].push({ review, comment });
+					if (comment.id === props.commentId || comment.threadId === props.commentId)
+						setFilename(comment.path);
+				});
+			});
+		}
 		return map;
-	}, [pr]);
+	}, [pr, pr?.updatedAt]);
 
 	if (!filename) return null;
 
@@ -113,7 +142,7 @@ export const PullRequestFileComments = (props: PropsWithChildren<Props>) => {
 								className="clickable"
 								onClick={e => copy(filename)}
 							/>{" "}
-							{pr && (
+							{pr && pr.url && (
 								<Link href={pr.url.replace(/\/pull\/\d+$/, `/blob/${pr.headRefOid}/${filename}`)}>
 									<Icon
 										title="Open File on Remote"
@@ -136,7 +165,6 @@ export const PullRequestFileComments = (props: PropsWithChildren<Props>) => {
 							commentId={props.commentId}
 							setIsLoadingMessage={props.setIsLoadingMessage}
 							quote={quote}
-							fetch={props.fetch!}
 						/>
 					)}
 				</PRDiffHunk>

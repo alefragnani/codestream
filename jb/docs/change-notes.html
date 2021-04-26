@@ -1,3 +1,106 @@
+<h4 id="11_0_3">11.0.3</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds the ability to edit a pending review comment in a GitLab merge request</li>
+    <li>Adds a roadblock to indicate that merge request support for GitLab Self Managed requires version 12.10.X or later</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>Ask user if they want to switch teams when clicking on a permalink for an item owned by a team other than the one you currently have selected</li>
+    <li>More efficient use of GitHub api points to prevent users from getting hit with rate-limit errors</li>
+    <li>Decrease the number of git operations being performed at extension startup</li>
+    <li>When going a quote reply in a pull/merge request, a blank line is automatically inserted before the cursor to prevent entered text from being included in the quote</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/514">#514</a> - Merge request not listed when using proxy
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/477">#477</a> - Add messaging when not all files in a large MR will be listed
+    <li>Fixes an issue where the issue you select via Start Work in one team, also appears in the Work In Progress section for all of your teams</li>
+    <li>Fixes an error when creating a pull request</li>
+    <li>Fixes an issue with the Open File buttons in the Changed Files section of a feedback request not working</li>
+    <li>Fixes an issue with creating a pull request on Bitbucket</li>
+    <li>Fixes an issue where collapsing/expanding sections in the Pull Requests section would cause all queries to refresh</li>
+    <li>Fixes an issue where clicking on a mention in a merge request opens a blank page</li>
+    <li>Fixes an issue where a local-changes warning would be shown when creating a pull request when there's weren't any local changes in the selected repository</li>
+    <li>Fixes an issue where clicking "Add Comment" from hover for icon in editor gutter results in the wrong code block being selected</li>
+</ul>
+<h4 id="11_0_2">11.0.2</h4>
+<h5>Fixed</h5>
+<ul>    
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/486">#486</a> - Unexpected error clicking on a merge request after update to 11.0
+</ul>
+<h4 id="11_0_1">11.0.1</h4>
+<h5>Changed</h5>
+<ul>
+    <li>List of PRs in the Pull Requests section automatically refreshes after reconnecting to a previously disconnected service</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/488">#488</a> - Can't save custom MR query
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/486">#486</a> - Unexpected error clicking on a merge request after update to 11.0
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/483">#483</a> - Error loading git info when trying to ammend a feedback request
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/482">#482</a> - Gitlab open merge request error field 'approvalsRequired'
+    <li>Fixes field 'stages' doesn't exist on type 'Pipeline' on GitLab Self-Managed 13.2.3</li>
+    <li>Fixes field 'currentUser' doesn't exist on type 'Query' on GitLab Self-Managed 12.X and below</li>
+    <li>Fixes field 'approvalsLeft' doesn't exist on type 'MergeRequest'</li>
+    <li>Fixes field 'id' doesn't exist on type 'User' on GitLab Self-Managed 12.X and below</li>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/470">#470</a> - Shouldn't be able to submit review with zero pending comments
+    <li>Fixes an issue with the Template dropdown incorrectly being displayed when creating a PR on GitHub</li>
+    <li>Fixes an issue with the display of the "source branch is X commit behind the target branch" copy in a merge request</li>
+    <li>Fixes an issue with line breaks getting lost in the description of a feedback request</li>
+    <li>Fixes an issue where you can't dismiss a feedback request when opening it via a toast notification on top of an open pull request
+    <li>Fixes an error clicking on the Files Changed tab of a pull request</li>
+</ul>
+<h4 id="11_0_0">11.0.0</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds support for <a href="http://www.codestream.com/blog/codestream-11-0-manage-gitlab-merge-requests-code-reviews-and-issues-in-vscode-jetbrains">managing and reviewing GitLab merge requests</a></li>
+    <li>Adds blue unread-message badges in the Feedback Requests and Codemarks sections when there are new replies</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>Replaced the "Reject" button in feedback requests with "Request Changes"</li>
+    <li>Renamed the "Needs Works" section in Feedback Requests to "Changes Requested"</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Fixes an issue that would cause blue badges to appear for codemarks/feedback requests even if they didn't have unread replies</li>
+    <li>Fixes an issue where Cmd + Enter submits a feedback request with no changes selected</li>
+    <li>Fixes an issue where you'd get prompted to review changes after changing branches</li>
+    <li>Fixes an issue where the Linear integration wasn't recognizing multiple teams</li>
+    <li>Fixes an issue where the assignees list wasn't complete when creating an issue on GitLab</li>
+    <li>Fixes an issue with an extraneous entry appearing in the branch dropdowns when creating a pull request</li>
+    <li>Fixes an issue with Shift+Click not working on Windows when trying to select a range of commits to review in a pull request</li>
+    <li>Fixes an issue with the Feedback menu item under the headshot menu not working</li>
+</ul>
+<h4 id="10_7_3">10.7.3</h4>
+<h5>Changed</h5>
+<ul>
+    <li>Toast notifications for commits are shown even if a feedback request already exists for the given commmit, as long as the feedback request is still open</li>
+    <li>The heading of the Codemarks section now shows the number of open codemarks when the section is collapsed</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Fixes an unexpected error when clicking on the Files Changed tab in a pull request</li>
+</ul>
+<h4 id="10_7_2">10.7.2</h4>
+<h5>Added</h5>
+<ul>
+    <li>Adds the ability to set up the Jira Server (v8.14.0 or later) integration using an API token</li>
+    <li>Ability to create a pull request against a fork on GitHub Enterprise</li>
+</ul>
+<h5>Changed</h5>
+<ul>
+    <li>Local changes now only block creation of a pull request when done in the context of a feedback request, otherwise it's just a warning</li>
+    <li>When creating a pull request, if the diff is huge it is now not displayed by default</li>
+    <li>Minor change to the navigation in the sign up/in flow when authenticating via a 3rd party</li>
+    <li>UX improvement to the Notification Settings page</li>
+    <li>When a teammate proactively creates a feedback request to review a commit of yours, you are now shown as the code author for that feedback request and it will appear in the "Open" section of the Feedback Requests section</li>
+</ul>
+<h5>Fixed</h5>
+<ul>
+    <li>Addresses <a href="https://github.com/TeamCodeStream/CodeStream/issues/348">#348</a> - Fixes an issue with checking out to a pull request's branch when the repo name included upper case letters</li>
+</ul>
 <h4 id="10_7_0">10.7.0</h4>
 <h5>Added</h5>
 <ul>

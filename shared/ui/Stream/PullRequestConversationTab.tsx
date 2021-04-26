@@ -1,5 +1,5 @@
 import React, { useState, useReducer, useCallback, useMemo, FunctionComponent } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 import { OpenUrlRequestType } from "@codestream/protocols/webview";
 import { CodeStreamState } from "../store";
 import { Button } from "../src/components/Button";
@@ -19,8 +19,7 @@ import {
 	DidChangeDataNotificationType,
 	ChangeDataType,
 	CheckRun,
-	StatusContext,
-	CheckConclusionState
+	StatusContext
 } from "@codestream/protocols/agent";
 import {
 	PRContent,
@@ -63,8 +62,9 @@ import { api } from "../store/providerPullRequests/actions";
 import { ColorDonut, PullRequestReviewStatus } from "./PullRequestReviewStatus";
 import { autoCheckedMergeabilityStatus } from "./PullRequest";
 import cx from "classnames";
+import { getPRLabel } from "../store/providers/reducer";
 
-const Circle = styled.div`
+export const Circle = styled.div`
 	width: 12px;
 	height: 12px;
 	border-radius: 6px;
@@ -146,6 +146,10 @@ export const PRAuthorBadges = (props: {
 	node: any;
 	isPending?: boolean;
 }) => {
+	const derivedState = useSelector((state: CodeStreamState) => {
+		return { prLabel: getPRLabel(state) };
+	}, shallowEqual);
+
 	const { pr, node, isPending } = props;
 
 	const badges: any[] = [];
@@ -157,11 +161,13 @@ export const PRAuthorBadges = (props: {
 	const nodeAuthor = node.author || GHOST;
 	const prAuthor = pr.author || GHOST;
 	if (prAuthor.login === nodeAuthor.login) {
-		const isMe = nodeAuthor.login === pr.viewer.login;
+		const isMe = pr.viewer && nodeAuthor.login === pr.viewer.login;
 		badges.push(
 			<Tooltip
 				key="author"
-				title={`${isMe ? "You are" : "This user is"} the author of this pull request`}
+				title={`${isMe ? "You are" : "This user is"} the author of this ${
+					derivedState.prLabel.pullrequest
+				}`}
 				placement="bottom"
 			>
 				<div className="author">Author</div>
@@ -180,7 +186,7 @@ export const PRAuthorBadges = (props: {
 			</Tooltip>
 		);
 	} else {
-		console.warn("NO MEMBER ASSOCIATION FOR: ", node.authorAssociation);
+		// console.warn("NO MEMBER ASSOCIATION FOR: ", node.authorAssociation);
 	}
 	return <>{badges}</>;
 };
@@ -193,12 +199,11 @@ let focusOnMessageInput;
 
 export const PullRequestConversationTab = (props: {
 	setIsLoadingMessage: Function;
-	fetch: Function;
 	ghRepo: any;
 	checkMergeabilityStatus: Function;
 	autoCheckedMergeability: autoCheckedMergeabilityStatus;
 }) => {
-	const { ghRepo, fetch, setIsLoadingMessage } = props;
+	const { ghRepo, setIsLoadingMessage } = props;
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
 		const currentUser = state.users[state.session.userId!] as CSMe;
@@ -254,7 +259,7 @@ export const PullRequestConversationTab = (props: {
 		if (!insertText) return;
 		focusOnMessageInput &&
 			focusOnMessageInput(() => {
-				insertText && insertText(text.replace(/^/gm, "> "));
+				insertText && insertText(text.replace(/^/gm, "> ") + "\n");
 				insertNewline && insertNewline();
 			});
 	};
@@ -711,7 +716,6 @@ export const PullRequestConversationTab = (props: {
 	// 			onOff
 	// 		})
 	// 	);
-	// 	fetch();
 	// };
 
 	const toggleSubscription = async () => {
@@ -836,7 +840,6 @@ export const PullRequestConversationTab = (props: {
 					<PullRequestTimelineItems
 						pr={pr}
 						setIsLoadingMessage={setIsLoadingMessage}
-						fetch={fetch}
 						quote={quote}
 					/>
 					<PRFoot />
@@ -845,10 +848,12 @@ export const PullRequestConversationTab = (props: {
 				{!pr.merged && pr.mergeable === "MERGEABLE" && pr.state !== "CLOSED" && (
 					<PRTimelineItem>
 						<PRAction>
-							Add more commits by pushing to the <PRBranch>{pr.headRefName}</PRBranch> branch on{" "}
-							<PRBranch>
-								{ghRepo.repoOwner}/{ghRepo.repoName}
-							</PRBranch>
+							Add more commits by pushing to the <PRBranch>{pr.headRefName}</PRBranch> branch{" "}
+								{pr.headRepositoryOwner?.login && pr.headRepository?.name && (
+									<>
+									 on <PRBranch>{pr.headRepositoryOwner.login}/{pr.headRepository.name}</PRBranch>
+									</>
+								)}
 							.
 						</PRAction>
 					</PRTimelineItem>

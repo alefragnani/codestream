@@ -62,7 +62,8 @@ export const getByStatusAndUser = createSelector(
 				review.reviewChangesets &&
 				(review.creatorId === userId ||
 					(review.reviewers || []).includes(userId) ||
-					(review.codeAuthorIds || []).includes(userId))
+					(review.codeAuthorIds || []).includes(userId) ||
+					(review.followerIds || []).includes(userId))
 		);
 	}
 );
@@ -71,12 +72,27 @@ export const getAllReviews = createSelector(getReviews, (reviews: Index<CSReview
 	Object.values(reviews).filter(review => !review.deactivated)
 );
 
+export const getAllReviewLinks = createSelector(getReviews, (reviews: Index<CSReview>) =>
+	Object.values(reviews)
+		.filter(review => !review.deactivated && review.permalink)
+		.map(_ => {
+			return {
+				id: _.id,
+				permalink: _.permalink
+			};
+		})
+);
+
 export const teamHasReviews = createSelector(getReviews, (reviews: Index<CSReview>) => {
 	return Object.keys(reviews).length > 0;
 });
 
 export const teamReviewCount = createSelector(getReviews, (reviews: Index<CSReview>) => {
 	return Object.keys(reviews).length;
+});
+
+export const getReviewsUnread = createSelector(getReviews, (reviews: Index<CSReview>) => {
+	let ret = {};
 });
 
 // a mapping from commit IDs to the reviews that contain that commit ID

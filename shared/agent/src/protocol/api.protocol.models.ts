@@ -577,7 +577,7 @@ export interface CSUser extends CSEntity {
 	modifiedRepos?: { [teamId: string]: RepoScmStatus[] };
 	modifiedReposModifiedAt?: number;
 	compactModifiedRepos?: { [teamId: string]: CompactModifiedRepo[] };
-	status?: CSMeStatus;
+	status?: { [teamId: string]: CSMeStatus };
 
 	avatar?: {
 		image?: string;
@@ -592,6 +592,10 @@ export interface CSUser extends CSEntity {
 
 export interface CSLastReads {
 	[streamId: string]: number | string;
+}
+
+export interface CSLastReadItems {
+	[id: string]: number;
 }
 
 export enum CSNotificationPreference {
@@ -667,6 +671,13 @@ export interface CSMePreferences {
 	codemarksShowArchived?: boolean;
 
 	defaultResolveAction?: "resolve" | "archive";
+
+	// currently only supported by GitLab
+	pullRequestTimelineOrder?: "oldest" | "newest";
+	pullRequestTimelineFilter?: "all" | "history" | "comments";
+	pullRequestSquashCommits?: boolean;
+	pullRequestDeleteSourceBranch?: boolean;
+
 	[key: string]: any;
 }
 
@@ -696,6 +707,7 @@ type CSMeProviderInfo = { slack?: CSSlackProviderInfo } & {
 
 export interface CSMe extends CSUser {
 	lastReads: CSLastReads;
+	lastReadItems: CSLastReadItems;
 	joinMethod: string;
 	lastInviteType?: string;
 	preferences?: CSMePreferences;

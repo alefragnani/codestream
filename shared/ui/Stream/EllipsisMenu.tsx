@@ -16,7 +16,6 @@ import { setProfileUser, openModal } from "../store/context/actions";
 import { confirmPopup } from "./Confirm";
 import { DeleteUserRequestType, UpdateTeamSettingsRequestType } from "@codestream/protocols/agent";
 import { isFeatureEnabled } from "../store/apiVersioning/reducer";
-import { isOnPrem } from "../store/configs/reducer";
 import { setUserPreference } from "./actions";
 import { AVAILABLE_PANES } from "./Sidebar";
 import { Link } from "../Stream/Link";
@@ -31,23 +30,21 @@ const EMPTY_HASH = {};
 export function EllipsisMenu(props: EllipsisMenuProps) {
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
-		const team = state.teams[state.context.currentTeamId];
+		const teamId = state.context.currentTeamId;
+		const team = state.teams[teamId];
 		const user = state.users[state.session.userId!];
-		const onPrem = isOnPrem(state.configs);
+		const onPrem = state.configs.isOnPrem;
 
 		return {
 			sidebarPanePreferences: state.preferences.sidebarPanes || EMPTY_HASH,
 			sidebarPaneOrder: state.preferences.sidebarPaneOrder || AVAILABLE_PANES,
-			userTeams: _sortBy(
-				Object.values(state.teams).filter(t => !t.deactivated),
-				"name"
-			),
-			currentTeamId: state.context.currentTeamId,
+			userTeams: _sortBy(Object.values(state.teams).filter(t => !t.deactivated), "name"),
+			currentTeamId: teamId,
 			serverUrl: state.configs.serverUrl,
 			company: state.companies[team.companyId] || {},
 			team,
 			currentUserId: state.session.userId,
-			currentUserStatus: user.status || EMPTY_STATUS,
+			currentUserStatus: (user.status && user.status[teamId]) || EMPTY_STATUS,
 			currentUserEmail: user.email,
 			pluginVersion: state.pluginVersion,
 			xraySetting: team.settings ? team.settings.xray : "",
@@ -372,7 +369,7 @@ export function EllipsisMenu(props: EllipsisMenuProps) {
 		{ label: "Integrations", action: () => dispatch(openPanel(WebviewPanels.Integrations)) },
 		{
 			label: "Feedback",
-			action: () => openUrl("mailto:team@codestream.com?Subject=CodeStream Feedback")
+			action: () => openUrl("https://github.com/TeamCodeStream/codestream/issues")
 		},
 		{
 			label: "Help",

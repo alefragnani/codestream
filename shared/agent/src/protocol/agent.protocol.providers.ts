@@ -357,6 +357,11 @@ export interface FetchThirdPartyPullRequestRequest {
 	 * if true, clear this PR from the cache and re-fetch from the provider
 	 */
 	force?: boolean;
+	metadata?: any;
+	/**
+	 * for debugging who is calling this
+	 */
+	src?: string;
 }
 
 export interface FetchThirdPartyPullRequestFilesResponse {
@@ -411,6 +416,7 @@ export interface StatusContext {
 
 export interface FetchThirdPartyPullRequestPullRequest {
 	id: string;
+	iid?: string;
 	providerId: string; // e.g. "github*com"
 	// this is the parent repo
 	repository: {
@@ -460,6 +466,13 @@ export interface FetchThirdPartyPullRequestPullRequest {
 		}[];
 	};
 	headRefName: string;
+	headRepositoryOwner?: {
+		login: string;
+	};
+	headRepository?: {
+		isFork: boolean;
+		name: string;
+	};
 	headRefOid: string;
 	labels: {
 		nodes: {
@@ -482,7 +495,24 @@ export interface FetchThirdPartyPullRequestPullRequest {
 		}[];
 	};
 	reviewThreads: {
-		edges: any[];
+		edges: {
+			node: {
+				id: string;
+				isResolved: boolean;
+				viewerCanResolve: boolean;
+				viewerCanUnresolve: boolean;
+				comments: {
+					totalCount: number;
+					nodes: {
+						author: {
+							login: string;
+							avatarUrl: string;
+						};
+						id: string;
+					}[];
+				};
+			};
+		}[];
 	};
 	projectCards: {
 		nodes: {
@@ -497,6 +527,9 @@ export interface FetchThirdPartyPullRequestPullRequest {
 			id: string;
 			createdAt: string;
 			state: string;
+			comments: {
+				totalCount: number;
+			};
 			author: {
 				id: string;
 				login: string;
@@ -511,7 +544,7 @@ export interface FetchThirdPartyPullRequestPullRequest {
 	 * this is a single pending review for the current user (there can only be 1 at a time for
 	 * certain providers, like github)
 	 */
-	pendingReview: {
+	pendingReview?: {
 		id: string;
 		author: {
 			login: string;
@@ -574,6 +607,11 @@ export interface FetchThirdPartyPullRequestPullRequest {
 		login: string;
 		avatarUrl: string;
 	};
+	supports?: {
+		version: {
+			version: string;
+		};
+	};
 }
 
 interface BranchProtectionRule {
@@ -634,6 +672,7 @@ export const FetchThirdPartyPullRequestRequestType = new RequestType<
 export interface FetchThirdPartyPullRequestCommitsRequest {
 	providerId: string;
 	pullRequestId: string;
+	metadata?: any;
 }
 
 export interface FetchThirdPartyPullRequestCommitsResponse {
@@ -641,20 +680,21 @@ export interface FetchThirdPartyPullRequestCommitsResponse {
 	author: {
 		name: string;
 		avatarUrl: string;
-		user: {
+		user?: {
 			login: string;
 		};
 	};
 	committer: {
 		avatarUrl: string;
 		name: string;
-		user: {
+		user?: {
 			login: string;
 		};
 	};
 	message: string;
 	authoredDate: string;
 	oid: string;
+	url?: string;
 }
 
 export const FetchThirdPartyPullRequestCommitsType = new RequestType<
@@ -704,6 +744,15 @@ export const QueryThirdPartyRequestType = new RequestType<
 	void,
 	void
 >("codestream/provider/query");
+
+export interface FetchProviderDefaultPullRequest {}
+export interface FetchProviderDefaultPullResponse {}
+export const FetchProviderDefaultPullRequestsType = new RequestType<
+	FetchProviderDefaultPullRequest,
+	FetchProviderDefaultPullResponse,
+	void,
+	void
+>("codestream/providers/pullrequest/queries");
 
 export interface GetMyPullRequestsRequest {
 	owner?: string;
@@ -786,4 +835,12 @@ export interface ProviderTokenRequest {
 
 export const ProviderTokenRequestType = new RequestType<ProviderTokenRequest, void, void, void>(
 	"codestream/provider/token"
+);
+
+export interface WebviewErrorRequest {
+	error: { message: string; stack: string };
+}
+
+export const WebviewErrorRequestType = new RequestType<WebviewErrorRequest, void, void, void>(
+	`codestream/webview/error`
 );

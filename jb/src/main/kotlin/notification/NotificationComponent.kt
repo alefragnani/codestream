@@ -5,6 +5,7 @@ import com.codestream.agentService
 import com.codestream.codeStream
 import com.codestream.protocols.agent.Codemark
 import com.codestream.protocols.agent.CreateReviewsForUnreviewedCommitsParams
+import com.codestream.protocols.agent.FollowReviewParams
 import com.codestream.protocols.agent.Post
 import com.codestream.protocols.agent.PullRequestNotification
 import com.codestream.protocols.agent.Review
@@ -70,7 +71,8 @@ class NotificationComponent(val project: Project) {
             return
         }
 
-        val text = "Pull Request \"${pullRequestNotification.pullRequest.title}\" ${pullRequestNotification.queryName}"
+	    val verb = if (pullRequestNotification.pullRequest.providerId.contains("gitlab", ignoreCase = true)) "Merge" else "Pull"
+        val text = "${verb} Request \"${pullRequestNotification.pullRequest.title}\" ${pullRequestNotification.queryName}"
 
         val notification = priorityNotificationGroup.createNotification(
             null, null, text, NotificationType.INFORMATION
@@ -141,14 +143,19 @@ class NotificationComponent(val project: Project) {
         notification.notify(project)
     }
 
-    fun didDetectUnreviewedCommits(message: String, sequence: Int) {
+    fun didDetectUnreviewedCommits(message: String, sequence: Int, openReviewId: String?) {
         val notification = notificationGroup.createNotification("Unreviewed code", null, message, NotificationType.INFORMATION)
 
         notification.addAction(NotificationAction.createSimple("Review") {
             GlobalScope.launch {
-                val result = project.agentService?.createReviewsForUnreviewedCommits(CreateReviewsForUnreviewedCommitsParams(sequence))
-                result?.reviewIds?.firstOrNull()?.let {
-                    project.webViewService?.postNotification(ReviewNotifications.Show(it, null, true))
+                if (openReviewId != null) {
+                    project.agentService?.followReview(FollowReviewParams(openReviewId, true))
+                    project.webViewService?.postNotification(ReviewNotifications.Show(openReviewId, null, true))
+                } else {
+                    val result = project.agentService?.createReviewsForUnreviewedCommits(CreateReviewsForUnreviewedCommitsParams(sequence))
+                    result?.reviewIds?.firstOrNull()?.let {
+                        project.webViewService?.postNotification(ReviewNotifications.Show(it, null, true))
+                    }
                 }
             }
             notification.expire()

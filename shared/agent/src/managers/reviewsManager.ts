@@ -79,6 +79,7 @@ import {
 import { Arrays, log, lsp, lspHandler, Strings } from "../system";
 import { gate } from "../system/decorators/gate";
 import { xfs } from "../xfs";
+import * as fs from "fs";
 import { CachedEntityManagerBase, Id } from "./entityManager";
 import { resolveCreatePostResponse, trackReviewPostCreation } from "./postsManager";
 import Timer = NodeJS.Timer;
@@ -108,6 +109,19 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 			version,
 			path
 		};
+	}
+
+	private currentBranches = new Map<string, string | undefined>();
+
+	public async initializeCurrentBranches() {
+		const { git } = SessionContainer.instance();
+		this.currentBranches.clear();
+		const repos = await git.getRepositories();
+		for (const repo of repos) {
+			if (!repo.id) continue;
+			const currentBranch = await git.getCurrentBranch(repo.path, true);
+			this.currentBranches.set(repo.id, currentBranch);
+		}
 	}
 
 	@lspHandler(FetchReviewsRequestType)
@@ -686,7 +700,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 			}
 
 			const localModifications = await git.getHasModifications(repo.path);
-			const localCommits = await git.getLocalCommits(repo.path);
+			const localCommits = await git.getHasLocalCommits(repo.path, request.headRefName);
 			if (request.reviewId && !request.skipLocalModificationsCheck) {
 				if (localModifications) {
 					return {
@@ -695,19 +709,23 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 					};
 				}
 
-				if (localCommits && localCommits.length > 0) {
+				if (localCommits) {
 					return {
 						success: false,
 						error: { type: "HAS_LOCAL_COMMITS" }
 					};
 				}
 			} else {
-				if (localModifications) {
+				const currentBranch = await git.getCurrentBranch(repo.path);
+				// if we're talking about a branch which isn't current, and we
+				// aren't talking about a FR, then we don't care if there are
+				// local uncommitted changes
+				if (localModifications && request.headRefName === currentBranch) {
 					warning = {
 						type: "HAS_LOCAL_MODIFICATIONS"
 					};
 				}
-				if (localCommits && localCommits.length > 0) {
+				if (localCommits) {
 					warning = {
 						type: "HAS_LOCAL_COMMITS"
 					};
@@ -755,10 +773,12 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 								(_: any) => _.baseRefName === baseRefName && _.headRefName === headRefName
 							);
 							if (existingPullRequest) {
-								warning = {
-									type: "ALREADY_HAS_PULL_REQUEST",
-									url: existingPullRequest.url,
-									id: existingPullRequest.id
+								return {
+									success: false,
+									error: {
+										type: "ALREADY_HAS_PULL_REQUEST",
+										url: existingPullRequest.url
+									}
 								};
 							}
 						}
@@ -817,7 +837,16 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				(await xfs.readText(path.join(repo.path, "docs/pull_request_template.md"))) ||
 				(await xfs.readText(path.join(repo.path, "docs/PULL_REQUEST_TEMPLATE.md"))) ||
 				(await xfs.readText(path.join(repo.path, ".github/pull_request_template.md"))) ||
-				(await xfs.readText(path.join(repo.path, ".github/PULL_REQUEST_TEMPLATE.md")));
+				(await xfs.readText(path.join(repo.path, ".github/PULL_REQUEST_TEMPLATE.md"))) ||
+				(await xfs.readText(path.join(repo.path, ".gitlab/merge_request_template.md")));
+
+			let pullRequestTemplateNames: string[] = [];
+			const templatePath = path.join(repo.path, ".gitlab", "merge_request_templates");
+			if (fs.existsSync(templatePath) && fs.lstatSync(templatePath).isDirectory()) {
+				pullRequestTemplateNames = (await fs.readdirSync(templatePath))
+					.filter(filepath => filepath.endsWith(".md"))
+					.map(filepath => filepath.replace(/\.md$/, ""));
+			}
 
 			const baseBranchRemote = await git.getBranchRemote(repo.path, baseRefName!);
 			const commitsBehindOrigin = await git.getBranchCommitsStatus(
@@ -832,6 +861,8 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				remoteUrl: remoteUrl,
 				providerId: providerId,
 				pullRequestTemplate,
+				pullRequestTemplateNames,
+				pullRequestTemplatePath: templatePath,
 				remotes: remotes,
 				origins: originNames,
 				remoteBranch: remoteBranch,
@@ -845,7 +876,9 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 				},
 				branch: headRefName,
 				branches: branches!.branches,
-				remoteBranches: remoteBranches ? remoteBranches.branches : undefined,
+				remoteBranches: remoteBranches
+					? remoteBranches.branches.filter(_ => _.indexOf("HEAD ->") === -1)
+					: undefined,
 				commitsBehindOriginHeadBranch: commitsBehindOrigin,
 				warning: warning
 			};
@@ -1091,7 +1124,19 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 		if (repoId == undefined) {
 			return 0;
 		}
+
 		const { git, session } = SessionContainer.instance();
+		if (git.isRebasing(repo.path)) {
+			return 0;
+		}
+
+		// do not trigger if the user is just switching branches
+		const currentBranch = await git.getCurrentBranch(repo.path, true);
+		if (currentBranch !== this.currentBranches.get(repoId)) {
+			this.currentBranches.set(repoId, currentBranch);
+			return 0;
+		}
+
 		const allReviews = await this.getAllCached();
 		const repoChangesets = flatten(
 			allReviews
@@ -1102,11 +1147,25 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 			flatten(repoChangesets.map(rc => rc.commits.map(c => c.sha)))
 		);
 
+		const openReviews = allReviews.filter(
+			r => !r.deactivated && r.status === "open" && r.reviewChangesets
+		);
+		const commitShasToOpenReviews = new Map<string, string>();
+		for (const review of openReviews) {
+			for (const rc of review.reviewChangesets) {
+				if (rc.repoId !== repo?.id) continue;
+				for (const commit of rc.commits) {
+					commitShasToOpenReviews.set(commit.sha, review.id);
+				}
+			}
+		}
+
 		const gitLog = await git.getLog(repo, 10);
 		if (!gitLog) return 0;
 
 		const myEmail = await git.getConfig(repo.path, "user.email");
 		const unreviewedCommits = [];
+		let openReviewId: string | undefined = undefined;
 		let lastAuthorEmail = undefined;
 		for (const commit of gitLog.values()) {
 			if (lastAuthorEmail === undefined) {
@@ -1114,6 +1173,13 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 			}
 			if (commit.email !== lastAuthorEmail) {
 				// Notify about commits from only one author. They will be grouped in a single review.
+				break;
+			}
+			if (unreviewedCommits.length === 0 && commitShasToOpenReviews.has(commit.ref)) {
+				// Found one that belongs to an existing open review. Notify about this one and take the user
+				// to the existing review.
+				unreviewedCommits.push(commit);
+				openReviewId = commitShasToOpenReviews.get(commit.ref);
 				break;
 			}
 			if (commitShasInReviews.has(commit.ref)) {
@@ -1132,6 +1198,7 @@ export class ReviewsManager extends CachedEntityManagerBase<CSReview> {
 
 		if (unreviewedCommits.length) {
 			session.agent.sendNotification(DidDetectUnreviewedCommitsNotificationType, {
+				openReviewId,
 				sequence,
 				message: `You have ${unreviewedCommits.length} unreviewed commit${
 					unreviewedCommits.length > 0 ? "s" : ""

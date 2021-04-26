@@ -8,37 +8,25 @@ import CancelButton from "./CancelButton";
 import { DelayedRender } from "../Container/DelayedRender";
 import { setCurrentCodemark } from "../store/context/actions";
 import { HostApi } from "../webview-api";
-import { EditorSelectRangeRequestType } from "@codestream/protocols/webview";
 import { useDidMount } from "../utilities/hooks";
 import { getDocumentFromMarker } from "./api-functions";
+import { markItemRead, setUserPreference } from "./actions";
+import { getPreferences, getReadReplies, isUnread } from "../store/users/reducer";
+import { isFeatureEnabled } from "../store/apiVersioning/reducer";
 
-export async function moveCursorToLine(markerId: string) {
-	const hostApi = HostApi.instance;
-	try {
-		const response = await getDocumentFromMarker(markerId);
-
-		if (response) {
-			// Ensure we put the cursor at the right line (don't actually select the whole range)
-			hostApi.send(EditorSelectRangeRequestType, {
-				uri: response.textDocument.uri,
-				selection: {
-					start: response.range.start,
-					end: response.range.start,
-					cursor: response.range.start
-				},
-				preserveFocus: true
-			});
-		}
-	} catch (error) {
-		// TODO:
-	}
-}
-
+const EMPTY_HASH = {};
 export function CodemarkView() {
 	const dispatch = useDispatch();
 	const codemark = useSelector((state: CodeStreamState) => {
 		return getCodemark(state.codemarks, state.context.currentCodemarkId);
 	});
+	const unread = useSelector((state: CodeStreamState) => {
+		return codemark ? isUnread(state, codemark) : false;
+	});
+	const unreadEnabled = useSelector((state: CodeStreamState) =>
+		isFeatureEnabled(state, "readItem")
+	);
+
 	const store = useStore<CodeStreamState>();
 
 	useDidMount(() => {
@@ -48,6 +36,8 @@ export function CodemarkView() {
 		if (codemark == undefined) {
 			// TODO: fetch it when we have the api for that
 			dispatch(setCurrentCodemark());
+		} else if (unread && unreadEnabled) {
+			dispatch(markItemRead(codemark.id, codemark.numReplies || 0));
 		}
 	});
 

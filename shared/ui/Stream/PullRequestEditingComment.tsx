@@ -3,15 +3,17 @@ import { useDispatch, useSelector } from "react-redux";
 import { CodeStreamState } from "../store";
 import styled from "styled-components";
 import { PRButtonRow } from "./PullRequestComponents";
-import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/agent";
+import {
+	FetchThirdPartyPullRequestPullRequest,
+	GitLabMergeRequest
+} from "@codestream/protocols/agent";
 import MessageInput from "./MessageInput";
-import { CSMe } from "@codestream/protocols/api";
 import { Button } from "../src/components/Button";
 import { confirmPopup } from "./Confirm";
 import { api } from "../store/providerPullRequests/actions";
 
 interface Props {
-	pr: FetchThirdPartyPullRequestPullRequest;
+	pr: FetchThirdPartyPullRequestPullRequest | GitLabMergeRequest;
 	setIsLoadingMessage: Function;
 	className?: string;
 	id: string;
@@ -41,7 +43,7 @@ export const PullRequestEditingComment = styled((props: Props) => {
 						? "updatePullRequestBody"
 						: "updateReview",
 					{
-						pullRequestId: pr.id,
+						pullRequestId: "idComputed" in pr ? pr.idComputed : pr.id,
 						id,
 						body: text
 					}

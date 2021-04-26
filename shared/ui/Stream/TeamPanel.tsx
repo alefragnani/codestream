@@ -34,12 +34,12 @@ import { UserStatus } from "../src/components/UserStatus";
 import { SelectPeople } from "../src/components/SelectPeople";
 import { HeadshotName } from "../src/components/HeadshotName";
 import { InlineMenu } from "../src/components/controls/InlineMenu";
-import { isOnPrem } from "../store/configs/reducer";
 import { PaneHeader, Pane, PaneBody, PaneNode, PaneNodeName } from "../src/components/Pane";
 import { Modal } from "./Modal";
 import { Dialog } from "../src/components/Dialog";
 import { PaneState } from "../src/components/Pane";
 import { switchToTeam } from "../store/session/actions";
+import { Link } from "./Link";
 
 export const EMAIL_REGEX = new RegExp(
 	"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
@@ -132,6 +132,7 @@ interface ConnectedProps {
 	// companyMemberCount: number;
 	members: CSUser[];
 	repos: any;
+	company: any;
 	currentUser: CSUser;
 	currentUserInvisible: false;
 	currentUserEmail: string;
@@ -511,8 +512,25 @@ class TeamPanel extends React.Component<Props, State> {
 	}
 
 	renderModifiedRepos(user) {
-		const { repos, teamId, currentUserEmail, collisions, xrayEnabled } = this.props;
+		const {
+			repos,
+			teamId,
+			company,
+			serverUrl,
+			userTeams,
+			currentUserEmail,
+			collisions,
+			xrayEnabled
+		} = this.props;
 		const { modifiedRepos, modifiedReposModifiedAt } = user;
+		let timeDiff = new Date().getTime() - new Date(this.props.company.createdAt).getTime();
+
+		// Check if the team is business or enterprise or was created in <= past 2 weeks
+		const premium = userTeams.find(
+			team =>
+				team.id === teamId &&
+				((team.plan !== "FREEPLAN" && team.plan !== "BUSINESS_EXPIRED") || timeDiff <= 1209600000)
+		);
 
 		if (!xrayEnabled) return null;
 		if (!modifiedRepos || !modifiedRepos[teamId] || !modifiedRepos[teamId].length) return null;
@@ -529,32 +547,60 @@ class TeamPanel extends React.Component<Props, State> {
 					: (authors || []).find(a => a.email === currentUserEmail && a.stomped > 0);
 			const title = (
 				<div style={{ maxWidth: "60vw" }}>
-					<div className="related-label">Local Changes</div>
-					{modifiedFiles.map(f => {
-						const className = collisions.userRepoFiles[user.id + ":" + repo.repoId + ":" + f.file]
-							? "file-has-conflict"
-							: "";
-						return <ChangesetFile className={className} noHover={true} key={f.file} {...f} />;
-					})}
-					{stomp && (
-						<div style={{ paddingTop: "5px" }}>
-							<span className="stomped" style={{ paddingLeft: 0 }}>
-								@{stomp.stomped}
-							</span>{" "}
-							= includes {stomp.stomped} change
-							{stomp.stomped > 1 ? "s" : ""} to code you wrote
-						</div>
-					)}
-					{collisions.userRepos[user.id + ":" + repo.repoId] && (
-						<div style={{ paddingTop: "5px" }}>
-							<Icon name="alert" className="conflict" /> = possible merge conflict
-						</div>
-					)}
-					{modifiedReposModifiedAt && modifiedReposModifiedAt[teamId] && (
-						<div style={{ paddingTop: "5px", color: "var(--text-color-subtle)" }}>
-							Updated
-							<Timestamp relative time={modifiedReposModifiedAt[teamId]} />
-						</div>
+					{premium ? (
+						<>
+							<div className="related-label">Local Changes</div>
+							{modifiedFiles.map(f => {
+								const className = collisions.userRepoFiles[
+									user.id + ":" + repo.repoId + ":" + f.file
+								]
+									? "file-has-conflict"
+									: "";
+								return <ChangesetFile className={className} noHover={true} key={f.file} {...f} />;
+							})}
+							{stomp && (
+								<div style={{ paddingTop: "5px" }}>
+									<span className="stomped" style={{ paddingLeft: 0 }}>
+										@{stomp.stomped}
+									</span>{" "}
+									= includes {stomp.stomped} change
+									{stomp.stomped > 1 ? "s" : ""} to code you wrote
+								</div>
+							)}
+							{collisions.userRepos[user.id + ":" + repo.repoId] && (
+								<div style={{ paddingTop: "5px" }}>
+									<Icon name="alert" className="conflict" /> = possible merge conflict
+								</div>
+							)}
+							{modifiedReposModifiedAt && modifiedReposModifiedAt[teamId] && (
+								<div style={{ paddingTop: "5px", color: "var(--text-color-subtle)" }}>
+									Updated
+									<Timestamp relative time={modifiedReposModifiedAt[teamId]} />
+								</div>
+							)}
+						</>
+					) : (
+						<>
+							{collisions.userRepos[user.id + ":" + repo.repoId] && (
+								<div style={{ paddingTop: "1px" }}>
+									<Icon name="alert" className="conflict" /> = possible merge conflict
+								</div>
+							)}
+							<p>
+								See exactly what {user.username} and the rest of the team are working on with{" "}
+								<b>Team Live View.</b>
+								<br />
+								<br />
+								Increased transparency means increased productivity.
+							</p>
+							<LocalChanges>
+								<Link href={`${serverUrl}/web/subscription/upgrade/${company.id}`}>Upgrade</Link>
+								<p> </p>
+								<Link href="https://docs.codestream.com/userguide/features/myteam-section/#live-view">
+									Learn More
+								</Link>
+							</LocalChanges>
+						</>
 					)}
 				</div>
 			);
@@ -1117,6 +1163,7 @@ const mapStateToProps = state => {
 		dontSuggestInvitees,
 		repos,
 		collisions,
+		company: company,
 		currentUser: currentUser,
 		currentUserId: currentUser.id,
 		currentUserInvisible: invisible,
@@ -1129,7 +1176,7 @@ const mapStateToProps = state => {
 		emailSupported,
 		autoJoinSupported,
 		serverUrl: configs.serverUrl,
-		isOnPrem: isOnPrem(configs),
+		isOnPrem: configs.isOnPrem,
 		hiddenPaneNodes: preferences.hiddenPaneNodes || EMPTY_HASH_2,
 		userTeams: _sortBy(
 			Object.values(teams).filter((t: any) => !t.deactivated),
@@ -1147,3 +1194,10 @@ const ConnectedTeamPanel = connect(mapStateToProps, {
 })(TeamPanel);
 
 export { ConnectedTeamPanel as TeamPanel };
+
+const LocalChanges = styled.div`
+	text-align: center;
+	padding: 1px;
+	display: flex;
+	justify-content: space-around;
+`;

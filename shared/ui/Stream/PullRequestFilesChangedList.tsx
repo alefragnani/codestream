@@ -130,19 +130,23 @@ interface Props extends CompareFilesProps {
 	filesChanged: any[];
 	isLoading: boolean;
 	pr?: FetchThirdPartyPullRequestPullRequest;
-	fetch?: Function;
 	setIsLoadingMessage?: Function;
 	readOnly?: boolean;
 	commitBased?: boolean;
+	accessRawDiffs?: boolean;
+	setAccessRawDiffs?: Function;
 }
 
 export const PullRequestFilesChangedList = (props: Props) => {
-	const { filesChanged, fetch, isLoading, pr } = props;
+	const { filesChanged, isLoading, pr } = props;
 	const dispatch = useDispatch();
 	const derivedState = useSelector((state: CodeStreamState) => {
-		const ideName = state.ide.name && state.ide.name.toUpperCase();
+		const ideName = state.ide?.name?.toUpperCase();
 		const requiresDiffHunkView = ideName === "VS" || ideName === "ATOM";
 		return {
+			currentPullRequestProviderId: state.context.currentPullRequest
+				? state.context.currentPullRequest.providerId
+				: undefined,
 			currentRepo: getProviderPullRequestRepo(state),
 			diffSelectorEnabled: !requiresDiffHunkView,
 			pullRequestFilesChangedMode: requiresDiffHunkView
@@ -209,21 +213,56 @@ export const PullRequestFilesChangedList = (props: Props) => {
 		})();
 	}, [pr, filesChanged]);
 
-	const commentMap = React.useMemo(() => {
-		const map = {} as any;
-		const reviews = pr
-			? pr.timelineItems.nodes.filter(node => node.__typename === "PullRequestReview")
-			: [];
-		reviews.forEach(review => {
-			if (review.comments) {
-				review.comments.nodes.forEach(comment => {
-					if (!map[comment.path]) map[comment.path] = [];
-					map[comment.path].push({ review, comment });
+	const commentMap: {
+		[commentFilePath: string]: {
+			review: any;
+			comment: any;
+		}[];
+	} = React.useMemo(() => {
+		const map = {} as {
+			[commentFilePath: string]: {
+				review: any;
+				comment: any;
+			}[];
+		};
+		if (
+			derivedState.currentPullRequestProviderId === "github*com" ||
+			derivedState.currentPullRequestProviderId === "github/enterprise"
+		) {
+			const reviews =
+				pr && pr.timelineItems
+					? pr.timelineItems.nodes.filter(node => node.__typename === "PullRequestReview")
+					: [];
+			reviews.forEach(review => {
+				if (review.comments) {
+					review.comments.nodes.forEach(comment => {
+						if (!map[comment.path]) map[comment.path] = [];
+						map[comment.path].push({ review, comment });
+					});
+				}
+			});
+		} else if (
+			pr &&
+			(derivedState.currentPullRequestProviderId === "gitlab*com" ||
+				derivedState.currentPullRequestProviderId === "gitlab/enterprise")
+		) {
+			(pr as any)
+				.discussions!.nodes.filter(_ => _.notes)
+				.map(_ => _.notes.nodes[0])
+				.forEach(comment => {
+					if (comment && comment.position && comment.position.newPath) {
+						if (!map[comment.position.newPath]) map[comment.position.newPath] = [];
+						map[comment.position.newPath].push({
+							review: {
+								state: comment.state
+							},
+							comment: comment
+						});
+					}
 				});
-			}
-		});
+		}
 		return map;
-	}, [pr]);
+	}, [pr?.updatedAt, derivedState.currentPullRequestProviderId]);
 
 	if (isLoading || isLoadingVisited)
 		return (
@@ -294,7 +333,7 @@ export const PullRequestFilesChangedList = (props: Props) => {
 		// handleTextInputFocus(comment.databaseId);
 		focusOnMessageInput &&
 			focusOnMessageInput(() => {
-				insertText && insertText(text.replace(/^/gm, "> "));
+				insertText && insertText(text.replace(/^/gm, "> ") + "\n");
 				insertNewline && insertNewline();
 			});
 	};
@@ -354,7 +393,6 @@ export const PullRequestFilesChangedList = (props: Props) => {
 							<PullRequestFinishReview
 								pr={pr}
 								mode="dropdown"
-								fetch={props.fetch!}
 								setIsLoadingMessage={props.setIsLoadingMessage!}
 								setFinishReviewOpen={setFinishReviewOpen}
 							/>
@@ -380,6 +418,8 @@ export const PullRequestFilesChangedList = (props: Props) => {
 					toggleDirectory={toggleDirectory}
 					commentMap={commentMap}
 					commitBased={props.commitBased}
+					accessRawDiffs={props.accessRawDiffs}
+					setAccessRawDiffs={props.setAccessRawDiffs}
 				/>
 			) : (
 				<PRDiffHunks>
@@ -405,7 +445,7 @@ export const PullRequestFilesChangedList = (props: Props) => {
 											className="clickable"
 											onClick={e => copy(_.filename)}
 										/>{" "}
-										{pr && (
+										{pr && pr.url && (
 											<Link
 												href={pr.url.replace(
 													/\/pull\/\d+$/,
@@ -460,7 +500,6 @@ export const PullRequestFilesChangedList = (props: Props) => {
 										comments={comments}
 										setIsLoadingMessage={props.setIsLoadingMessage}
 										quote={quote}
-										fetch={props.fetch!}
 									/>
 								)}
 							</PRDiffHunk>

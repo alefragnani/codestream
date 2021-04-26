@@ -33,15 +33,18 @@ export enum ReportSuppressedMessages {
 	/* for network errors that are probably temporary */
 	NetworkError = "Network error",
 	/* OAuth app access restrictions */
-	OAuthAppAccessRestrictionError = "OAuth app access restriction error"
+	OAuthAppAccessRestrictionError = "OAuth app access restriction error",
+	/* Some GitLab configurations require users to accept a Terms of Service before they can do anything */
+	GitLabTermsOfService = "Must accept GitLab Terms of Service"
 }
 
+/**
+ * InternalErrors thrown are ignored by Sentry
+ * based on its class name (InternalError)
+ */
 export class InternalError extends AgentError {
-	public suppressReporting: boolean;
-
 	constructor(message: string, info: any = {}) {
 		super(message, info);
 		this.name = "InternalError";
-		this.suppressReporting = true;
 	}
 }

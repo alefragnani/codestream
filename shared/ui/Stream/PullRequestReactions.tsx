@@ -8,11 +8,18 @@ import styled from "styled-components";
 import { PRReactions, PRReaction } from "./PullRequestComponents";
 import Tooltip from "./Tooltip";
 import { SmartFormattedList } from "./SmartFormattedList";
-import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/agent";
+import {
+	FetchThirdPartyPullRequestPullRequest,
+	GitLabMergeRequest
+} from "@codestream/protocols/agent";
 import { api } from "../store/providerPullRequests/actions";
+import {
+	PullRequestReactButton as GitLabPullRequestReactButton,
+	PullRequestReactions as GitLabPullRequestReactions
+} from "./PullRequests/GitLab/PullRequestReactions";
 
 interface Props {
-	pr: FetchThirdPartyPullRequestPullRequest;
+	pr: FetchThirdPartyPullRequestPullRequest | GitLabMergeRequest;
 	targetId: string;
 	setIsLoadingMessage: Function;
 	className?: string;
@@ -42,6 +49,10 @@ export const PullRequestReactButton = styled((props: Props) => {
 	const [open, setOpen] = React.useState<EventTarget | undefined>();
 	const [menuTitle, setMenuTitle] = React.useState("");
 
+	if (props.pr.providerId.includes("gitlab")) {
+		return <GitLabPullRequestReactButton {...(props as any)} />;
+	}
+
 	const saveReaction = async (key: string, onOff: boolean) => {
 		props.setIsLoadingMessage("Saving Reaction...");
 		setOpen(undefined);
@@ -53,6 +64,8 @@ export const PullRequestReactButton = styled((props: Props) => {
 				onOff
 			})
 		);
+
+		props.setIsLoadingMessage("");
 	};
 
 	const isMine = (key: string) => {
@@ -151,6 +164,11 @@ const REACTION_NAME_MAP = {
 
 export const PullRequestReactions = (props: ReactionProps) => {
 	const { reactionGroups } = props;
+
+	if (props.pr.providerId.includes("gitlab")) {
+		return <GitLabPullRequestReactions {...(props as any)} />;
+	}
+
 	if (!reactionGroups) return null;
 
 	const dispatch = useDispatch();
@@ -164,6 +182,7 @@ export const PullRequestReactions = (props: ReactionProps) => {
 				onOff
 			})
 		);
+		props.setIsLoadingMessage("");
 	};
 
 	const me = props.pr.viewer.login;

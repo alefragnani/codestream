@@ -1,42 +1,37 @@
-import React, { useState, useReducer } from "react";
-import {
-	FetchThirdPartyPullRequestPullRequest,
-	ExecuteThirdPartyTypedType
-} from "../protocols/agent/agent.protocol.providers";
+import React, { useState } from "react";
 import { PRCommentCard, ButtonRow } from "./PullRequestComponents";
 import MessageInput from "./MessageInput";
 import { RadioGroup, Radio } from "../src/components/RadioGroup";
-import { useDispatch, useSelector } from "react-redux";
-import { CodeStreamState } from "../store";
-import { CSMe } from "../protocols/agent/api.protocol.models";
+import { useDispatch } from "react-redux";
 import { HostApi } from "..";
 import { Button } from "../src/components/Button";
 import Tooltip from "./Tooltip";
 import { api } from "../store/providerPullRequests/actions";
 import { replaceHtml } from "../utils";
+import { FetchThirdPartyPullRequestPullRequest } from "@codestream/protocols/agent";
 
 export const PullRequestFinishReview = (props: {
-	pr: FetchThirdPartyPullRequestPullRequest;
+	pr:
+		| {
+				providerId: string;
+				viewerDidAuthor: boolean;
+				pendingReview?: {
+					id: string;
+					author: {
+						login: string;
+						avatarUrl: string;
+					};
+					comments?: {
+						totalCount: number;
+					};
+				};
+		  }
+		| FetchThirdPartyPullRequestPullRequest;
 	mode: "dropdown" | "timeline";
-	fetch: Function;
 	setIsLoadingMessage: Function;
 	setFinishReviewOpen?: Function;
 }) => {
 	const dispatch = useDispatch();
-	const derivedState = useSelector((state: CodeStreamState) => {
-		const currentUser = state.users[state.session.userId!] as CSMe;
-		const team = state.teams[state.context.currentTeamId];
-		return {
-			reviewsState: state.reviews,
-			currentUser,
-			currentPullRequestId: state.context.currentPullRequest
-				? state.context.currentPullRequest.id
-				: undefined,
-			composeCodemarkActive: state.context.composeCodemarkActive,
-			team
-		};
-	});
-
 	const [reviewText, setReviewText] = useState("");
 	const [submittingReview, setSubmittingReview] = useState(false);
 	const [reviewType, setReviewType] = useState<"COMMENT" | "APPROVE" | "REQUEST_CHANGES">(
@@ -44,7 +39,9 @@ export const PullRequestFinishReview = (props: {
 	);
 	const [isPreviewing, setIsPreviewing] = useState(false);
 
-	const { pr, mode, fetch, setIsLoadingMessage, setFinishReviewOpen } = props;
+	const { pr, mode, setIsLoadingMessage, setFinishReviewOpen } = props;
+
+	const supportsFinishReviewTypes = !pr.providerId.includes("gitlab");
 
 	const submitReview = async e => {
 		setIsLoadingMessage("Submitting Review...");
@@ -60,7 +57,7 @@ export const PullRequestFinishReview = (props: {
 			})
 		);
 		setFinishReviewOpen && setFinishReviewOpen(false);
-		return fetch();
+		setIsLoadingMessage("");
 	};
 
 	const cancelReview = async (e, id) => {
@@ -71,7 +68,7 @@ export const PullRequestFinishReview = (props: {
 			})
 		);
 		setFinishReviewOpen && setFinishReviewOpen(false);
-		fetch();
+		setIsLoadingMessage("");
 	};
 
 	const pendingCommentCount =
@@ -96,7 +93,7 @@ export const PullRequestFinishReview = (props: {
 				/>
 				<div style={{ clear: "both" }}></div>
 			</div>
-			{!isPreviewing && (
+			{!isPreviewing && supportsFinishReviewTypes && (
 				<RadioGroup
 					name="approval"
 					selectedValue={reviewType}
@@ -141,11 +138,15 @@ export const PullRequestFinishReview = (props: {
 			)}
 			{!isPreviewing && (
 				<ButtonRow>
-					<Button isLoading={submittingReview} onClick={submitReview}>
+					<Button
+						disabled={!pendingCommentCount && !supportsFinishReviewTypes}
+						isLoading={submittingReview}
+						onClick={submitReview}
+					>
 						Submit<span className="wide-text"> review</span>
 					</Button>
 					{pendingCommentCount > 0 && (
-						<Button variant="secondary" onClick={e => cancelReview(e, pr.pendingReview.id)}>
+						<Button variant="secondary" onClick={e => cancelReview(e, pr.pendingReview?.id)}>
 							Cancel review
 						</Button>
 					)}

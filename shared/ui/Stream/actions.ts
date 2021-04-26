@@ -36,7 +36,8 @@ import {
 	SetCodemarkPinnedRequestType,
 	CodemarkPlus,
 	GetPostRequestType,
-	CreateThirdPartyPostRequestType
+	CreateThirdPartyPostRequestType,
+	MarkItemReadRequestType
 } from "@codestream/protocols/agent";
 import { CSPost, StreamType, CSReviewStatus } from "@codestream/protocols/api";
 import { logError } from "../logger";
@@ -108,6 +109,14 @@ export const markPostUnread = (streamId: string, postId: string) => () => {
 		.send(MarkPostUnreadRequestType, { streamId, postId })
 		.catch(error =>
 			logError(`There was an error marking a post unread: ${error}`, { streamId, postId })
+		);
+};
+
+export const markItemRead = (itemId: string, numReplies: number) => () => {
+	HostApi.instance
+		.send(MarkItemReadRequestType, { itemId, numReplies })
+		.catch(error =>
+			logError(`There was an error marking an item read: ${error}`, { itemId, numReplies })
 		);
 };
 
@@ -572,11 +581,12 @@ export const setUserStatus = (
 	ticketId: string,
 	ticketUrl: string,
 	ticketProvider: string,
-	invisible: boolean
+	invisible: boolean,
+	teamId: string
 ) => async dispatch => {
 	try {
 		const response = await HostApi.instance.send(UpdateStatusRequestType, {
-			status: { label, ticketId, ticketUrl, ticketProvider, invisible }
+			status: { [teamId]: { label, ticketId, ticketUrl, ticketProvider, invisible } }
 		});
 		dispatch(updateUser(response.user));
 	} catch (error) {
@@ -901,7 +911,7 @@ const describeStatusChange = (action: CSReviewStatus) => {
 		// case "pending":
 		// return "requested changes in";
 		case "rejected":
-			return "rejected";
+			return "requested changes in";
 		default:
 			return action;
 	}

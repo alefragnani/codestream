@@ -13,9 +13,9 @@ CodeStream is a developer collaboration platform that integrates all of your ess
 - CodeStream requires Visual Studio 2017 or later, and is also available for [JetBrains](https://plugins.jetbrains.com/plugin/12206-codestream), [VS Code](https://marketplace.visualstudio.com/items?itemName=CodeStream.codestream) or [Atom](https://atom.io/packages/codestream).
 - Your repository must be managed by Git, or a Git hosting service like GitHub.
 
-# Create and Review GitHub Pull Requests in Visual Studio
+# Create and Review GitHub and GitLab Pull Requests in Visual Studio
 
-Create, review and merge pull requests inside Visual Studio, with full source-tree and full file access, your favorite keybindings, built-in diff too, and code intelligence.
+Create, review and merge GitHub pull requests and GitLab merge requests inside Visual Studio, with full source-tree and full file access, your favorite keybindings, built-in diff tool, and code intelligence.
 
 ![Pull Request](https://raw.githubusercontent.com/TeamCodeStream/codestream-guide/develop/docs/src/assets/images/PullRequest-VS.png)
 
@@ -29,7 +29,7 @@ CodeStream’s feedback requests are so easy that you can start doing them throu
 
 # Simplified Code Discussion
 
-Rather than copying & pasting, CodeStream enables in-editor commenting on any code in your repository, with optional sharing to Slack, Teams or via email, with automatic at-mentioning of code authors via git blame.
+Rather than copying & pasting, CodeStream enables in-editor commenting on any code in your repository, with optional sharing to Slack, MS Teams or via email, with automatic at-mentioning of code authors via git blame.
 
 ![CodeStream](https://raw.githubusercontent.com/TeamCodeStream/CodeStream/master/images/animated/DiscussCode-VS.gif)
 
